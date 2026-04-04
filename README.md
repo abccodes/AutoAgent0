@@ -31,6 +31,8 @@
 
 # Installation
 
+If you are installing on a shared server, lab machine, or any environment with custom cache paths, read [docs/shared-server-setup.md](docs/shared-server-setup.md) first.
+
 First, install [pixi](https://pixi.sh/latest/):
 
 ``` bash
