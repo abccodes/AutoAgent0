@@ -15,6 +15,9 @@ class COLMAPAuto:
         self.path_ba = os.path.join(self.path_dense, 'colmap_sparse_ba')
         self.path_sparse = os.path.join(self.path_dense, 'colmap_sparse')
         self.file_rescale = os.path.join(self.path_dense, 'colmap2world.json')
+        self.colmap_bin = os.environ.get("COLMAP_BIN", "colmap")
+        self.sift_use_gpu = os.environ.get("COLMAP_SIFT_USE_GPU", "1")
+        self.match_use_gpu = os.environ.get("COLMAP_MATCH_USE_GPU", "1")
 
     def remove_database(self):
         if os.path.exists(self.path_database):
@@ -32,14 +35,14 @@ class COLMAPAuto:
         self.remove_database()
 
         self([
-            'colmap', 'feature_extractor',
+            self.colmap_bin, 'feature_extractor',
             '--database_path', self.path_database,
             '--image_path', self.path_images,
             # '--ImageReader.camera_params', cam_calib_in,
             '--ImageReader.mask_path', self.path_masks,
             '--ImageReader.single_camera_per_folder', '1',
             '--ImageReader.camera_model', 'PINHOLE ',
-            '--SiftExtraction.use_gpu', '1',
+            '--SiftExtraction.use_gpu', self.sift_use_gpu,
             # '--SiftExtraction.max_num_features', '8192',
             # '--SiftExtraction.estimate_affine_shape', '0',
             '--SiftExtraction.upright', '1',
@@ -51,10 +54,10 @@ class COLMAPAuto:
             assert FileNotFoundError(f'database file required')
 
         self([
-            'colmap', 'sequential_matcher',
+            self.colmap_bin, 'sequential_matcher',
             '--database_path', self.path_database,
             '--SequentialMatching.overlap', '60',
-            '--SiftMatching.use_gpu', '1',  # use gpu or not
+            '--SiftMatching.use_gpu', self.match_use_gpu,  # use gpu or not
         ])
 
     def vocab_matcher(self, vocab_tree_path):
@@ -62,7 +65,7 @@ class COLMAPAuto:
             assert FileNotFoundError(f'database file required')
 
         self([
-            'colmap', 'vocab_tree_matcher',
+            self.colmap_bin, 'vocab_tree_matcher',
             '--database_path', self.path_database,
             '--VocabTreeMatching.vocab_tree_path', vocab_tree_path,
             '--SiftMatching.guided_matching', '1'
@@ -72,7 +75,7 @@ class COLMAPAuto:
         os.makedirs(self.path_tri, exist_ok=True)
 
         self([
-            'colmap', 'point_triangulator',
+            self.colmap_bin, 'point_triangulator',
             '--database_path', self.path_database,
             '--image_path', self.path_images,
             '--input_path', self.path_prior,
@@ -83,7 +86,7 @@ class COLMAPAuto:
         os.makedirs(self.path_ba, exist_ok=True)
 
         self([
-            'colmap', 'point_triangulator',
+            self.colmap_bin, 'point_triangulator',
             '--database_path', self.path_database,
             '--image_path', self.path_images,
             '--input_path', self.path_ba,
@@ -102,7 +105,7 @@ class COLMAPAuto:
         os.makedirs(self.path_ba, exist_ok=True)
 
         self([
-            'colmap', 'bundle_adjuster',
+            self.colmap_bin, 'bundle_adjuster',
             '--input_path', self.path_tri,
             '--output_path', self.path_ba,
             '--BundleAdjustment.max_num_iterations', '30',
@@ -115,7 +118,7 @@ class COLMAPAuto:
     def rigid_ba(self, path_rigid):
 
         self([
-            'colmap', 'rig_bundle_adjuster',
+            self.colmap_bin, 'rig_bundle_adjuster',
             '--input_path', self.path_tri,
             '--output_path', self.path_ba,
             '--rig_config_path', path_rigid,
@@ -136,7 +139,7 @@ class COLMAPAuto:
         os.makedirs(self.path_sparse, exist_ok=True)
 
         self([
-            'colmap', 'mapper',
+            self.colmap_bin, 'mapper',
             '--database_path', self.path_database,
             '--image_path', self.path_images,
             '--output_path', self.path_sparse,

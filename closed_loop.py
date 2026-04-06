@@ -9,6 +9,7 @@ from sim.utils.sim_utils import traj2control, traj_transform_to_global
 import pickle
 import json
 import pickle
+import struct
 from sim.utils.launch_ad import launch, check_alive
 from omegaconf import OmegaConf
 import open3d as o3d
@@ -27,6 +28,28 @@ def to_video(observations, output_path):
     clip.write_videofile(output_path)
 
 
+def write_pipe_message(pipe_path, payload_obj):
+    payload = pickle.dumps(payload_obj, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(pipe_path, "wb") as pipe:
+        pipe.write(struct.pack("<Q", len(payload)))
+        pipe.write(payload)
+
+
+def read_pipe_message(pipe_path):
+    with open(pipe_path, "rb") as pipe:
+        header = pipe.read(8)
+        if len(header) != 8:
+            raise EOFError(f"Incomplete pipe header from {pipe_path}")
+        payload_size = struct.unpack("<Q", header)[0]
+        payload = bytearray()
+        while len(payload) < payload_size:
+            chunk = pipe.read(payload_size - len(payload))
+            if not chunk:
+                raise EOFError(f"Incomplete pipe payload from {pipe_path}")
+            payload.extend(chunk)
+    return pickle.loads(payload)
+
+
 def create_gym_env(cfg, output):
 
     env = gymnasium.make('hugsim_env/HUGSim-v0', cfg=cfg, output=output)
@@ -39,10 +62,10 @@ def create_gym_env(cfg, output):
 
     obs_pipe = os.path.join(output, 'obs_pipe')
     plan_pipe = os.path.join(output, 'plan_pipe')
-    if not os.path.exists(obs_pipe):
-        os.mkfifo(obs_pipe)
-    if not os.path.exists(plan_pipe):
-        os.mkfifo(plan_pipe)
+    for pipe_path in (obs_pipe, plan_pipe):
+        if os.path.exists(pipe_path):
+            os.remove(pipe_path)
+        os.mkfifo(pipe_path)
     print('Ready for simulation')
 
     obs, info = None, None
@@ -55,10 +78,8 @@ def create_gym_env(cfg, output):
 
         print('ego pose', info['ego_pos'])
 
-        with open(obs_pipe, "wb") as pipe:
-            pipe.write(pickle.dumps((obs, info)))
-        with open(plan_pipe, "rb") as pipe:
-            plan_traj = pickle.loads(pipe.read())
+        write_pipe_message(obs_pipe, (obs, info))
+        plan_traj = read_pipe_message(plan_pipe)
 
         if plan_traj is not None:
             acc, steer_rate = traj2control(plan_traj, info)
@@ -70,6 +91,7 @@ def create_gym_env(cfg, output):
 
         else:  # AD Side Crushed
             done = True
+            break
 
         imu_plan_traj = plan_traj[:, [1, 0]]
         imu_plan_traj[:, 1] *= -1
@@ -88,13 +110,15 @@ def create_gym_env(cfg, output):
             'rc': info['rc']
         })
 
-    with open(obs_pipe, "wb") as pipe:
-        pipe.write(pickle.dumps('Done'))
+    write_pipe_message(obs_pipe, 'Done')
 
     with open(os.path.join(output, 'data.pkl'), 'wb') as wf:
         pickle.dump([save_data], wf)
         
-    to_video(observations_save, os.path.join(output, 'video.mp4'))
+    try:
+        to_video(observations_save, os.path.join(output, 'video.mp4'))
+    except Exception as exc:
+        print(f"Skipping video export due to error: {exc}")
     with open(os.path.join(output, 'infos.pkl'), 'wb') as wf:
         pickle.dump(infos_save, wf)
     
@@ -112,6 +136,7 @@ if __name__ == "__main__":
     parser.add_argument("--base_path", type=str, required=True)
     parser.add_argument("--camera_path", type=str, required=True)
     parser.add_argument("--kinematic_path", type=str, required=True)
+    parser.add_argument("--planner_path", type=str, default="")
     parser.add_argument('--ad', default="uniad")
     parser.add_argument('--ad_cuda', default="1")
     args = parser.parse_args()
@@ -120,11 +145,18 @@ if __name__ == "__main__":
     base_config = OmegaConf.load(args.base_path)
     camera_config = OmegaConf.load(args.camera_path)
     kinematic_config = OmegaConf.load(args.kinematic_path)
+    planner_path = args.planner_path
+    if not planner_path:
+        inferred_planner_path = os.path.join("configs", "planners", f"{args.ad}.yaml")
+        if os.path.exists(inferred_planner_path):
+            planner_path = inferred_planner_path
+    planner_config = OmegaConf.load(planner_path) if planner_path else OmegaConf.create()
     cfg = OmegaConf.merge(
         {"scenario": scenario_config},
         {"base": base_config},
         {"camera": camera_config},
-        {"kinematic": kinematic_config}
+        {"kinematic": kinematic_config},
+        {"planner": planner_config},
     )
     cfg.base.output_dir = cfg.base.output_dir + args.ad
 
@@ -141,10 +173,25 @@ if __name__ == "__main__":
         ad_path = cfg.base.vad_path
     elif args.ad == 'ltf':
         ad_path = cfg.base.ltf_path
+    elif args.ad == 'rap':
+        ad_path = cfg.planner.rap.launch_path
     else:
         raise NotImplementedError
-    
-    process = launch(ad_path, args.ad_cuda, output)
+
+    extra_env = {}
+    if args.ad == 'rap':
+        rap_camera_order = cfg.planner.rap.get('camera_order', [])
+        extra_env = {
+            'RAP_REPO_ROOT': cfg.planner.rap.get('repo_root', ''),
+            'RAP_CHECKPOINT': cfg.planner.rap.get('checkpoint', ''),
+            'RAP_PYTHON_BIN': cfg.planner.rap.get('python_bin', 'python'),
+            'RAP_DEVICE': cfg.planner.rap.get('device', 'cuda'),
+            'RAP_IMAGE_SCALE': cfg.planner.rap.get('image_scale', 0.4),
+        }
+        if rap_camera_order:
+            extra_env['RAP_CAMERA_ORDER'] = ",".join(rap_camera_order)
+
+    process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
     try:
         create_gym_env(cfg, output)
         check_alive(process)

@@ -1,15 +1,20 @@
 import subprocess
 import time
 import os
+import shutil
 
 
-def launch(shell_path, cuda_id, output):
+def launch(shell_path, cuda_id, output, extra_env=None):
     os.makedirs(output, exist_ok=True)
     print(os.path.join(output, 'output.txt'))
     print(shell_path, cuda_id, output)
+    env = os.environ.copy()
+    if extra_env:
+        env.update({key: str(value) for key, value in extra_env.items() if value is not None})
+    shell = shutil.which("zsh") or shutil.which("bash") or "bash"
     with open(os.path.join(output, 'output.txt'), 'w') as f:
         process = subprocess.Popen(
-            ["zsh", shell_path, cuda_id, output], stdout=f, stderr=f
+            [shell, shell_path, cuda_id, output], stdout=f, stderr=f, env=env
         )
     return process
 
