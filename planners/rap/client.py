@@ -45,6 +45,7 @@ DEFAULT_CAM_ORDER = [
     "CAM_FRONT_LEFT",
     "CAM_FRONT_RIGHT",
 ]
+DEFAULT_OUTPUT_POSES = 8
 
 MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
 STD = np.array([58.395, 57.12, 57.375], dtype=np.float32)
@@ -58,6 +59,7 @@ class AdapterConfig:
     camera_order: Sequence[str]
     image_scale: float
     device: torch.device
+    debug_diagnostics: bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,10 +86,10 @@ def resolve_config(args: argparse.Namespace) -> AdapterConfig:
         output_dir=output_dir,
         rap_repo_root=rap_repo_root.resolve(),
         checkpoint_path=checkpoint_path.resolve(),
-        # Keep HUGSIM aligned with RAP's training-time camera order.
         camera_order=list(DEFAULT_CAM_ORDER),
         image_scale=image_scale,
         device=torch.device(device_name),
+        debug_diagnostics=os.environ.get("RAP_DEBUG_DIAGNOSTICS", "0") == "1",
     )
 
 
@@ -298,8 +300,45 @@ def main() -> int:
             obs, info = message
             features = build_features(obs, info, cfg)
             with torch.no_grad():
-                predictions = model(features, targets=None, return_score=False)
-            trajectory = predictions["trajectory"][0].detach().cpu().numpy()
+                if cfg.debug_diagnostics:
+                    predictions = model(features, targets=None, return_score=True)
+                    scores = predictions["score"][0].detach().cpu().numpy()
+                    proposals = predictions["trajectory"][0].detach().cpu().numpy()
+                    best_idx = int(np.argmax(scores))
+                    trajectory = proposals[best_idx, :DEFAULT_OUTPUT_POSES]
+                    best_xy = trajectory[:, :2]
+                    step_norms = np.linalg.norm(np.diff(best_xy, axis=0), axis=1)
+                    top_indices = np.argsort(scores)[-3:][::-1]
+                    top_summary = []
+                    for idx in top_indices:
+                        proposal_xy = proposals[idx, :DEFAULT_OUTPUT_POSES, :2]
+                        proposal_steps = np.linalg.norm(np.diff(proposal_xy, axis=0), axis=1)
+                        top_summary.append(
+                            (
+                                int(idx),
+                                float(scores[idx]),
+                                float(np.linalg.norm(proposal_xy[-1] - proposal_xy[0])),
+                                float(proposal_steps.sum()),
+                            )
+                        )
+                    logging.info(
+                        "ts=%.2f cmd=%s velo=%.3f best=%d score_max=%.4f score_mean=%.4f "
+                        "traj_extent=%.3f traj_path=%.3f min_step=%.4f max_step=%.4f top3=%s",
+                        float(info["timestamp"]),
+                        info.get("command"),
+                        float(info["ego_velo"]),
+                        best_idx,
+                        float(scores[best_idx]),
+                        float(scores.mean()),
+                        float(np.linalg.norm(best_xy[-1] - best_xy[0])),
+                        float(step_norms.sum()),
+                        float(step_norms.min(initial=0.0)),
+                        float(step_norms.max(initial=0.0)),
+                        top_summary,
+                    )
+                else:
+                    predictions = model(features, targets=None, return_score=False)
+                    trajectory = predictions["trajectory"][0, :DEFAULT_OUTPUT_POSES].detach().cpu().numpy()
             plan = rap_to_hugsim_plan(trajectory)
             write_plan(plan_pipe, plan)
         except Exception:
