@@ -59,7 +59,8 @@ def traj2control(plan_traj, info):
     plan_traj_stats[1:, :2] = plan_traj[:, [1,0]]
     prev_a, prev_b = 0.0, 0.0
     for i, (a, b) in enumerate(plan_traj):
-        rot = np.arctan2(b - prev_b, a - prev_a)
+        # plan2control expects heading in the swapped [forward, right] frame.
+        rot = np.arctan2(a - prev_a, b - prev_b)
         rot = np.where(rot > np.pi/2, rot - np.pi, rot)
         rot = np.where(rot < -np.pi/2, rot + np.pi, rot)
         plan_traj_stats[i+1, 2] = rot

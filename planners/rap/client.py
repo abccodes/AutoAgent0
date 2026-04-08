@@ -71,12 +71,6 @@ def resolve_config(args: argparse.Namespace) -> AdapterConfig:
     rap_repo_root_raw = os.environ.get("RAP_REPO_ROOT", "").strip()
     checkpoint_path_raw = os.environ.get("RAP_CHECKPOINT", "").strip()
     image_scale = float(os.environ.get("RAP_IMAGE_SCALE", "0.4"))
-    camera_order_raw = os.environ.get("RAP_CAMERA_ORDER", ",".join(DEFAULT_CAM_ORDER)).strip()
-    camera_order = [
-        cam.strip()
-        for cam in camera_order_raw.split(",")
-        if cam.strip()
-    ]
     device_name = os.environ.get("RAP_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
     if device_name == "cuda" and not torch.cuda.is_available():
         device_name = "cpu"
@@ -86,13 +80,12 @@ def resolve_config(args: argparse.Namespace) -> AdapterConfig:
         raise ValueError("RAP_CHECKPOINT is not set")
     rap_repo_root = Path(rap_repo_root_raw).expanduser()
     checkpoint_path = Path(checkpoint_path_raw).expanduser()
-    if not camera_order:
-        camera_order = list(DEFAULT_CAM_ORDER)
     return AdapterConfig(
         output_dir=output_dir,
         rap_repo_root=rap_repo_root.resolve(),
         checkpoint_path=checkpoint_path.resolve(),
-        camera_order=camera_order,
+        # Keep HUGSIM aligned with RAP's training-time camera order.
+        camera_order=list(DEFAULT_CAM_ORDER),
         image_scale=image_scale,
         device=torch.device(device_name),
     )

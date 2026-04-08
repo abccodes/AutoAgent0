@@ -180,7 +180,6 @@ if __name__ == "__main__":
 
     extra_env = {}
     if args.ad == 'rap':
-        rap_camera_order = cfg.planner.rap.get('camera_order', [])
         extra_env = {
             'RAP_REPO_ROOT': cfg.planner.rap.get('repo_root', ''),
             'RAP_CHECKPOINT': cfg.planner.rap.get('checkpoint', ''),
@@ -188,8 +187,6 @@ if __name__ == "__main__":
             'RAP_DEVICE': cfg.planner.rap.get('device', 'cuda'),
             'RAP_IMAGE_SCALE': cfg.planner.rap.get('image_scale', 0.4),
         }
-        if rap_camera_order:
-            extra_env['RAP_CAMERA_ORDER'] = ",".join(rap_camera_order)
 
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
     try:
