@@ -5,7 +5,17 @@ sys.path.append(os.getcwd())
 import gymnasium
 import hugsim_env
 from argparse import ArgumentParser
-from sim.utils.sim_utils import traj2control, traj_transform_to_global
+from sim.utils.sim_utils import (
+    draw_projected_polyline_camera_clipped,
+    draw_projected_polyline,
+    get_camera_c2w,
+    local_plan_to_front_world,
+    project_world_points_to_image,
+    resample_polyline,
+    rt2pose,
+    traj2control,
+    traj_transform_to_global,
+)
 import pickle
 import json
 import pickle
@@ -15,13 +25,60 @@ from omegaconf import OmegaConf
 import open3d as o3d
 from sim.utils.score_calculator import hugsim_evaluate
 import numpy as np
+import cv2
 from moviepy import ImageSequenceClip
 
-def to_video(observations, output_path):
+VIDEO_LAYOUT = [
+    ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT'],
+    ['CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT'],
+]
+FRONT_CAM_NAME = 'CAM_FRONT'
+REFERENCE_COLOR = (255, 230, 0)
+PLAN_COLOR = (0, 120, 255)
+REFERENCE_FORWARD_OFFSET_M = 4.0
+PLAN_VIS_FORWARD_OFFSET_M = 4.5
+VIS_PLAN_MIN_PATH_M = 0.5
+VIS_PLAN_HOLD_FRAMES = 10**9
+PLAN_REPLAN_EVERY_STEPS = 8
+
+def _resize_for_video(image, target_height):
+    if image.shape[0] == target_height:
+        return image
+    width = max(1, int(round(image.shape[1] * (target_height / image.shape[0]))))
+    return cv2.resize(image, (width, target_height), interpolation=cv2.INTER_LINEAR)
+
+
+def _pad_row_for_video(row, target_width):
+    if row.shape[1] == target_width:
+        return row
+    pad_width = target_width - row.shape[1]
+    return np.pad(row, ((0, 0), (0, pad_width), (0, 0)), mode='constant')
+
+
+def to_video(observations, rollout_frames, output_path):
     frames = []
-    for obs in observations:
-        row1 = np.concatenate([obs['CAM_FRONT_LEFT'], obs['CAM_FRONT'], obs['CAM_FRONT_RIGHT']], axis=1)
-        row2 = np.concatenate([obs['CAM_BACK_RIGHT'], obs['CAM_BACK'], obs['CAM_BACK_LEFT']], axis=1)
+    if not observations:
+        return
+
+    target_height = max(
+        obs[cam_name].shape[0]
+        for obs in observations
+        for row in VIDEO_LAYOUT
+        for cam_name in row
+    )
+
+    for frame_idx, obs in enumerate(observations):
+        row1 = np.concatenate(
+            [_resize_for_video(obs[cam_name], target_height) for cam_name in VIDEO_LAYOUT[0]],
+            axis=1,
+        )
+        row2 = np.concatenate(
+            [_resize_for_video(obs[cam_name], target_height) for cam_name in VIDEO_LAYOUT[1]],
+            axis=1,
+        )
+        target_width = max(row1.shape[1], row2.shape[1])
+        row1 = _pad_row_for_video(row1, target_width)
+        row2 = _pad_row_for_video(row2, target_width)
         frame = np.concatenate([row1, row2], axis=0)
         frames.append(frame)
     clip = ImageSequenceClip(frames, fps=4)
@@ -50,6 +107,158 @@ def read_pipe_message(pipe_path):
     return pickle.loads(payload)
 
 
+def _select_reference_segment(reference_poses, current_c2w, lookahead=25):
+    if reference_poses is None or len(reference_poses) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    reference_xyz = reference_poses[:, :3, 3]
+    current_xyz = current_c2w[:3, 3]
+    nearest_idx = int(np.argmin(np.sum((reference_xyz - current_xyz[None]) ** 2, axis=1)))
+    end_idx = min(len(reference_xyz), nearest_idx + lookahead)
+    return np.asarray(reference_xyz[nearest_idx:end_idx], dtype=np.float32)
+
+
+def _select_reference_pose_segment(reference_poses, current_c2w, lookahead=25):
+    if reference_poses is None or len(reference_poses) == 0:
+        return np.zeros((0, 4, 4), dtype=np.float32)
+
+    reference_xyz = reference_poses[:, :3, 3]
+    current_xyz = current_c2w[:3, 3]
+    nearest_idx = int(np.argmin(np.sum((reference_xyz - current_xyz[None]) ** 2, axis=1)))
+    end_idx = min(len(reference_xyz), nearest_idx + lookahead)
+    return np.asarray(reference_poses[nearest_idx:end_idx], dtype=np.float32)
+
+
+def _draw_projected_points(image, pixels, valid_mask, color, radius=4):
+    h, w = image.shape[:2]
+    valid_indices = np.flatnonzero(valid_mask)
+    for idx in valid_indices:
+        px, py = pixels[idx]
+        if 0 <= px < w and 0 <= py < h:
+            cv2.circle(image, (int(px), int(py)), radius, color, thickness=-1, lineType=cv2.LINE_AA)
+
+
+def _draw_first_visible_segment_marker(image, pixels, valid_mask, color, radius=6):
+    valid_indices = np.flatnonzero(valid_mask)
+    if len(valid_indices) < 2:
+        return
+
+    h, w = image.shape[:2]
+    rect = (0, 0, w, h)
+    for start_idx, end_idx in zip(valid_indices[:-1], valid_indices[1:]):
+        if end_idx != start_idx + 1:
+            continue
+        p0 = tuple(int(v) for v in pixels[start_idx])
+        p1 = tuple(int(v) for v in pixels[end_idx])
+        ok, clipped_p0, clipped_p1 = cv2.clipLine(rect, p0, p1)
+        if not ok:
+            continue
+        anchor = clipped_p0
+        cv2.circle(image, anchor, radius, color, thickness=-1, lineType=cv2.LINE_AA)
+        return
+
+
+def _count_in_frame(pixels, valid_mask, image_shape):
+    h, w = image_shape[:2]
+    if len(pixels) == 0:
+        return 0
+    in_frame = (
+        valid_mask
+        & (pixels[:, 0] >= 0) & (pixels[:, 0] < w)
+        & (pixels[:, 1] >= 0) & (pixels[:, 1] < h)
+    )
+    return int(np.count_nonzero(in_frame))
+
+
+def _trajectory_path_length(points_xy):
+    points_xy = np.asarray(points_xy, dtype=np.float32)
+    if len(points_xy) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(points_xy, axis=0), axis=1).sum())
+
+
+def _build_reference_worldline(reference_poses, ground_height_fn, forward_offset=REFERENCE_FORWARD_OFFSET_M):
+    if reference_poses is None or len(reference_poses) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    reference_world = np.asarray(reference_poses[:, :3, 3], dtype=np.float32).copy()
+    forward_dirs = np.asarray(reference_poses[:, :3, 2], dtype=np.float32).copy()
+    forward_norm = np.linalg.norm(forward_dirs, axis=1, keepdims=True)
+    forward_dirs = forward_dirs / np.clip(forward_norm, 1e-6, None)
+
+    reference_world[:, 0] += forward_offset * forward_dirs[:, 0]
+    reference_world[:, 2] += forward_offset * forward_dirs[:, 2]
+    reference_world[:, 1] = np.array(
+        [ground_height_fn(point[0], point[2]) for point in reference_world],
+        dtype=np.float32,
+    )
+    return resample_polyline(reference_world, spacing=0.5)
+
+
+def _render_front_overlay(front_image, current_obs, current_info, env, plan_traj, plan_origin_pose):
+    ego_pose = rt2pose(np.asarray(current_info['ego_rot']), np.asarray(current_info['ego_pos']))
+    cam_params = current_info['cam_params']
+    intrinsic = cam_params[FRONT_CAM_NAME]['intrinsic']
+    front_c2w = get_camera_c2w(cam_params, ego_pose, FRONT_CAM_NAME, env.unwrapped.cam_rect)
+
+    overlay = front_image.copy()
+
+    reference_poses = _select_reference_pose_segment(env.unwrapped.ground_model[0], front_c2w, lookahead=40)
+    reference_world = _build_reference_worldline(
+        reference_poses,
+        env.unwrapped.scene_ground_height,
+    )
+    ref_pixels, ref_valid = project_world_points_to_image(reference_world, intrinsic, front_c2w)
+    draw_projected_polyline(overlay, ref_pixels, ref_valid, color=REFERENCE_COLOR, thickness=4)
+    _draw_projected_points(overlay, ref_pixels, ref_valid, color=REFERENCE_COLOR, radius=4)
+
+    if plan_traj is not None and len(plan_traj) > 0 and plan_origin_pose is not None:
+        plan_local = np.asarray(plan_traj, dtype=np.float32)
+        plan_origin_front_c2w = get_camera_c2w(
+            cam_params,
+            np.asarray(plan_origin_pose, dtype=np.float32),
+            FRONT_CAM_NAME,
+            env.unwrapped.cam_rect,
+        )
+        plan_world = local_plan_to_front_world(
+            plan_local,
+            plan_origin_front_c2w,
+            cam_params[FRONT_CAM_NAME]['v2c'],
+            include_origin=False,
+            forward_offset=0.0,
+        )
+        plan_world_line = local_plan_to_front_world(
+            plan_local,
+            plan_origin_front_c2w,
+            cam_params[FRONT_CAM_NAME]['v2c'],
+            include_origin=True,
+            forward_offset=PLAN_VIS_FORWARD_OFFSET_M,
+        )
+        plan_world_dense = resample_polyline(plan_world_line, spacing=0.08)
+        raw_plan_pixels, raw_plan_valid = project_world_points_to_image(plan_world, intrinsic, front_c2w)
+        draw_projected_polyline_camera_clipped(
+            overlay,
+            plan_world_dense,
+            intrinsic,
+            front_c2w,
+            color=PLAN_COLOR,
+            thickness=4,
+        )
+        _draw_projected_points(overlay, raw_plan_pixels, raw_plan_valid, color=PLAN_COLOR, radius=5)
+
+    return overlay
+
+
+def _select_overlay_plan(plan_traj, plan_path_length, last_valid_plan, stale_frames):
+    if plan_traj is not None and len(plan_traj) > 0 and plan_path_length >= VIS_PLAN_MIN_PATH_M:
+        return np.asarray(plan_traj, dtype=np.float32), 0, False
+
+    if last_valid_plan is not None and stale_frames < VIS_PLAN_HOLD_FRAMES:
+        return last_valid_plan.copy(), stale_frames + 1, True
+
+    return None, stale_frames, False
+
+
 def create_gym_env(cfg, output):
 
     env = gymnasium.make('hugsim_env/HUGSim-v0', cfg=cfg, output=output)
@@ -69,46 +278,113 @@ def create_gym_env(cfg, output):
     print('Ready for simulation')
 
     obs, info = None, None
+    last_valid_overlay_plan = None
+    last_valid_overlay_pose = None
+    last_valid_overlay_plan_stale_frames = 0
+    current_plan_traj = None
+    current_plan_origin_pose = None
+    overlay_front_dir = os.path.join(output, 'overlay_front')
+    os.makedirs(overlay_front_dir, exist_ok=True)
+    for name in os.listdir(overlay_front_dir):
+        if name.endswith('.jpg'):
+            os.remove(os.path.join(overlay_front_dir, name))
     while not done:
 
         if obs is None or info is None:
             obs, info = env.reset()
-        observations_save.append(obs['rgb'])
-        infos_save.append(info)
+        current_obs, current_info = obs, info
+        infos_save.append(current_info)
 
-        print('ego pose', info['ego_pos'])
+        print('ego pose', current_info['ego_pos'])
 
-        write_pipe_message(obs_pipe, (obs, info))
-        plan_traj = read_pipe_message(plan_pipe)
+        should_replan = (cnt % PLAN_REPLAN_EVERY_STEPS == 0) or (current_plan_traj is None)
+        if should_replan:
+            write_pipe_message(obs_pipe, (current_obs, current_info))
+            current_plan_traj = read_pipe_message(plan_pipe)
+            current_plan_origin_pose = rt2pose(
+                np.asarray(current_info['ego_rot']),
+                np.asarray(current_info['ego_pos']),
+            )
+        plan_traj = current_plan_traj
 
         if plan_traj is not None:
-            acc, steer_rate = traj2control(plan_traj, info)
+            imu_plan_traj = plan_traj[:, [1, 0]]
+            imu_plan_traj[:, 1] *= -1
+            global_traj = traj_transform_to_global(imu_plan_traj, current_info['ego_box'])
+            current_rc = current_info.get('rc', env.unwrapped.route_completion[0])
+            local_plan = np.asarray(plan_traj, dtype=np.float32)
+            plan_path_length = _trajectory_path_length(local_plan)
+            plan_endpoint_distance = float(np.linalg.norm(local_plan[-1])) if len(local_plan) > 0 else 0.0
+            plan_min_step = float(np.linalg.norm(np.diff(local_plan, axis=0), axis=1).min()) if len(local_plan) > 1 else 0.0
+            plan_max_step = float(np.linalg.norm(np.diff(local_plan, axis=0), axis=1).max()) if len(local_plan) > 1 else 0.0
+            overlay_plan, last_valid_overlay_plan_stale_frames, overlay_plan_held = _select_overlay_plan(
+                local_plan,
+                plan_path_length,
+                last_valid_overlay_plan,
+                last_valid_overlay_plan_stale_frames,
+            )
+            overlay_plan_origin_pose = None
+            if plan_path_length >= VIS_PLAN_MIN_PATH_M:
+                last_valid_overlay_plan = local_plan.copy()
+                last_valid_overlay_pose = current_plan_origin_pose.copy() if current_plan_origin_pose is not None else None
+                overlay_plan_origin_pose = last_valid_overlay_pose
+            elif overlay_plan is not None:
+                overlay_plan_origin_pose = last_valid_overlay_pose
+            save_data['frames'].append({
+                'time_stamp': current_info['timestamp'],
+                'is_key_frame': True,
+                'ego_box': current_info['ego_box'],
+                'ego_pos': current_info['ego_pos'],
+                'ego_rot': current_info['ego_rot'],
+                'obj_boxes': current_info['obj_boxes'],
+                'obj_names': ['car' for _ in current_info['obj_boxes']],
+                'planned_traj': {
+                    'traj': global_traj,
+                    'timestep': 0.5
+                },
+                'planner_debug': {
+                    'local_plan': local_plan.tolist(),
+                    'path_length_m': plan_path_length,
+                    'endpoint_distance_m': plan_endpoint_distance,
+                    'min_step_m': plan_min_step,
+                    'max_step_m': plan_max_step,
+                    'overlay_plan_held': bool(overlay_plan_held),
+                    'overlay_plan_stale_frames': int(last_valid_overlay_plan_stale_frames),
+                },
+                'collision': current_info.get('collision', False),
+                'rc': current_rc
+            })
+
+            acc, steer_rate = traj2control(plan_traj, current_info)
+            save_data['frames'][-1]['planner_debug']['acc_cmd'] = float(acc)
+            save_data['frames'][-1]['planner_debug']['steer_rate_cmd'] = float(steer_rate)
+
+            vis_rgb = {
+                cam_name: image.copy()
+                for cam_name, image in current_obs['rgb'].items()
+            }
+            vis_rgb[FRONT_CAM_NAME] = _render_front_overlay(
+                current_obs['rgb'][FRONT_CAM_NAME],
+                current_obs,
+                current_info,
+                env,
+                overlay_plan,
+                overlay_plan_origin_pose,
+            )
+            observations_save.append(vis_rgb)
+            cv2.imwrite(
+                os.path.join(overlay_front_dir, f'{len(observations_save) - 1:04d}.jpg'),
+                cv2.cvtColor(vis_rgb[FRONT_CAM_NAME], cv2.COLOR_RGB2BGR),
+            )
 
             action = {'acc': acc, 'steer_rate': steer_rate}
             obs, reward, terminated, truncated, info = env.step(action)
             cnt += 1
             done = terminated or truncated or cnt > 400
 
-        else:  # AD Side Crushed
+        else:
             done = True
             break
-
-        imu_plan_traj = plan_traj[:, [1, 0]]
-        imu_plan_traj[:, 1] *= -1
-        global_traj = traj_transform_to_global(imu_plan_traj, info['ego_box'])
-        save_data['frames'].append({
-            'time_stamp': info['timestamp'],
-            'is_key_frame': True,
-            'ego_box': info['ego_box'],
-            'obj_boxes': info['obj_boxes'],
-            'obj_names': ['car' for _ in info['obj_boxes']],
-            'planned_traj': {
-                'traj': global_traj,
-                'timestep': 0.5
-            },
-            'collision': info['collision'],
-            'rc': info['rc']
-        })
 
     write_pipe_message(obs_pipe, 'Done')
 
@@ -116,7 +392,11 @@ def create_gym_env(cfg, output):
         pickle.dump([save_data], wf)
         
     try:
-        to_video(observations_save, os.path.join(output, 'video.mp4'))
+        to_video(
+            observations_save,
+            save_data['frames'],
+            os.path.join(output, 'video.mp4'),
+        )
     except Exception as exc:
         print(f"Skipping video export due to error: {exc}")
     with open(os.path.join(output, 'infos.pkl'), 'wb') as wf:
@@ -130,7 +410,6 @@ def create_gym_env(cfg, output):
 
 
 if __name__ == "__main__":
-    # Set up command line argument parser
     parser = ArgumentParser(description="Testing script parameters")
     parser.add_argument("--scenario_path", type=str, required=True)
     parser.add_argument("--base_path", type=str, required=True)
@@ -197,5 +476,4 @@ if __name__ == "__main__":
         traceback.print_exc()
         process.kill()
     
-    # # For debug
     # create_gym_env(cfg, output)
