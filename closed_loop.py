@@ -47,6 +47,7 @@ TOPK_BASE_COLORS = [
     (255, 120, 0),
     (255, 80, 0),
 ]
+PAST_TRAJECTORY_COLOR = (0, 0, 0)
 REFERENCE_FORWARD_OFFSET_M = 4.0
 PLAN_VIS_FORWARD_OFFSET_M = 4.5
 VIS_PLAN_MIN_PATH_M = 0.5
@@ -252,13 +253,20 @@ def _render_front_overlay(front_image, current_obs, current_info, env, plan_traj
         )
 
     candidate_plans = current_info.get('overlay_candidate_plans')
+    candidate_sources = current_info.get('overlay_candidate_sources')
     if candidate_plans:
+        current_rank = 0
         for rank, candidate_plan in enumerate(candidate_plans):
-            base_color = TOPK_BASE_COLORS[min(rank, len(TOPK_BASE_COLORS) - 1)]
-            if rank >= len(TOPK_BASE_COLORS):
-                decay = min(rank - len(TOPK_BASE_COLORS) + 1, 8)
-                fade = max(0.35, 1.0 - 0.08 * decay)
-                base_color = tuple(int(channel * fade) for channel in base_color)
+            source = None if candidate_sources is None or rank >= len(candidate_sources) else candidate_sources[rank]
+            if source == 'carry_prev':
+                base_color = PAST_TRAJECTORY_COLOR
+            else:
+                base_color = TOPK_BASE_COLORS[min(current_rank, len(TOPK_BASE_COLORS) - 1)]
+                if current_rank >= len(TOPK_BASE_COLORS):
+                    decay = min(current_rank - len(TOPK_BASE_COLORS) + 1, 8)
+                    fade = max(0.35, 1.0 - 0.08 * decay)
+                    base_color = tuple(int(channel * fade) for channel in base_color)
+                current_rank += 1
             draw_candidate(candidate_plan, base_color, 4 if rank == 0 else 2)
     elif plan_traj is not None and len(plan_traj) > 0:
         draw_candidate(plan_traj, PLAN_COLOR, 4)
@@ -302,6 +310,10 @@ def create_gym_env(cfg, output):
     current_plan_origin_pose = None
     current_topk_plans = None
     current_topk_scores = None
+    current_candidate_pool_plans = None
+    current_candidate_pool_scores = None
+    current_candidate_pool_sources = None
+    current_candidate_pool_proposal_indices = None
     current_selected_idx = None
     current_selected_source = None
     current_vlm_selected_idx = None
@@ -309,6 +321,21 @@ def create_gym_env(cfg, output):
     current_vlm_reasoning = None
     current_vlm_elapsed_sec = None
     current_vlm_error = None
+    current_vlm_q_valid = None
+    current_vlm_q_candidate_scores = None
+    current_vlm_q_best_candidate_index = None
+    current_adaptive_replan_decision = None
+    current_carry_previous_valid = None
+    current_latency_timeline_record = None
+    current_q_selected_idx = None
+    current_q_selected_source = None
+    current_q_candidate_scores = None
+    current_q_carry_score = None
+    current_q_best_current_score = None
+    current_q_score_gap = None
+    current_q_uncertainty_triggered = None
+    current_q_uncertainty_reasons = None
+    current_q_invoked_vlm = None
     overlay_front_dir = os.path.join(output, 'overlay_front')
     os.makedirs(overlay_front_dir, exist_ok=True)
     for name in os.listdir(overlay_front_dir):
@@ -329,6 +356,10 @@ def create_gym_env(cfg, output):
             plan_payload = read_pipe_message(plan_pipe)
             current_topk_plans = None
             current_topk_scores = None
+            current_candidate_pool_plans = None
+            current_candidate_pool_scores = None
+            current_candidate_pool_sources = None
+            current_candidate_pool_proposal_indices = None
             current_selected_idx = None
             current_selected_source = None
             current_vlm_selected_idx = None
@@ -336,10 +367,29 @@ def create_gym_env(cfg, output):
             current_vlm_reasoning = None
             current_vlm_elapsed_sec = None
             current_vlm_error = None
+            current_vlm_q_valid = None
+            current_vlm_q_candidate_scores = None
+            current_vlm_q_best_candidate_index = None
+            current_adaptive_replan_decision = None
+            current_carry_previous_valid = None
+            current_latency_timeline_record = None
+            current_q_selected_idx = None
+            current_q_selected_source = None
+            current_q_candidate_scores = None
+            current_q_carry_score = None
+            current_q_best_current_score = None
+            current_q_score_gap = None
+            current_q_uncertainty_triggered = None
+            current_q_uncertainty_reasons = None
+            current_q_invoked_vlm = None
             if isinstance(plan_payload, dict):
                 current_plan_traj = plan_payload.get('selected_plan')
                 current_topk_plans = plan_payload.get('topk_plans')
                 current_topk_scores = plan_payload.get('topk_scores')
+                current_candidate_pool_plans = plan_payload.get('candidate_pool_plans')
+                current_candidate_pool_scores = plan_payload.get('candidate_pool_scores')
+                current_candidate_pool_sources = plan_payload.get('candidate_pool_sources')
+                current_candidate_pool_proposal_indices = plan_payload.get('candidate_pool_proposal_indices')
                 current_selected_idx = plan_payload.get('selected_idx')
                 current_selected_source = plan_payload.get('selected_source')
                 current_vlm_selected_idx = plan_payload.get('vlm_selected_idx')
@@ -347,6 +397,21 @@ def create_gym_env(cfg, output):
                 current_vlm_reasoning = plan_payload.get('vlm_reasoning')
                 current_vlm_elapsed_sec = plan_payload.get('vlm_elapsed_sec')
                 current_vlm_error = plan_payload.get('vlm_error')
+                current_vlm_q_valid = plan_payload.get('vlm_q_valid')
+                current_vlm_q_candidate_scores = plan_payload.get('vlm_q_candidate_scores')
+                current_vlm_q_best_candidate_index = plan_payload.get('vlm_q_best_candidate_index')
+                current_adaptive_replan_decision = plan_payload.get('adaptive_replan_decision')
+                current_carry_previous_valid = plan_payload.get('carry_previous_valid')
+                current_latency_timeline_record = plan_payload.get('latency_timeline_record')
+                current_q_selected_idx = plan_payload.get('q_selected_idx')
+                current_q_selected_source = plan_payload.get('q_selected_source')
+                current_q_candidate_scores = plan_payload.get('q_candidate_scores')
+                current_q_carry_score = plan_payload.get('q_carry_score')
+                current_q_best_current_score = plan_payload.get('q_best_current_score')
+                current_q_score_gap = plan_payload.get('q_score_gap')
+                current_q_uncertainty_triggered = plan_payload.get('q_uncertainty_triggered')
+                current_q_uncertainty_reasons = plan_payload.get('q_uncertainty_reasons')
+                current_q_invoked_vlm = plan_payload.get('q_invoked_vlm')
             else:
                 current_plan_traj = plan_payload
             current_plan_origin_pose = rt2pose(
@@ -400,11 +465,30 @@ def create_gym_env(cfg, output):
                     'selected_source': current_selected_source,
                     'topk_scores': current_topk_scores,
                     'topk_count': 0 if current_topk_plans is None else int(len(current_topk_plans)),
+                    'candidate_pool_scores': current_candidate_pool_scores,
+                    'candidate_pool_sources': current_candidate_pool_sources,
+                    'candidate_pool_proposal_indices': current_candidate_pool_proposal_indices,
+                    'candidate_pool_count': 0 if current_candidate_pool_plans is None else int(len(current_candidate_pool_plans)),
                     'vlm_selected_idx': current_vlm_selected_idx,
                     'vlm_confidence': current_vlm_confidence,
                     'vlm_reasoning': current_vlm_reasoning,
                     'vlm_elapsed_sec': current_vlm_elapsed_sec,
                     'vlm_error': current_vlm_error,
+                    'vlm_q_valid': current_vlm_q_valid,
+                    'vlm_q_candidate_scores': current_vlm_q_candidate_scores,
+                    'vlm_q_best_candidate_index': current_vlm_q_best_candidate_index,
+                    'q_selected_idx': current_q_selected_idx,
+                    'q_selected_source': current_q_selected_source,
+                    'q_candidate_scores': current_q_candidate_scores,
+                    'q_carry_score': current_q_carry_score,
+                    'q_best_current_score': current_q_best_current_score,
+                    'q_score_gap': current_q_score_gap,
+                    'q_uncertainty_triggered': current_q_uncertainty_triggered,
+                    'q_uncertainty_reasons': current_q_uncertainty_reasons,
+                    'q_invoked_vlm': current_q_invoked_vlm,
+                    'adaptive_replan_decision': current_adaptive_replan_decision,
+                    'carry_previous_valid': current_carry_previous_valid,
+                    'latency_timeline_record': current_latency_timeline_record,
                     'overlay_plan_held': bool(overlay_plan_held),
                     'overlay_plan_stale_frames': int(last_valid_overlay_plan_stale_frames),
                 },
@@ -421,7 +505,8 @@ def create_gym_env(cfg, output):
                 for cam_name, image in current_obs['rgb'].items()
             }
             overlay_info = dict(current_info)
-            overlay_info['overlay_candidate_plans'] = current_topk_plans
+            overlay_info['overlay_candidate_plans'] = current_candidate_pool_plans if current_candidate_pool_plans is not None else current_topk_plans
+            overlay_info['overlay_candidate_sources'] = current_candidate_pool_sources
             vis_rgb[FRONT_CAM_NAME] = _render_front_overlay(
                 current_obs['rgb'][FRONT_CAM_NAME],
                 current_obs,
@@ -527,14 +612,32 @@ if __name__ == "__main__":
             'RAP_HF_HUB_OFFLINE': cfg.planner.rap.get('hf_hub_offline', True),
             'RAP_TRANSFORMERS_OFFLINE': cfg.planner.rap.get('transformers_offline', True),
             'RAP_VLM_ENABLED': cfg.planner.rap.vlm.get('enabled', False),
+            'RAP_VLM_INTERVENTION_MODE': cfg.planner.rap.vlm.get('intervention_mode', 'uncertainty_only'),
             'RAP_VLM_BACKEND': cfg.planner.rap.vlm.get('backend', 'qwen3_vl'),
             'RAP_VLM_MODEL_ID': cfg.planner.rap.vlm.get('model_id', 'Qwen/Qwen3-VL-8B-Instruct'),
             'RAP_VLM_DEVICE': cfg.planner.rap.vlm.get('device', 'auto'),
             'RAP_VLM_MAX_NEW_TOKENS': cfg.planner.rap.vlm.get('max_new_tokens', 300),
-            'RAP_VLM_CANDIDATE_LIMIT': cfg.planner.rap.vlm.get('candidate_limit', 10),
+            'RAP_VLM_CANDIDATE_LIMIT': cfg.planner.rap.vlm.get('candidate_limit', 5),
             'RAP_VLM_TIMEOUT_SEC': cfg.planner.rap.vlm.get('timeout_sec', 10.0),
             'RAP_VLM_SAVE_DEBUG_ARTIFACTS': cfg.planner.rap.vlm.get('save_debug_artifacts', True),
             'RAP_VLM_DEBUG_DIR_NAME': cfg.planner.rap.vlm.get('debug_dir_name', 'vlm_debug'),
+            'RAP_VLM_CARRY_PREVIOUS_ENABLED': cfg.planner.rap.vlm.get('carry_previous_enabled', True),
+            'RAP_VLM_CARRY_PREVIOUS_MIN_PATH_M': cfg.planner.rap.vlm.get('carry_previous_min_path_m', 0.5),
+            'RAP_VLM_CARRY_PREVIOUS_MIN_POINTS': cfg.planner.rap.vlm.get('carry_previous_min_points', 2),
+            'RAP_VLM_ADAPTIVE_REPLAN_MODE': cfg.planner.rap.vlm.get('adaptive_replan_mode', 'log_only'),
+            'RAP_VLM_LATENCY_TRACKING_MODE': cfg.planner.rap.vlm.get('latency_tracking_mode', 'full_timeline'),
+            'RAP_VLM_Q_ENABLED': cfg.planner.rap.vlm.get('q_enabled', True),
+            'RAP_VLM_Q_SWITCH_MARGIN': cfg.planner.rap.vlm.get('q_switch_margin', 0.05),
+            'RAP_VLM_Q_UNCERTAINTY_MARGIN': cfg.planner.rap.vlm.get('q_uncertainty_margin', 0.03),
+            'RAP_VLM_Q_QUALITY_FLOOR': cfg.planner.rap.vlm.get('q_quality_floor', 0.18),
+            'RAP_VLM_Q_CANDIDATE_DISAGREEMENT_THRESHOLD': cfg.planner.rap.vlm.get('q_candidate_disagreement_threshold', 2.5),
+            'RAP_VLM_Q_WEIGHT_RAP_SCORE': cfg.planner.rap.vlm.get('q_weight_rap_score', 0.55),
+            'RAP_VLM_Q_WEIGHT_PROGRESS': cfg.planner.rap.vlm.get('q_weight_progress', 0.30),
+            'RAP_VLM_Q_WEIGHT_OFFCENTER': cfg.planner.rap.vlm.get('q_weight_offcenter', 0.10),
+            'RAP_VLM_Q_WEIGHT_CURVATURE': cfg.planner.rap.vlm.get('q_weight_curvature', 0.08),
+            'RAP_VLM_Q_WEIGHT_SHORTPLAN': cfg.planner.rap.vlm.get('q_weight_shortplan', 0.18),
+            'RAP_VLM_Q_CARRY_SCORE_DECAY': cfg.planner.rap.vlm.get('q_carry_score_decay', 0.0),
+            'RAP_VLM_INTERVENTION_PLAN_PATH_FLOOR_M': cfg.planner.rap.vlm.get('intervention_plan_path_floor_m', 1.0),
         }
 
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)

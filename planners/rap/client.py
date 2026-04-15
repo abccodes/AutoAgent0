@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation as SCR
 
 from vlm_selector import VLMPlanSelector, VLMSelectorConfig
 
@@ -51,6 +52,7 @@ DEFAULT_CAM_ORDER = [
 DEFAULT_OUTPUT_POSES = 10
 TOPK_PROPOSALS_TO_SEND = 20
 EGO_HISTORY_FRAMES = 4
+PLAN_DT_SEC = 0.5
 
 MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
 STD = np.array([58.395, 57.12, 57.375], dtype=np.float32)
@@ -109,14 +111,32 @@ def resolve_config(args: argparse.Namespace) -> AdapterConfig:
         output_num_poses=DEFAULT_OUTPUT_POSES,
         vlm=VLMSelectorConfig(
             enabled=env_flag("RAP_VLM_ENABLED", False),
+            intervention_mode=os.environ.get("RAP_VLM_INTERVENTION_MODE", "uncertainty_only"),
             backend=os.environ.get("RAP_VLM_BACKEND", "qwen3_vl"),
             model_id=os.environ.get("RAP_VLM_MODEL_ID", "Qwen/Qwen3-VL-8B-Instruct"),
             device=os.environ.get("RAP_VLM_DEVICE", "auto"),
             max_new_tokens=int(os.environ.get("RAP_VLM_MAX_NEW_TOKENS", "300")),
-            candidate_limit=int(os.environ.get("RAP_VLM_CANDIDATE_LIMIT", "8")),
+            candidate_limit=int(os.environ.get("RAP_VLM_CANDIDATE_LIMIT", "5")),
             timeout_sec=float(os.environ.get("RAP_VLM_TIMEOUT_SEC", "10.0")),
             save_debug_artifacts=env_flag("RAP_VLM_SAVE_DEBUG_ARTIFACTS", True),
             debug_dir_name=os.environ.get("RAP_VLM_DEBUG_DIR_NAME", "vlm_debug"),
+            carry_previous_enabled=env_flag("RAP_VLM_CARRY_PREVIOUS_ENABLED", True),
+            carry_previous_min_path_m=float(os.environ.get("RAP_VLM_CARRY_PREVIOUS_MIN_PATH_M", "0.5")),
+            carry_previous_min_points=int(os.environ.get("RAP_VLM_CARRY_PREVIOUS_MIN_POINTS", "2")),
+            adaptive_replan_mode=os.environ.get("RAP_VLM_ADAPTIVE_REPLAN_MODE", "log_only"),
+            latency_tracking_mode=os.environ.get("RAP_VLM_LATENCY_TRACKING_MODE", "full_timeline"),
+            q_enabled=env_flag("RAP_VLM_Q_ENABLED", True),
+            q_switch_margin=float(os.environ.get("RAP_VLM_Q_SWITCH_MARGIN", "0.05")),
+            q_uncertainty_margin=float(os.environ.get("RAP_VLM_Q_UNCERTAINTY_MARGIN", "0.03")),
+            q_quality_floor=float(os.environ.get("RAP_VLM_Q_QUALITY_FLOOR", "0.18")),
+            q_candidate_disagreement_threshold=float(os.environ.get("RAP_VLM_Q_CANDIDATE_DISAGREEMENT_THRESHOLD", "2.5")),
+            q_weight_rap_score=float(os.environ.get("RAP_VLM_Q_WEIGHT_RAP_SCORE", "0.55")),
+            q_weight_progress=float(os.environ.get("RAP_VLM_Q_WEIGHT_PROGRESS", "0.30")),
+            q_weight_offcenter=float(os.environ.get("RAP_VLM_Q_WEIGHT_OFFCENTER", "0.10")),
+            q_weight_curvature=float(os.environ.get("RAP_VLM_Q_WEIGHT_CURVATURE", "0.08")),
+            q_weight_shortplan=float(os.environ.get("RAP_VLM_Q_WEIGHT_SHORTPLAN", "0.18")),
+            q_carry_score_decay=float(os.environ.get("RAP_VLM_Q_CARRY_SCORE_DECAY", "0.0")),
+            intervention_plan_path_floor_m=float(os.environ.get("RAP_VLM_INTERVENTION_PLAN_PATH_FLOOR_M", "1.0")),
         ),
     )
 
@@ -412,6 +432,176 @@ def rap_to_hugsim_plan(trajectory: np.ndarray) -> np.ndarray:
     return np.stack([right, forward], axis=-1).astype(np.float32)
 
 
+def info_to_pose(info: Dict[str, object]) -> np.ndarray:
+    pose = np.eye(4, dtype=np.float32)
+    pose[:3, :3] = SCR.from_euler(
+        "XYZ",
+        np.asarray(info["ego_rot"], dtype=np.float32),
+        degrees=False,
+    ).as_matrix().astype(np.float32)
+    pose[:3, 3] = np.asarray(info["ego_pos"], dtype=np.float32)
+    return pose
+
+
+def local_plan_to_world(plan_traj: np.ndarray, ego_pose: np.ndarray) -> np.ndarray:
+    plan_traj = np.asarray(plan_traj, dtype=np.float32)
+    if len(plan_traj) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    origin = ego_pose[:3, 3]
+    right_dir = ego_pose[:3, 0]
+    forward_dir = ego_pose[:3, 2]
+    points_world = [
+        origin + float(right) * right_dir + float(forward) * forward_dir
+        for right, forward in plan_traj
+    ]
+    return np.asarray(points_world, dtype=np.float32)
+
+
+def world_points_to_current_local(points_world: np.ndarray, ego_pose: np.ndarray) -> np.ndarray:
+    if len(points_world) == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+
+    homogeneous = np.concatenate(
+        [np.asarray(points_world, dtype=np.float32), np.ones((len(points_world), 1), dtype=np.float32)],
+        axis=1,
+    )
+    ego_points = (np.linalg.inv(ego_pose) @ homogeneous.T).T[:, :3]
+    return np.stack([ego_points[:, 0], ego_points[:, 2]], axis=1).astype(np.float32)
+
+
+def path_length(plan_traj: np.ndarray) -> float:
+    plan_traj = np.asarray(plan_traj, dtype=np.float32)
+    if len(plan_traj) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(plan_traj, axis=0), axis=1).sum())
+
+
+def build_carry_plan_candidate(
+    previous_plan: Optional[np.ndarray],
+    previous_pose: Optional[np.ndarray],
+    previous_selected_score: Optional[float],
+    previous_timestamp: Optional[float],
+    current_info: Dict[str, object],
+    cfg: AdapterConfig,
+) -> Optional[Dict[str, object]]:
+    if not cfg.vlm.carry_previous_enabled or previous_plan is None or previous_pose is None or previous_timestamp is None:
+        return None
+
+    current_timestamp = float(current_info.get("timestamp", previous_timestamp))
+    elapsed_sec = max(0.0, current_timestamp - float(previous_timestamp))
+    elapsed_pose_steps = int(round(elapsed_sec / PLAN_DT_SEC))
+    if elapsed_pose_steps >= len(previous_plan):
+        return None
+
+    trimmed_plan = np.asarray(previous_plan[elapsed_pose_steps:], dtype=np.float32)
+    if len(trimmed_plan) < cfg.vlm.carry_previous_min_points:
+        return None
+
+    points_world = local_plan_to_world(trimmed_plan, np.asarray(previous_pose, dtype=np.float32))
+    current_local = world_points_to_current_local(points_world, info_to_pose(current_info))
+
+    valid_mask = current_local[:, 1] > 0.0
+    if not np.any(valid_mask):
+        return None
+    first_valid_idx = int(np.argmax(valid_mask))
+    current_local = current_local[first_valid_idx:]
+
+    if len(current_local) < cfg.vlm.carry_previous_min_points:
+        return None
+    if path_length(current_local) < cfg.vlm.carry_previous_min_path_m:
+        return None
+
+    return {
+        "source": "carry_prev",
+        "proposal_index": None,
+        "proposal_score": float(previous_selected_score) if previous_selected_score is not None else 0.0,
+        "local_plan": current_local.astype(np.float32),
+        "execution_plan": current_local.astype(np.float32),
+        "carry_elapsed_sec": elapsed_sec,
+        "carry_elapsed_pose_steps": elapsed_pose_steps,
+    }
+
+
+def truncate_plan(plan_traj: np.ndarray, num_poses: int) -> np.ndarray:
+    plan_traj = np.asarray(plan_traj, dtype=np.float32)
+    if num_poses <= 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    return np.asarray(plan_traj[: min(len(plan_traj), int(num_poses))], dtype=np.float32)
+
+
+def plan_endpoint(plan_traj: np.ndarray) -> np.ndarray:
+    plan_traj = np.asarray(plan_traj, dtype=np.float32)
+    if len(plan_traj) == 0:
+        return np.zeros(2, dtype=np.float32)
+    return np.asarray(plan_traj[-1], dtype=np.float32)
+
+
+def normalize_scores(scores: np.ndarray) -> np.ndarray:
+    scores = np.asarray(scores, dtype=np.float32)
+    if len(scores) == 0:
+        return np.zeros((0,), dtype=np.float32)
+    score_min = float(scores.min())
+    score_max = float(scores.max())
+    if score_max - score_min < 1e-6:
+        return np.ones_like(scores, dtype=np.float32)
+    return (scores - score_min) / (score_max - score_min)
+
+
+def curvature_cost(plan_traj: np.ndarray) -> float:
+    plan_traj = np.asarray(plan_traj, dtype=np.float32)
+    if len(plan_traj) < 3:
+        return 0.0
+    diffs = np.diff(plan_traj, axis=0)
+    headings = np.arctan2(diffs[:, 0], np.clip(diffs[:, 1], 1e-6, None))
+    heading_deltas = np.diff(headings)
+    heading_deltas = np.arctan2(np.sin(heading_deltas), np.cos(heading_deltas))
+    return float(np.mean(np.abs(heading_deltas)))
+
+
+def compute_q_score(
+    plan_traj: np.ndarray,
+    proposal_score_norm: float,
+    cfg: AdapterConfig,
+    is_carry: bool,
+) -> float:
+    plan_traj = np.asarray(plan_traj, dtype=np.float32)
+    if len(plan_traj) == 0:
+        return -1e6
+
+    path = path_length(plan_traj)
+    endpoint = plan_endpoint(plan_traj)
+    progress = max(0.0, float(endpoint[1]))
+    offcenter = abs(float(endpoint[0]))
+    curvature = curvature_cost(plan_traj)
+    shortfall = max(0.0, 1.0 - path)
+
+    score = 0.0
+    score += cfg.vlm.q_weight_rap_score * float(proposal_score_norm)
+    score += cfg.vlm.q_weight_progress * progress
+    score -= cfg.vlm.q_weight_offcenter * offcenter
+    score -= cfg.vlm.q_weight_curvature * curvature
+    score -= cfg.vlm.q_weight_shortplan * shortfall
+    if is_carry and cfg.vlm.q_carry_score_decay > 0.0:
+        score -= cfg.vlm.q_carry_score_decay
+    return float(score)
+
+
+def candidate_disagreement_m(candidate_rows: Sequence[Dict[str, object]]) -> float:
+    endpoints = []
+    for row in candidate_rows:
+        if row.get("source") != "current_rap":
+            continue
+        endpoints.append(plan_endpoint(np.asarray(row["local_plan"], dtype=np.float32)))
+    if len(endpoints) < 2:
+        return 0.0
+    best = 0.0
+    for idx in range(len(endpoints)):
+        for jdx in range(idx + 1, len(endpoints)):
+            best = max(best, float(np.linalg.norm(endpoints[idx] - endpoints[jdx])))
+    return best
+
+
 def read_obs(obs_pipe: Path):
     with open(obs_pipe, "rb") as pipe:
         header = pipe.read(8)
@@ -441,26 +631,74 @@ def build_plan_payload(
     selected_idx: Optional[int] = None,
     selected_source: str = "rap_argmax",
     selection_debug: Optional[Dict[str, object]] = None,
+    selected_plan_override: Optional[np.ndarray] = None,
+    selected_score_override: Optional[float] = None,
+    candidate_pool_rows: Optional[Sequence[Dict[str, object]]] = None,
     topk: int = TOPK_PROPOSALS_TO_SEND,
 ) -> Dict[str, object]:
     topk = max(1, min(int(topk), int(len(scores))))
     top_indices = np.argsort(scores)[-topk:][::-1]
-    if selected_idx is None:
+    if selected_idx is None and selected_plan_override is None:
         selected_idx = int(top_indices[0])
     else:
-        selected_idx = int(selected_idx)
-    selected_traj = proposals[selected_idx, :output_num_poses]
+        selected_idx = None if selected_idx is None else int(selected_idx)
+
+    if selected_plan_override is not None:
+        selected_plan = np.asarray(selected_plan_override, dtype=np.float32)
+        selected_score = float(selected_score_override) if selected_score_override is not None else None
+    else:
+        assert selected_idx is not None
+        selected_traj = proposals[selected_idx, :output_num_poses]
+        selected_plan = rap_to_hugsim_plan(selected_traj)
+        selected_score = float(scores[selected_idx])
+
+    if candidate_pool_rows is not None:
+        candidate_pool_plans = [
+            np.asarray(row["local_plan"], dtype=np.float32).tolist()
+            for row in candidate_pool_rows
+        ]
+        candidate_pool_execution_plans = [
+            np.asarray(row.get("execution_plan", row["local_plan"]), dtype=np.float32).tolist()
+            for row in candidate_pool_rows
+        ]
+        candidate_pool_scores = [float(row.get("proposal_score", 0.0)) for row in candidate_pool_rows]
+        candidate_pool_q_scores = [
+            None if row.get("q_score") is None else float(row["q_score"])
+            for row in candidate_pool_rows
+        ]
+        candidate_pool_sources = [str(row.get("source", "current_rap")) for row in candidate_pool_rows]
+        candidate_pool_proposal_indices = [
+            None if row.get("proposal_index") is None else int(row["proposal_index"])
+            for row in candidate_pool_rows
+        ]
+    else:
+        candidate_pool_plans = [
+            rap_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
+            for idx in top_indices
+        ]
+        candidate_pool_scores = [float(scores[idx]) for idx in top_indices]
+        candidate_pool_execution_plans = list(candidate_pool_plans)
+        candidate_pool_q_scores = [None for _ in top_indices]
+        candidate_pool_sources = ["current_rap" for _ in top_indices]
+        candidate_pool_proposal_indices = [int(idx) for idx in top_indices]
+
     payload = {
         "selected_idx": selected_idx,
-        "selected_score": float(scores[selected_idx]),
+        "selected_score": selected_score,
         "selected_source": selected_source,
-        "selected_plan": rap_to_hugsim_plan(selected_traj),
+        "selected_plan": selected_plan,
         "topk_indices": [int(idx) for idx in top_indices],
         "topk_scores": [float(scores[idx]) for idx in top_indices],
         "topk_plans": [
-            rap_to_hugsim_plan(proposals[idx, :output_num_poses])
+            rap_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
             for idx in top_indices
         ],
+        "candidate_pool_plans": candidate_pool_plans,
+        "candidate_pool_execution_plans": candidate_pool_execution_plans,
+        "candidate_pool_scores": candidate_pool_scores,
+        "candidate_pool_q_scores": candidate_pool_q_scores,
+        "candidate_pool_sources": candidate_pool_sources,
+        "candidate_pool_proposal_indices": candidate_pool_proposal_indices,
     }
     if selection_debug:
         payload.update(selection_debug)
@@ -485,117 +723,260 @@ def main() -> int:
     info_history: deque[Dict[str, object]] = deque(maxlen=EGO_HISTORY_FRAMES)
     vlm_selector = VLMPlanSelector(cfg.vlm, cfg.output_dir)
     frame_index = 0
+    previous_selected_plan: Optional[np.ndarray] = None
+    previous_selected_pose: Optional[np.ndarray] = None
+    previous_selected_score: Optional[float] = None
+    previous_selected_timestamp: Optional[float] = None
 
-    while True:
-        try:
-            message = read_obs(obs_pipe)
-            if message == "Done":
-                logging.info("Received shutdown signal")
-                break
-
-            obs, info = message
-            info_history.append(dict(info))
-            while len(info_history) < EGO_HISTORY_FRAMES:
-                info_history.appendleft(dict(info_history[0]))
-            features = build_features(obs, list(info_history), cfg)
-            with torch.no_grad():
-                predictions = model(features, targets=None, return_score=True)
-                scores = predictions["score"][0].detach().cpu().numpy()
-                proposals = predictions["trajectory"][0].detach().cpu().numpy()
-                best_idx = int(np.argmax(scores))
-                trajectory = proposals[best_idx, :cfg.output_num_poses]
-                best_xy = trajectory[:, :2]
-                step_norms = np.linalg.norm(np.diff(best_xy, axis=0), axis=1) if len(best_xy) > 1 else np.zeros((0,), dtype=np.float32)
-
-                if cfg.debug_diagnostics:
-                    top_indices = np.argsort(scores)[-3:][::-1]
-                    top_summary = []
-                    for idx in top_indices:
-                        proposal_xy = proposals[idx, :cfg.output_num_poses, :2]
-                        proposal_steps = np.linalg.norm(np.diff(proposal_xy, axis=0), axis=1)
-                        top_summary.append(
-                            (
-                                int(idx),
-                                float(scores[idx]),
-                                float(np.linalg.norm(proposal_xy[-1] - proposal_xy[0])),
-                                float(proposal_steps.sum()),
-                            )
-                        )
-                    logging.info(
-                        "ts=%.2f cmd=%s velo=%.3f best=%d score_max=%.4f score_mean=%.4f "
-                        "traj_extent=%.3f traj_path=%.3f min_step=%.4f max_step=%.4f top3=%s",
-                        float(info["timestamp"]),
-                        info.get("command"),
-                        float(info["ego_velo"]),
-                        best_idx,
-                        float(scores[best_idx]),
-                        float(scores.mean()),
-                        float(np.linalg.norm(best_xy[-1] - best_xy[0])),
-                        float(step_norms.sum()),
-                        float(step_norms.min(initial=0.0)),
-                        float(step_norms.max(initial=0.0)),
-                        top_summary,
-                    )
-
-                traj_path = float(step_norms.sum()) if len(step_norms) > 0 else 0.0
-                traj_extent = float(np.linalg.norm(trajectory[-1, :2] - trajectory[0, :2])) if len(trajectory) > 1 else 0.0
-                if traj_path < 0.5:
-                    logging.warning(
-                        "collapsed_plan ts=%.2f cmd=%s velo=%.3f accel=%.3f path=%.3f extent=%.3f "
-                        "head=%s proposal0=%s",
-                        float(info["timestamp"]),
-                        info.get("command"),
-                        float(info["ego_velo"]),
-                        float(info.get("accelerate", 0.0)),
-                        traj_path,
-                        traj_extent,
-                        np.round(trajectory[:5, :2], 3).tolist(),
-                        np.round(proposals[0, :5, :2], 3).tolist(),
-                    )
-            sorted_indices = np.argsort(scores)[::-1]
-            candidate_limit = max(1, min(int(cfg.vlm.candidate_limit), int(len(sorted_indices))))
-            candidate_indices = sorted_indices[:candidate_limit]
-            candidate_plans = [
-                rap_to_hugsim_plan(proposals[idx, :cfg.output_num_poses])
-                for idx in candidate_indices
-            ]
-            candidate_scores = [float(scores[idx]) for idx in candidate_indices]
-            selection_result = vlm_selector.maybe_select(
-                frame_index=frame_index,
-                front_image=obs["rgb"]["CAM_FRONT"],
-                info=info,
-                candidate_plans=candidate_plans,
-                candidate_indices=[int(idx) for idx in candidate_indices],
-                candidate_scores=candidate_scores,
-                rap_argmax_index=best_idx,
-            )
-            frame_index += 1
-
-            selection_debug = {
-                "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
-                "vlm_confidence": selection_result.get("vlm_confidence"),
-                "vlm_reasoning": selection_result.get("vlm_reasoning"),
-                "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
-                "vlm_error": selection_result.get("vlm_error"),
-                "vlm_candidate_count": selection_result.get("vlm_candidate_count"),
-            }
-            plan_payload = build_plan_payload(
-                proposals,
-                scores,
-                output_num_poses=cfg.output_num_poses,
-                selected_idx=int(selection_result["selected_index"]),
-                selected_source=str(selection_result["selected_source"]),
-                selection_debug=selection_debug,
-            )
-            write_plan(plan_pipe, plan_payload)
-        except Exception:
-            logging.error("Inference failure in RAP adapter")
-            logging.error(traceback.format_exc())
+    try:
+        while True:
             try:
-                write_plan(plan_pipe, None)
+                message = read_obs(obs_pipe)
+                if message == "Done":
+                    logging.info("Received shutdown signal")
+                    break
+
+                obs, info = message
+                info_history.append(dict(info))
+                while len(info_history) < EGO_HISTORY_FRAMES:
+                    info_history.appendleft(dict(info_history[0]))
+                features = build_features(obs, list(info_history), cfg)
+                with torch.no_grad():
+                    predictions = model(features, targets=None, return_score=True)
+                    scores = predictions["score"][0].detach().cpu().numpy()
+                    proposals = predictions["trajectory"][0].detach().cpu().numpy()
+                    best_idx = int(np.argmax(scores))
+                    trajectory = proposals[best_idx, :cfg.output_num_poses]
+                    best_xy = trajectory[:, :2]
+                    step_norms = np.linalg.norm(np.diff(best_xy, axis=0), axis=1) if len(best_xy) > 1 else np.zeros((0,), dtype=np.float32)
+
+                    if cfg.debug_diagnostics:
+                        top_indices = np.argsort(scores)[-3:][::-1]
+                        top_summary = []
+                        for idx in top_indices:
+                            proposal_xy = proposals[idx, :cfg.output_num_poses, :2]
+                            proposal_steps = np.linalg.norm(np.diff(proposal_xy, axis=0), axis=1)
+                            top_summary.append(
+                                (
+                                    int(idx),
+                                    float(scores[idx]),
+                                    float(np.linalg.norm(proposal_xy[-1] - proposal_xy[0])),
+                                    float(proposal_steps.sum()),
+                                )
+                            )
+                        logging.info(
+                            "ts=%.2f cmd=%s velo=%.3f best=%d score_max=%.4f score_mean=%.4f "
+                            "traj_extent=%.3f traj_path=%.3f min_step=%.4f max_step=%.4f top3=%s",
+                            float(info["timestamp"]),
+                            info.get("command"),
+                            float(info["ego_velo"]),
+                            best_idx,
+                            float(scores[best_idx]),
+                            float(scores.mean()),
+                            float(np.linalg.norm(best_xy[-1] - best_xy[0])),
+                            float(step_norms.sum()),
+                            float(step_norms.min(initial=0.0)),
+                            float(step_norms.max(initial=0.0)),
+                            top_summary,
+                        )
+
+                    traj_path = float(step_norms.sum()) if len(step_norms) > 0 else 0.0
+                    traj_extent = float(np.linalg.norm(trajectory[-1, :2] - trajectory[0, :2])) if len(trajectory) > 1 else 0.0
+                    if traj_path < 0.5:
+                        logging.warning(
+                            "collapsed_plan ts=%.2f cmd=%s velo=%.3f accel=%.3f path=%.3f extent=%.3f "
+                            "head=%s proposal0=%s",
+                            float(info["timestamp"]),
+                            info.get("command"),
+                            float(info["ego_velo"]),
+                            float(info.get("accelerate", 0.0)),
+                            traj_path,
+                            traj_extent,
+                            np.round(trajectory[:5, :2], 3).tolist(),
+                            np.round(proposals[0, :5, :2], 3).tolist(),
+                        )
+                sorted_indices = np.argsort(scores)[::-1]
+                carry_candidate = build_carry_plan_candidate(
+                    previous_plan=previous_selected_plan,
+                    previous_pose=previous_selected_pose,
+                    previous_selected_score=previous_selected_score,
+                    previous_timestamp=previous_selected_timestamp,
+                    current_info=info,
+                    cfg=cfg,
+                )
+
+                current_candidate_limit = max(1, int(cfg.vlm.candidate_limit) - 1)
+                current_candidate_limit = min(current_candidate_limit, int(len(sorted_indices)))
+                candidate_indices = sorted_indices[:current_candidate_limit]
+                candidate_rows: List[Dict[str, object]] = []
+                if carry_candidate is not None:
+                    candidate_rows.append(carry_candidate)
+                normalized_scores = normalize_scores(scores)
+                for idx in candidate_indices:
+                    full_plan = rap_to_hugsim_plan(proposals[idx, :cfg.output_num_poses])
+                    candidate_rows.append(
+                        {
+                            "source": "current_rap",
+                            "proposal_index": int(idx),
+                            "proposal_score": float(scores[idx]),
+                            "local_plan": full_plan,
+                            "execution_plan": full_plan.copy(),
+                            "proposal_score_norm": float(normalized_scores[idx]),
+                        }
+                    )
+
+                carry_row = next((row for row in candidate_rows if row.get("source") == "carry_prev"), None)
+                shared_horizon = len(carry_row["local_plan"]) if carry_row is not None else cfg.output_num_poses
+                shared_horizon = max(1, int(shared_horizon))
+                for row in candidate_rows:
+                    execution_plan = np.asarray(row.get("execution_plan", row["local_plan"]), dtype=np.float32)
+                    row["execution_plan"] = execution_plan
+                    row["local_plan"] = truncate_plan(execution_plan, shared_horizon)
+                    if "proposal_score_norm" not in row:
+                        row["proposal_score_norm"] = float(row.get("proposal_score", 0.0))
+                    row["q_score"] = compute_q_score(
+                        row["local_plan"],
+                        float(row.get("proposal_score_norm", row.get("proposal_score", 0.0))),
+                        cfg,
+                        is_carry=(row.get("source") == "carry_prev"),
+                    )
+
+                current_rows = [row for row in candidate_rows if row.get("source") == "current_rap"]
+                if not current_rows:
+                    raise RuntimeError("No current RAP candidates available for Q selection")
+
+                best_current_row = max(current_rows, key=lambda row: float(row.get("q_score", -1e6)))
+                best_current_pool_index = next(
+                    idx for idx, row in enumerate(candidate_rows)
+                    if row is best_current_row
+                )
+                q_best_current_score = float(best_current_row.get("q_score", -1e6))
+                q_carry_score = None if carry_row is None else float(carry_row.get("q_score", -1e6))
+                q_selected_pool_index = best_current_pool_index
+                q_selected_source = "q_switch_to_current"
+                q_score_gap = None
+
+                if carry_row is not None:
+                    q_score_gap = q_best_current_score - float(q_carry_score)
+                    if q_score_gap < cfg.vlm.q_switch_margin:
+                        q_selected_pool_index = next(
+                            idx for idx, row in enumerate(candidate_rows)
+                            if row is carry_row
+                        )
+                        q_selected_source = "q_reuse_prev"
+
+                q_uncertainty_reasons: List[str] = []
+                sorted_current_q = sorted((float(row.get("q_score", -1e6)) for row in current_rows), reverse=True)
+                if carry_row is not None and q_score_gap is not None and abs(q_score_gap) < cfg.vlm.q_uncertainty_margin:
+                    q_uncertainty_reasons.append("carry_vs_current_gap_small")
+                if len(sorted_current_q) >= 2 and abs(sorted_current_q[0] - sorted_current_q[1]) < cfg.vlm.q_uncertainty_margin:
+                    q_uncertainty_reasons.append("top2_current_gap_small")
+                max_available_q = max(q_best_current_score, q_carry_score if q_carry_score is not None else -1e6)
+                if max_available_q < cfg.vlm.q_quality_floor:
+                    q_uncertainty_reasons.append("low_absolute_q")
+                if candidate_disagreement_m(candidate_rows) > cfg.vlm.q_candidate_disagreement_threshold:
+                    q_uncertainty_reasons.append("high_candidate_disagreement")
+                if carry_row is not None and path_length(np.asarray(carry_row["local_plan"], dtype=np.float32)) < max(
+                    cfg.vlm.carry_previous_min_path_m * 2.0, 1.0
+                ):
+                    q_uncertainty_reasons.append("weak_carry_validity")
+                intervention_reasons = list(q_uncertainty_reasons)
+                best_current_path = path_length(np.asarray(best_current_row["local_plan"], dtype=np.float32))
+                if best_current_path < float(cfg.vlm.intervention_plan_path_floor_m):
+                    intervention_reasons.append("best_current_short_path")
+                q_selected_row = candidate_rows[q_selected_pool_index]
+                q_selected_path = path_length(np.asarray(q_selected_row["local_plan"], dtype=np.float32))
+                if q_selected_path < float(cfg.vlm.intervention_plan_path_floor_m):
+                    intervention_reasons.append("selected_plan_short_path")
+
+                intervention_mode = str(cfg.vlm.intervention_mode).strip().lower()
+                if intervention_mode == "always":
+                    invoke_vlm = bool(cfg.vlm.enabled)
+                elif intervention_mode == "uncertainty_only":
+                    invoke_vlm = bool(cfg.vlm.enabled and len(intervention_reasons) > 0)
+                else:
+                    logging.warning("Unknown RAP VLM intervention mode '%s'; defaulting to uncertainty_only", cfg.vlm.intervention_mode)
+                    invoke_vlm = bool(cfg.vlm.enabled and len(intervention_reasons) > 0)
+
+                selection_result = vlm_selector.maybe_select(
+                    frame_index=frame_index,
+                    front_image=obs["rgb"]["CAM_FRONT"],
+                    info=info,
+                    candidate_rows=candidate_rows,
+                    default_selected_index=q_selected_pool_index,
+                    default_selected_source=q_selected_source,
+                    invoke_vlm=invoke_vlm,
+                    uncertainty_reasons=intervention_reasons,
+                )
+                frame_index += 1
+
+                selected_row = selection_result["selected_candidate_row"]
+                selected_plan = np.asarray(selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32)
+                selected_idx = selected_row.get("proposal_index")
+                selected_score = float(selected_row.get("proposal_score", 0.0))
+
+                selection_debug = {
+                    "q_selected_idx": int(q_selected_pool_index),
+                    "q_selected_source": q_selected_source,
+                    "q_candidate_scores": [float(row.get("q_score", 0.0)) for row in candidate_rows],
+                    "q_carry_score": q_carry_score,
+                    "q_best_current_score": q_best_current_score,
+                    "q_score_gap": q_score_gap,
+                    "q_switch_margin": float(cfg.vlm.q_switch_margin),
+                    "q_uncertainty_margin": float(cfg.vlm.q_uncertainty_margin),
+                    "q_quality_floor": float(cfg.vlm.q_quality_floor),
+                    "q_uncertainty_triggered": bool(len(q_uncertainty_reasons) > 0),
+                    "q_uncertainty_reasons": q_uncertainty_reasons,
+                    "vlm_intervention_mode": intervention_mode,
+                    "vlm_intervention_triggered": bool(invoke_vlm),
+                    "vlm_intervention_reasons": intervention_reasons,
+                    "q_selected_path_length": q_selected_path,
+                    "q_best_current_path_length": best_current_path,
+                    "q_invoked_vlm": invoke_vlm,
+                    "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
+                    "vlm_confidence": selection_result.get("vlm_confidence"),
+                    "vlm_reasoning": selection_result.get("vlm_reasoning"),
+                    "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
+                    "vlm_error": selection_result.get("vlm_error"),
+                    "vlm_candidate_count": selection_result.get("vlm_candidate_count"),
+                    "vlm_q_valid": selection_result.get("vlm_q_valid"),
+                    "vlm_q_candidate_scores": selection_result.get("vlm_q_candidate_scores"),
+                    "vlm_q_best_candidate_index": selection_result.get("vlm_q_best_candidate_index"),
+                    "vlm_q_score_gap_to_carry": selection_result.get("vlm_q_score_gap_to_carry"),
+                    "vlm_q_score_gap_top2": selection_result.get("vlm_q_score_gap_top2"),
+                    "vlm_q_best_current_score": selection_result.get("vlm_q_best_current_score"),
+                    "vlm_q_carry_score": selection_result.get("vlm_q_carry_score"),
+                    "adaptive_replan_decision": selection_result.get("adaptive_replan_decision"),
+                    "carry_previous_valid": selection_result.get("carry_previous_valid"),
+                    "latency_timeline_record": selection_result.get("latency_timeline_record"),
+                }
+                plan_payload = build_plan_payload(
+                    proposals,
+                    scores,
+                    output_num_poses=cfg.output_num_poses,
+                    selected_idx=None if selected_idx is None else int(selected_idx),
+                    selected_source=str(selection_result["selected_source"]),
+                    selection_debug=selection_debug,
+                    selected_plan_override=selected_plan,
+                    selected_score_override=selected_score,
+                    candidate_pool_rows=candidate_rows,
+                )
+                write_plan(plan_pipe, plan_payload)
+
+                previous_selected_plan = selected_plan.copy()
+                previous_selected_pose = info_to_pose(info)
+                previous_selected_score = selected_score
+                previous_selected_timestamp = float(info.get("timestamp", 0.0))
             except Exception:
-                logging.error("Failed to notify HUGSIM about planner failure")
-            return 1
+                logging.error("Inference failure in RAP adapter")
+                logging.error(traceback.format_exc())
+                try:
+                    write_plan(plan_pipe, None)
+                except Exception:
+                    logging.error("Failed to notify HUGSIM about planner failure")
+                return 1
+    finally:
+        vlm_selector.finalize()
 
     return 0
 

@@ -28,6 +28,7 @@ TOPK_BASE_COLORS = [
     (255, 90, 0),
     (255, 0, 0),
 ]
+PAST_TRAJECTORY_COLOR = (0, 0, 0)
 TOPK_COLOR_NAMES = [
     "blue",
     "light_blue",
@@ -47,14 +48,32 @@ PLAN_RESAMPLE_SPACING_M = 0.08
 @dataclass
 class VLMSelectorConfig:
     enabled: bool = False
+    intervention_mode: str = "uncertainty_only"
     backend: str = "qwen3_vl"
     model_id: str = "Qwen/Qwen3-VL-8B-Instruct"
     device: str = "auto"
     max_new_tokens: int = 300
-    candidate_limit: int = 10
+    candidate_limit: int = 5
     timeout_sec: float = 10.0
     save_debug_artifacts: bool = True
     debug_dir_name: str = "vlm_debug"
+    carry_previous_enabled: bool = True
+    carry_previous_min_path_m: float = 0.5
+    carry_previous_min_points: int = 2
+    adaptive_replan_mode: str = "log_only"
+    latency_tracking_mode: str = "full_timeline"
+    q_enabled: bool = True
+    q_switch_margin: float = 0.05
+    q_uncertainty_margin: float = 0.03
+    q_quality_floor: float = 0.18
+    q_candidate_disagreement_threshold: float = 2.5
+    q_weight_rap_score: float = 0.55
+    q_weight_progress: float = 0.30
+    q_weight_offcenter: float = 0.10
+    q_weight_curvature: float = 0.08
+    q_weight_shortplan: float = 0.18
+    q_carry_score_decay: float = 0.0
+    intervention_plan_path_floor_m: float = 1.0
 
 
 def _fov2focal(fov: float, pixels: float) -> float:
@@ -204,6 +223,34 @@ def _draw_projected_polyline_camera_clipped(
     return image
 
 
+def _project_world_points_to_image(
+    points_world: np.ndarray,
+    intrinsic: Dict[str, float],
+    c2w: np.ndarray,
+) -> List[Tuple[int, int, bool]]:
+    if len(points_world) == 0:
+        return []
+
+    K = _get_camera_matrix(intrinsic)
+    homogeneous = np.concatenate(
+        [np.asarray(points_world, dtype=np.float32), np.ones((len(points_world), 1), dtype=np.float32)],
+        axis=1,
+    )
+    camera_points = (np.linalg.inv(c2w) @ homogeneous.T).T[:, :3]
+
+    depth = camera_points[:, 2]
+    valid = depth > 1e-4
+    points: List[Tuple[int, int, bool]] = []
+    for idx, point_cam in enumerate(camera_points):
+        if not valid[idx]:
+            points.append((0, 0, False))
+            continue
+        image_point = K[:3, :3] @ point_cam
+        uv = image_point[:2] / np.clip(image_point[2], 1e-3, None)
+        points.append((int(round(float(uv[0]))), int(round(float(uv[1]))), True))
+    return points
+
+
 def render_candidate_overlay(
     front_image: np.ndarray,
     info: Dict[str, object],
@@ -253,34 +300,6 @@ def render_candidate_overlay(
     return overlay
 
 
-def _project_world_points_to_image(
-    points_world: np.ndarray,
-    intrinsic: Dict[str, float],
-    c2w: np.ndarray,
-) -> List[Tuple[int, int, bool]]:
-    if len(points_world) == 0:
-        return []
-
-    K = _get_camera_matrix(intrinsic)
-    homogeneous = np.concatenate(
-        [np.asarray(points_world, dtype=np.float32), np.ones((len(points_world), 1), dtype=np.float32)],
-        axis=1,
-    )
-    camera_points = (np.linalg.inv(c2w) @ homogeneous.T).T[:, :3]
-
-    depth = camera_points[:, 2]
-    valid = depth > 1e-4
-    points: List[Tuple[int, int, bool]] = []
-    for idx, point_cam in enumerate(camera_points):
-        if not valid[idx]:
-            points.append((0, 0, False))
-            continue
-        image_point = K[:3, :3] @ point_cam
-        uv = image_point[:2] / np.clip(image_point[2], 1e-3, None)
-        points.append((int(round(float(uv[0]))), int(round(float(uv[1]))), True))
-    return points
-
-
 def summarize_candidate(points: List[Sequence[float]]) -> Dict[str, object]:
     if not points:
         return {
@@ -312,13 +331,27 @@ def summarize_candidate(points: List[Sequence[float]]) -> Dict[str, object]:
     }
 
 
+def path_length(points: np.ndarray) -> float:
+    points = np.asarray(points, dtype=np.float32)
+    if len(points) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
+
+
 def format_candidate_text(candidate_rows: Sequence[Dict[str, object]]) -> str:
     lines = []
     for row in candidate_rows:
         s = row["summary"]
+        q_score = row.get("q_score")
         line = (
             f"- candidate_{row['candidate_index']} | color={row['color_name']} | source={row['source']} | "
-            f"rap_score={row['rap_score']:.4f} | num_points={s['num_points']} | "
+            f"score={row['rap_score']:.4f} | "
+            f"q_score={float(q_score):.4f} | " if q_score is not None else
+            f"- candidate_{row['candidate_index']} | color={row['color_name']} | source={row['source']} | "
+            f"score={row['rap_score']:.4f} | "
+        )
+        line += (
+            f"num_points={s['num_points']} | "
             f"start={s['start']} | end={s['end']} | "
             f"x_range=[{s['min_x']},{s['max_x']}] | y_range=[{s['min_y']},{s['max_y']}] | "
             f"delta=({s['delta_x']},{s['delta_y']})"
@@ -327,10 +360,23 @@ def format_candidate_text(candidate_rows: Sequence[Dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
-def build_scoring_prompt(candidate_rows: Sequence[Dict[str, object]], route_instruction: str) -> str:
+def build_scoring_prompt(
+    candidate_rows: Sequence[Dict[str, object]],
+    route_instruction: str,
+    uncertainty_reasons: Optional[Sequence[str]] = None,
+) -> str:
     candidate_text = format_candidate_text(candidate_rows)
+    score_schema_lines = ",\n".join(
+        f'    "{row["candidate_index"]}": <float>'
+        for row in candidate_rows
+    )
+    candidate_index_list = ", ".join(str(row["candidate_index"]) for row in candidate_rows)
+    uncertainty_text = ""
+    if uncertainty_reasons:
+        uncertainty_text = "Planner context:\n" + "\n".join(f"- {reason}" for reason in uncertainty_reasons)
+        uncertainty_text += "\n\n"
     return f"""
-You are a cautious autonomous-driving trajectory selector.
+You are a cautious autonomous-driving trajectory scorer.
 
 You are given:
 1. A front-facing driving image with multiple color-coded candidate trajectories overlaid.
@@ -338,7 +384,8 @@ You are given:
 3. A route-level driving instruction.
 
 Your job:
-- Select the SINGLE best candidate trajectory.
+- Score EVERY candidate trajectory with a scalar Q-like value.
+- Also identify the single best candidate.
 - Judge based on visible scene context and trajectory plausibility.
 - Prefer:
   - staying in the drivable region,
@@ -351,36 +398,47 @@ Your job:
 Important constraints:
 - Use only what is visible in the image and candidate metadata.
 - Do not assume access to a hidden map or ground-truth future route.
-- If multiple candidates are similar, choose the safest one.
-- If all candidates are imperfect, choose the least risky one.
+- If multiple candidates are similar, give them similar scores.
+- If all candidates are imperfect, prefer the least risky one.
+- There are exactly {len(candidate_rows)} candidates in this frame.
+- You MUST return one score for every candidate index: {candidate_index_list}.
+- Do not omit any candidate index.
+- Do not shorten the score dictionary to a partial example.
+- One candidate may be "carry_prev", which means continue following the
+  previously selected plan instead of switching to a fresh current proposal.
+- Treat scores as relative action values:
+  - higher is better,
+  - score based on visible safety, lane alignment, route following, and smoothness,
+  - penalize trajectories that visibly leave the road, cut across lanes, or
+    look inconsistent with the scene.
+- Keep score scale internally consistent within this frame.
+- Keep the response compact. Do not include long explanations.
 
 Route instruction:
 {route_instruction}
+
+{uncertainty_text}
 
 Candidate trajectories:
 {candidate_text}
 
 Return ONLY valid JSON in this exact schema:
 {{
+  "candidate_scores": {{
+{score_schema_lines}
+  }},
   "best_candidate_index": <int>,
-  "best_candidate_color": "<str>",
-  "confidence": <float between 0 and 1>,
-  "reasoning": {{
-    "safety": "<primary safety considerations>",
-    "lane_alignment": "<how well it follows road geometry>",
-    "confidence_justification": "<brief explanation of the confidence score>"
-  }}
+  "confidence": <float between 0 and 1>
 }}
 """.strip()
 
 
 def try_parse_json(text: str) -> Optional[Dict[str, object]]:
     raw = text.strip()
-    for candidate in (raw,):
-        try:
-            return json.loads(candidate)
-        except Exception:
-            pass
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
 
     fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, flags=re.DOTALL)
     if fenced:
@@ -395,7 +453,6 @@ def try_parse_json(text: str) -> Optional[Dict[str, object]]:
             return json.loads(blob.group(1))
         except Exception:
             pass
-
     return None
 
 
@@ -474,8 +531,14 @@ class Qwen3TrajectorySelector:
             clean_up_tokenization_spaces=False,
         )[0]
 
-    def select(self, image_path: Path, candidate_rows: Sequence[Dict[str, object]], route_instruction: str) -> Dict[str, object]:
-        prompt = build_scoring_prompt(candidate_rows, route_instruction)
+    def select(
+        self,
+        image_path: Path,
+        candidate_rows: Sequence[Dict[str, object]],
+        route_instruction: str,
+        uncertainty_reasons: Optional[Sequence[str]] = None,
+    ) -> Dict[str, object]:
+        prompt = build_scoring_prompt(candidate_rows, route_instruction, uncertainty_reasons=uncertainty_reasons)
         started = time.time()
         raw_output = self._run_inference(image_path, prompt)
         parsed = try_parse_json(raw_output)
@@ -487,27 +550,106 @@ class Qwen3TrajectorySelector:
         }
 
 
-def build_candidate_rows(
-    plans: Sequence[np.ndarray],
-    proposal_indices: Sequence[int],
-    proposal_scores: Sequence[float],
-) -> List[Dict[str, object]]:
+def build_candidate_rows(candidates: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
-    for rank, (plan, proposal_idx, score) in enumerate(zip(plans, proposal_indices, proposal_scores)):
-        color = TOPK_BASE_COLORS[min(rank, len(TOPK_BASE_COLORS) - 1)]
+    current_rank = 0
+    for rank, candidate in enumerate(candidates):
+        source = str(candidate.get("source", "current_rap"))
+        if source == "carry_prev":
+            color = PAST_TRAJECTORY_COLOR
+            color_name = "black"
+        else:
+            color = TOPK_BASE_COLORS[min(current_rank, len(TOPK_BASE_COLORS) - 1)]
+            color_name = TOPK_COLOR_NAMES[min(current_rank, len(TOPK_COLOR_NAMES) - 1)]
+            current_rank += 1
+        plan = np.asarray(candidate["local_plan"], dtype=np.float32)
         row = {
             "candidate_index": rank,
             "candidate_rank": rank,
-            "proposal_index": int(proposal_idx),
-            "source": "current_rap",
-            "color_name": TOPK_COLOR_NAMES[min(rank, len(TOPK_COLOR_NAMES) - 1)],
+            "proposal_index": None if candidate.get("proposal_index") is None else int(candidate["proposal_index"]),
+            "source": source,
+            "color_name": color_name,
             "color_bgr": list(color),
-            "local_plan": np.asarray(plan, dtype=np.float32).tolist(),
-            "rap_score": float(score),
+            "local_plan": plan.tolist(),
+            "execution_plan": np.asarray(candidate.get("execution_plan", candidate["local_plan"]), dtype=np.float32).tolist(),
+            "rap_score": float(candidate.get("proposal_score", 0.0)),
+            "q_score": None if candidate.get("q_score") is None else float(candidate["q_score"]),
         }
         row["summary"] = summarize_candidate(row["local_plan"])
         rows.append(row)
     return rows
+
+
+def _coerce_candidate_scores(raw_scores: object, num_candidates: int) -> Tuple[Optional[List[float]], Optional[str]]:
+    if not isinstance(raw_scores, dict):
+        return None, "candidate_scores_missing"
+
+    scores: List[Optional[float]] = [None] * num_candidates
+    for raw_key, raw_value in raw_scores.items():
+        try:
+            idx = int(raw_key)
+        except Exception:
+            return None, f"candidate_score_bad_key:{raw_key}"
+        if idx < 0 or idx >= num_candidates:
+            return None, f"candidate_score_key_out_of_range:{idx}"
+        try:
+            scores[idx] = float(raw_value)
+        except Exception:
+            return None, f"candidate_score_bad_value:{raw_key}"
+
+    if any(score is None for score in scores):
+        missing = [idx for idx, score in enumerate(scores) if score is None]
+        return None, f"candidate_scores_incomplete:{missing}"
+    return [float(score) for score in scores], None
+
+
+def _select_from_vlm_q_scores(
+    candidate_rows: Sequence[Dict[str, object]],
+    vlm_q_scores: Sequence[float],
+    carry_switch_margin: float,
+) -> Dict[str, object]:
+    vlm_q_scores = [float(score) for score in vlm_q_scores]
+    if len(vlm_q_scores) != len(candidate_rows):
+        raise ValueError("VLM Q score count does not match candidate rows")
+
+    carry_idx = next((idx for idx, row in enumerate(candidate_rows) if row.get("source") == "carry_prev"), None)
+    current_indices = [idx for idx, row in enumerate(candidate_rows) if row.get("source") != "carry_prev"]
+    if not current_indices:
+        raise ValueError("No current candidates available for VLM-Q selection")
+
+    best_current_idx = max(current_indices, key=lambda idx: vlm_q_scores[idx])
+    best_current_score = float(vlm_q_scores[best_current_idx])
+    carry_score = None if carry_idx is None else float(vlm_q_scores[carry_idx])
+
+    selected_idx = int(best_current_idx)
+    selected_source = "vlm_q_current"
+    decision = "vlm_q_switch_to_current"
+    score_gap_to_carry = None
+
+    if carry_idx is not None and carry_score is not None:
+        score_gap_to_carry = best_current_score - carry_score
+        if score_gap_to_carry < float(carry_switch_margin):
+            selected_idx = int(carry_idx)
+            selected_source = "vlm_q_carry_prev"
+            decision = "vlm_q_reuse_prev"
+
+    sorted_scores = sorted(((float(score), idx) for idx, score in enumerate(vlm_q_scores)), reverse=True)
+    score_gap_top2 = None
+    if len(sorted_scores) >= 2:
+        score_gap_top2 = float(sorted_scores[0][0] - sorted_scores[1][0])
+
+    return {
+        "selected_candidate_index": selected_idx,
+        "selected_candidate_row": dict(candidate_rows[selected_idx]),
+        "selected_source": selected_source,
+        "adaptive_replan_decision": decision if carry_idx is not None else "no_valid_prev",
+        "vlm_q_best_current_index": int(best_current_idx),
+        "vlm_q_best_current_score": best_current_score,
+        "vlm_q_carry_index": None if carry_idx is None else int(carry_idx),
+        "vlm_q_carry_score": carry_score,
+        "vlm_q_score_gap_to_carry": score_gap_to_carry,
+        "vlm_q_score_gap_top2": score_gap_top2,
+    }
 
 
 class VLMPlanSelector:
@@ -515,11 +657,26 @@ class VLMPlanSelector:
         self.cfg = cfg
         self.output_dir = output_dir
         self.debug_dir = output_dir / cfg.debug_dir_name
+        self.timeline_path = self.debug_dir / "latency_timeline.jsonl"
+        self.summary_path = self.debug_dir / "latency_summary.json"
         self._selector: Optional[Qwen3TrajectorySelector] = None
         self._disabled_reason: Optional[str] = None
+        self._timeline_records: List[Dict[str, object]] = []
 
         if cfg.save_debug_artifacts:
             self.debug_dir.mkdir(parents=True, exist_ok=True)
+            self.timeline_path.unlink(missing_ok=True)
+            self.summary_path.unlink(missing_ok=True)
+            for stale_path in self.debug_dir.glob("frame_*_candidates.jpg"):
+                stale_path.unlink(missing_ok=True)
+            for stale_path in self.debug_dir.glob("frame_*_result.json"):
+                stale_path.unlink(missing_ok=True)
+
+    def _record_timeline(self, record: Dict[str, object]) -> None:
+        self._timeline_records.append(record)
+        if self.cfg.save_debug_artifacts:
+            with self.timeline_path.open("a", encoding="utf-8") as wf:
+                wf.write(json.dumps(record) + "\n")
 
     def _ensure_selector(self) -> Optional[Qwen3TrajectorySelector]:
         if self._selector is not None:
@@ -552,29 +709,65 @@ class VLMPlanSelector:
         frame_index: int,
         front_image: np.ndarray,
         info: Dict[str, object],
-        candidate_plans: Sequence[np.ndarray],
-        candidate_indices: Sequence[int],
-        candidate_scores: Sequence[float],
-        rap_argmax_index: int,
+        candidate_rows: Sequence[Dict[str, object]],
+        default_selected_index: int,
+        default_selected_source: str,
+        invoke_vlm: bool,
+        uncertainty_reasons: Optional[Sequence[str]] = None,
     ) -> Dict[str, object]:
-        if not self.cfg.enabled:
-            return {
-                "selected_index": int(rap_argmax_index),
-                "selected_source": "rap_argmax",
+        route_instruction = command_to_route_instruction(info.get("command"))
+        timestamp = float(info.get("timestamp", 0.0))
+        dt_sec = 0.25
+        carry_previous_valid = any(row.get("source") == "carry_prev" for row in candidate_rows)
+        candidate_rows = build_candidate_rows(candidate_rows)
+
+        def _fallback_result(error: Optional[str] = None) -> Dict[str, object]:
+            selected_row = dict(candidate_rows[default_selected_index])
+            adaptive_replan_decision = "no_valid_prev" if not carry_previous_valid else (
+                "q_reuse_prev" if selected_row.get("source") == "carry_prev" else "q_switch_to_current"
+            )
+            timeline_record = {
+                "frame_index": frame_index,
+                "timestamp": timestamp,
+                "route_instruction": route_instruction,
+                "candidate_count": len(candidate_rows),
+                "carry_previous_valid": carry_previous_valid,
+                "selected_source": default_selected_source,
+                "selected_candidate_index": default_selected_index,
+                "selected_candidate_source": selected_row.get("source"),
+                "selected_proposal_index": selected_row.get("proposal_index"),
+                "vlm_elapsed_sec": 0.0,
+                "latency_equivalent_steps": 0.0,
+                "latency_equivalent_steps_ceil": 0,
+                "adaptive_replan_decision": adaptive_replan_decision,
+                "error": error,
+                "q_invoked_vlm": False,
+                "q_uncertainty_reasons": list(uncertainty_reasons or []),
+                "vlm_q_valid": False,
             }
+            self._record_timeline(timeline_record)
+            result = {
+                "selected_candidate_row": selected_row,
+                "selected_source": default_selected_source,
+                "adaptive_replan_decision": adaptive_replan_decision,
+                "carry_previous_valid": carry_previous_valid,
+                "latency_timeline_record": timeline_record,
+                "vlm_q_valid": False,
+            }
+            if error is not None:
+                result["error"] = error
+            return result
+
+        if not invoke_vlm:
+            return _fallback_result()
+        if not self.cfg.enabled:
+            return _fallback_result("vlm_disabled_uncertain_q_fallback")
 
         selector = self._ensure_selector()
         if selector is None:
-            return {
-                "selected_index": int(rap_argmax_index),
-                "selected_source": "fallback_rap_argmax",
-                "error": self._disabled_reason or "selector_unavailable",
-            }
+            return _fallback_result(self._disabled_reason or "selector_unavailable")
 
-        candidate_rows = build_candidate_rows(candidate_plans, candidate_indices, candidate_scores)
         overlay = render_candidate_overlay(front_image, info, candidate_rows)
-        route_instruction = command_to_route_instruction(info.get("command"))
-
         frame_stem = f"frame_{frame_index:04d}"
         image_path = self.debug_dir / f"{frame_stem}_candidates.jpg"
         result_path = self.debug_dir / f"{frame_stem}_result.json"
@@ -586,7 +779,7 @@ class VLMPlanSelector:
 
         try:
             LOG.info(
-                "Running VLM selection for frame=%d candidates=%d route='%s'",
+                "Running VLM-Q selection for frame=%d candidates=%d route='%s'",
                 frame_index,
                 len(candidate_rows),
                 route_instruction,
@@ -595,9 +788,10 @@ class VLMPlanSelector:
                 image_path=image_path,
                 candidate_rows=candidate_rows,
                 route_instruction=route_instruction,
+                uncertainty_reasons=uncertainty_reasons,
             )
         except Exception as exc:
-            LOG.exception("VLM selector inference failed, falling back to RAP argmax")
+            LOG.exception("VLM-Q selector inference failed, falling back to fast-Q")
             result = {
                 "raw_output": "",
                 "parsed_output": None,
@@ -605,43 +799,114 @@ class VLMPlanSelector:
                 "prompt": "",
                 "error": str(exc),
             }
+
         parsed = result.get("parsed_output")
         elapsed_sec = float(result.get("elapsed_sec", 0.0))
-        selected_index = int(rap_argmax_index)
-        selected_source = "fallback_rap_argmax"
+        selected_candidate_index = int(default_selected_index)
+        selected_row = dict(candidate_rows[default_selected_index])
+        selected_source = default_selected_source
         error = None
         vlm_confidence = None
         vlm_reasoning = None
         vlm_candidate_index = None
+        vlm_q_valid = False
+        vlm_q_candidate_scores = None
+        vlm_q_best_candidate_index = None
+        vlm_q_score_gap_to_carry = None
+        vlm_q_score_gap_top2 = None
+        vlm_q_best_current_score = None
+        vlm_q_carry_score = None
 
         if isinstance(parsed, dict):
+            coerced_scores, score_error = _coerce_candidate_scores(parsed.get("candidate_scores"), len(candidate_rows))
             candidate_idx = parsed.get("best_candidate_index")
-            if isinstance(candidate_idx, int) and 0 <= candidate_idx < len(candidate_rows):
-                vlm_candidate_index = int(candidate_idx)
-                selected_index = int(candidate_rows[candidate_idx]["proposal_index"])
-                selected_source = "vlm_qwen3"
+            if coerced_scores is not None:
+                selection = _select_from_vlm_q_scores(
+                    candidate_rows=candidate_rows,
+                    vlm_q_scores=coerced_scores,
+                    carry_switch_margin=self.cfg.q_switch_margin,
+                )
+                vlm_q_valid = True
+                vlm_q_candidate_scores = [float(score) for score in coerced_scores]
+                selected_candidate_index = int(selection["selected_candidate_index"])
+                selected_row = dict(selection["selected_candidate_row"])
+                selected_source = str(selection["selected_source"])
+                vlm_q_best_candidate_index = int(max(range(len(vlm_q_candidate_scores)), key=lambda idx: vlm_q_candidate_scores[idx]))
+                vlm_q_score_gap_to_carry = selection["vlm_q_score_gap_to_carry"]
+                vlm_q_score_gap_top2 = selection["vlm_q_score_gap_top2"]
+                vlm_q_best_current_score = selection["vlm_q_best_current_score"]
+                vlm_q_carry_score = selection["vlm_q_carry_score"]
+                if isinstance(candidate_idx, int) and 0 <= candidate_idx < len(candidate_rows):
+                    vlm_candidate_index = int(candidate_idx)
                 vlm_confidence = float(parsed.get("confidence", 0.0))
                 vlm_reasoning = parsed.get("reasoning")
                 if elapsed_sec > self.cfg.timeout_sec:
                     error = f"selector_slow:{elapsed_sec:.3f}"
             else:
-                error = "invalid_candidate_index"
+                error = score_error or "invalid_candidate_scores"
         else:
-            if elapsed_sec > self.cfg.timeout_sec:
-                error = f"selector_timeout_budget_exceeded:{elapsed_sec:.3f}"
-            else:
-                error = str(result.get("error") or "invalid_selector_output")
+            error = (
+                f"selector_timeout_budget_exceeded:{elapsed_sec:.3f}"
+                if elapsed_sec > self.cfg.timeout_sec
+                else str(result.get("error") or "invalid_selector_output")
+            )
+
+        latency_equivalent_steps = elapsed_sec / max(dt_sec, 1e-6)
+        latency_equivalent_steps_ceil = int(math.ceil(latency_equivalent_steps))
+        adaptive_replan_decision = "no_valid_prev"
+        if carry_previous_valid:
+            adaptive_replan_decision = "vlm_q_reuse_prev" if selected_row.get("source") == "carry_prev" else "vlm_q_switch_to_current"
+
+        timeline_record = {
+            "frame_index": frame_index,
+            "timestamp": timestamp,
+            "route_instruction": route_instruction,
+            "candidate_count": len(candidate_rows),
+            "carry_previous_valid": carry_previous_valid,
+            "carry_previous_remaining_path_m": next(
+                (path_length(np.asarray(row["local_plan"], dtype=np.float32)) for row in candidate_rows if row.get("source") == "carry_prev"),
+                0.0,
+            ),
+            "selected_source": selected_source,
+            "selected_candidate_index": selected_candidate_index,
+            "selected_candidate_source": selected_row.get("source"),
+            "selected_proposal_index": selected_row.get("proposal_index"),
+            "vlm_elapsed_sec": elapsed_sec,
+            "vlm_q_valid": vlm_q_valid,
+            "vlm_q_candidate_scores": vlm_q_candidate_scores,
+            "vlm_q_best_candidate_index": vlm_q_best_candidate_index,
+            "vlm_q_score_gap_to_carry": vlm_q_score_gap_to_carry,
+            "vlm_q_score_gap_top2": vlm_q_score_gap_top2,
+            "latency_equivalent_steps": latency_equivalent_steps,
+            "latency_equivalent_steps_ceil": latency_equivalent_steps_ceil,
+            "adaptive_replan_decision": adaptive_replan_decision,
+            "error": error,
+            "q_invoked_vlm": True,
+            "q_uncertainty_reasons": list(uncertainty_reasons or []),
+        }
+        self._record_timeline(timeline_record)
 
         debug_payload = {
             "frame_index": frame_index,
             "route_instruction": route_instruction,
-            "rap_argmax_index": int(rap_argmax_index),
+            "default_selected_index": int(default_selected_index),
+            "default_selected_source": default_selected_source,
             "candidate_rows": candidate_rows,
             "selector_result": result,
-            "selected_index": int(selected_index),
+            "selected_index": int(selected_candidate_index),
             "selected_source": selected_source,
             "vlm_candidate_index": vlm_candidate_index,
             "vlm_confidence": vlm_confidence,
+            "vlm_q_valid": vlm_q_valid,
+            "vlm_q_candidate_scores": vlm_q_candidate_scores,
+            "vlm_q_best_candidate_index": vlm_q_best_candidate_index,
+            "vlm_q_score_gap_to_carry": vlm_q_score_gap_to_carry,
+            "vlm_q_score_gap_top2": vlm_q_score_gap_top2,
+            "vlm_q_best_current_score": vlm_q_best_current_score,
+            "vlm_q_carry_score": vlm_q_carry_score,
+            "adaptive_replan_decision": adaptive_replan_decision,
+            "carry_previous_valid": carry_previous_valid,
+            "latency_timeline_record": timeline_record,
             "error": error,
         }
         if self.cfg.save_debug_artifacts:
@@ -650,17 +915,17 @@ class VLMPlanSelector:
             image_path.unlink(missing_ok=True)
 
         LOG.info(
-            "VLM selection frame=%d source=%s proposal=%d candidate=%s elapsed=%.3f error=%s",
+            "VLM-Q selection frame=%d source=%s proposal=%d candidate=%s elapsed=%.3f error=%s",
             frame_index,
             selected_source,
-            int(selected_index),
-            "none" if vlm_candidate_index is None else str(vlm_candidate_index),
+            -1 if selected_row.get("proposal_index") is None else int(selected_row["proposal_index"]),
+            "none" if vlm_q_best_candidate_index is None else str(vlm_q_best_candidate_index),
             elapsed_sec,
             error,
         )
 
         return {
-            "selected_index": int(selected_index),
+            "selected_candidate_row": selected_row,
             "selected_source": selected_source,
             "vlm_candidate_index": vlm_candidate_index,
             "vlm_confidence": vlm_confidence,
@@ -668,4 +933,49 @@ class VLMPlanSelector:
             "vlm_elapsed_sec": elapsed_sec,
             "vlm_error": error,
             "vlm_candidate_count": len(candidate_rows),
+            "vlm_q_valid": vlm_q_valid,
+            "vlm_q_candidate_scores": vlm_q_candidate_scores,
+            "vlm_q_best_candidate_index": vlm_q_best_candidate_index,
+            "vlm_q_score_gap_to_carry": vlm_q_score_gap_to_carry,
+            "vlm_q_score_gap_top2": vlm_q_score_gap_top2,
+            "vlm_q_best_current_score": vlm_q_best_current_score,
+            "vlm_q_carry_score": vlm_q_carry_score,
+            "adaptive_replan_decision": adaptive_replan_decision,
+            "carry_previous_valid": carry_previous_valid,
+            "latency_timeline_record": timeline_record,
         }
+
+    def finalize(self) -> None:
+        if not self._timeline_records or not self.cfg.save_debug_artifacts:
+            return
+
+        elapsed = [float(record["vlm_elapsed_sec"]) for record in self._timeline_records]
+        carry_reuse_rate = sum(
+            record["adaptive_replan_decision"] in {"reuse_prev", "vlm_q_reuse_prev", "q_reuse_prev"}
+            for record in self._timeline_records
+        ) / len(self._timeline_records)
+        switch_rate = sum(
+            record["adaptive_replan_decision"] in {"switch_to_current", "vlm_q_switch_to_current", "q_switch_to_current"}
+            for record in self._timeline_records
+        ) / len(self._timeline_records)
+        fallback_rate = sum(
+            record.get("selected_source", "").startswith("fallback")
+            for record in self._timeline_records
+        ) / len(self._timeline_records)
+        summary = {
+            "num_records": len(self._timeline_records),
+            "latency_mean_sec": float(np.mean(elapsed)),
+            "latency_p50_sec": float(np.percentile(elapsed, 50)),
+            "latency_p95_sec": float(np.percentile(elapsed, 95)),
+            "latency_max_sec": float(np.max(elapsed)),
+            "latency_equivalent_steps_mean": float(
+                np.mean([record["latency_equivalent_steps"] for record in self._timeline_records])
+            ),
+            "carry_reuse_rate": float(carry_reuse_rate),
+            "switch_to_current_rate": float(switch_rate),
+            "fallback_rate": float(fallback_rate),
+            "vlm_q_valid_rate": float(
+                np.mean([1.0 if record.get("vlm_q_valid") else 0.0 for record in self._timeline_records])
+            ),
+        }
+        self.summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
