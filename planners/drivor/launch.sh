@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CUDA_ID="${1:?missing cuda id}"
+OUTPUT_DIR="${2:?missing output dir}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+export CUDA_VISIBLE_DEVICES="${CUDA_ID}"
+
+# Provided by HUGSIM closed_loop.py via extra_env
+: "${DRIVOR_PYTHON_BIN:=python}"
+: "${DRIVOR_REPO_ROOT:?DRIVOR_REPO_ROOT is not set}"
+: "${DRIVOR_CHECKPOINT:?DRIVOR_CHECKPOINT is not set}"
+: "${DRIVOR_DEVICE:=cuda}"
+
+# Optional: if you add config composition
+# : "${DRIVOR_CONFIG_DIR:?DRIVOR_CONFIG_DIR is not set}"
+# : "${DRIVOR_EXPERIMENT:?DRIVOR_EXPERIMENT is not set}"
+
+# Prevent the DrivoR env from accidentally loading HUGSIM pixi torch libs.
+if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+  CLEANED_LD_LIBRARY_PATH="$(python3 - <<'PY'
+import os
+entries = os.environ.get("LD_LIBRARY_PATH", "").split(":")
+filtered = [entry for entry in entries if "/HUGSIM/.pixi/" not in entry]
+print(":".join(filtered))
+PY
+)"
+  if [[ -n "${CLEANED_LD_LIBRARY_PATH}" ]]; then
+    export LD_LIBRARY_PATH="${CLEANED_LD_LIBRARY_PATH}"
+  else
+    unset LD_LIBRARY_PATH
+  fi
+fi
+
+exec "${DRIVOR_PYTHON_BIN}" "${SCRIPT_DIR}/client.py" --output "${OUTPUT_DIR}"

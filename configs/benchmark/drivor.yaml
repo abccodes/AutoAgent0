@@ -1,0 +1,8 @@
+drivor:
+  launch_path: ./planners/drivor/launch.sh
+  repo_root: /data/guest_rui/ztrs_workspace/DrivoR
+  checkpoint: data/guest_rui/ztrs_workspace/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
+  dino: data/guest_rui/ztrs_workspace/DrivoR/weights/vit_small_patch14_reg4_dinov2.lvd142m
+  python_bin: /data/guest_rui/conda_envs/rap/bin/python
+  device: cuda
+  image_scale: 0.4
