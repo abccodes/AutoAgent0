@@ -513,6 +513,8 @@ if __name__ == "__main__":
         ad_path = cfg.base.ltf_path
     elif args.ad == 'rap':
         ad_path = cfg.planner.rap.launch_path
+    elif args.ad == "drivor":
+        ad_path = cfg.planner.drivor.launch_path
     else:
         raise NotImplementedError
 
@@ -535,6 +537,15 @@ if __name__ == "__main__":
             'RAP_VLM_TIMEOUT_SEC': cfg.planner.rap.vlm.get('timeout_sec', 10.0),
             'RAP_VLM_SAVE_DEBUG_ARTIFACTS': cfg.planner.rap.vlm.get('save_debug_artifacts', True),
             'RAP_VLM_DEBUG_DIR_NAME': cfg.planner.rap.vlm.get('debug_dir_name', 'vlm_debug'),
+        }
+        
+    elif args.ad == "drivor":
+        extra_env = {
+            'DRIVOR_REPO_ROOT': cfg.planner.drivor.get('repo_root', ''),
+            'DRIVOR_CHECKPOINT': cfg.planner.drivor.get('checkpoint', ''),
+            'DRIVOR_DINO': cfg.planner.drivor.get('dino', ''),
+            'DRIVOR_PYTHON_BIN': cfg.planner.drivor.get('python_bin', 'python'),
+            'DRIVOR_DEVICE': cfg.planner.drivor.get('device', 'cuda')
         }
 
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
