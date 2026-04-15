@@ -10,11 +10,13 @@ import traceback
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 import torch
+
+from vlm_selector import VLMPlanSelector, VLMSelectorConfig
 
 # Newer transformers expects torch>=2.2's public pytree registration name.
 # RAP currently runs with torch 2.1 in this env, which still exposes the
@@ -65,12 +67,20 @@ class AdapterConfig:
     debug_diagnostics: bool
     use_scene_rig_lidar2img: bool
     output_num_poses: int
+    vlm: VLMSelectorConfig
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RAP FIFO client for HUGSIM")
     parser.add_argument("--output", required=True, help="HUGSIM output directory containing FIFO pipes")
     return parser.parse_args()
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def resolve_config(args: argparse.Namespace) -> AdapterConfig:
@@ -94,9 +104,20 @@ def resolve_config(args: argparse.Namespace) -> AdapterConfig:
         camera_order=list(DEFAULT_CAM_ORDER),
         image_scale=image_scale,
         device=torch.device(device_name),
-        debug_diagnostics=os.environ.get("RAP_DEBUG_DIAGNOSTICS", "0") == "1",
-        use_scene_rig_lidar2img=os.environ.get("RAP_USE_SCENE_RIG_LIDAR2IMG", "0") == "1",
+        debug_diagnostics=env_flag("RAP_DEBUG_DIAGNOSTICS", False),
+        use_scene_rig_lidar2img=env_flag("RAP_USE_SCENE_RIG_LIDAR2IMG", False),
         output_num_poses=DEFAULT_OUTPUT_POSES,
+        vlm=VLMSelectorConfig(
+            enabled=env_flag("RAP_VLM_ENABLED", False),
+            backend=os.environ.get("RAP_VLM_BACKEND", "qwen3_vl"),
+            model_id=os.environ.get("RAP_VLM_MODEL_ID", "Qwen/Qwen3-VL-8B-Instruct"),
+            device=os.environ.get("RAP_VLM_DEVICE", "auto"),
+            max_new_tokens=int(os.environ.get("RAP_VLM_MAX_NEW_TOKENS", "300")),
+            candidate_limit=int(os.environ.get("RAP_VLM_CANDIDATE_LIMIT", "8")),
+            timeout_sec=float(os.environ.get("RAP_VLM_TIMEOUT_SEC", "10.0")),
+            save_debug_artifacts=env_flag("RAP_VLM_SAVE_DEBUG_ARTIFACTS", True),
+            debug_dir_name=os.environ.get("RAP_VLM_DEBUG_DIR_NAME", "vlm_debug"),
+        ),
     )
 
 
@@ -417,15 +438,22 @@ def build_plan_payload(
     proposals: np.ndarray,
     scores: np.ndarray,
     output_num_poses: int,
+    selected_idx: Optional[int] = None,
+    selected_source: str = "rap_argmax",
+    selection_debug: Optional[Dict[str, object]] = None,
     topk: int = TOPK_PROPOSALS_TO_SEND,
 ) -> Dict[str, object]:
     topk = max(1, min(int(topk), int(len(scores))))
     top_indices = np.argsort(scores)[-topk:][::-1]
-    selected_idx = int(top_indices[0])
+    if selected_idx is None:
+        selected_idx = int(top_indices[0])
+    else:
+        selected_idx = int(selected_idx)
     selected_traj = proposals[selected_idx, :output_num_poses]
     payload = {
         "selected_idx": selected_idx,
         "selected_score": float(scores[selected_idx]),
+        "selected_source": selected_source,
         "selected_plan": rap_to_hugsim_plan(selected_traj),
         "topk_indices": [int(idx) for idx in top_indices],
         "topk_scores": [float(scores[idx]) for idx in top_indices],
@@ -434,6 +462,8 @@ def build_plan_payload(
             for idx in top_indices
         ],
     }
+    if selection_debug:
+        payload.update(selection_debug)
     return payload
 
 
@@ -453,6 +483,8 @@ def main() -> int:
     obs_pipe = cfg.output_dir / "obs_pipe"
     plan_pipe = cfg.output_dir / "plan_pipe"
     info_history: deque[Dict[str, object]] = deque(maxlen=EGO_HISTORY_FRAMES)
+    vlm_selector = VLMPlanSelector(cfg.vlm, cfg.output_dir)
+    frame_index = 0
 
     while True:
         try:
@@ -520,7 +552,41 @@ def main() -> int:
                         np.round(trajectory[:5, :2], 3).tolist(),
                         np.round(proposals[0, :5, :2], 3).tolist(),
                     )
-            plan_payload = build_plan_payload(proposals, scores, output_num_poses=cfg.output_num_poses)
+            sorted_indices = np.argsort(scores)[::-1]
+            candidate_limit = max(1, min(int(cfg.vlm.candidate_limit), int(len(sorted_indices))))
+            candidate_indices = sorted_indices[:candidate_limit]
+            candidate_plans = [
+                rap_to_hugsim_plan(proposals[idx, :cfg.output_num_poses])
+                for idx in candidate_indices
+            ]
+            candidate_scores = [float(scores[idx]) for idx in candidate_indices]
+            selection_result = vlm_selector.maybe_select(
+                frame_index=frame_index,
+                front_image=obs["rgb"]["CAM_FRONT"],
+                info=info,
+                candidate_plans=candidate_plans,
+                candidate_indices=[int(idx) for idx in candidate_indices],
+                candidate_scores=candidate_scores,
+                rap_argmax_index=best_idx,
+            )
+            frame_index += 1
+
+            selection_debug = {
+                "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
+                "vlm_confidence": selection_result.get("vlm_confidence"),
+                "vlm_reasoning": selection_result.get("vlm_reasoning"),
+                "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
+                "vlm_error": selection_result.get("vlm_error"),
+                "vlm_candidate_count": selection_result.get("vlm_candidate_count"),
+            }
+            plan_payload = build_plan_payload(
+                proposals,
+                scores,
+                output_num_poses=cfg.output_num_poses,
+                selected_idx=int(selection_result["selected_index"]),
+                selected_source=str(selection_result["selected_source"]),
+                selection_debug=selection_debug,
+            )
             write_plan(plan_pipe, plan_payload)
         except Exception:
             logging.error("Inference failure in RAP adapter")

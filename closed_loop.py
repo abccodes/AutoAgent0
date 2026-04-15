@@ -303,6 +303,12 @@ def create_gym_env(cfg, output):
     current_topk_plans = None
     current_topk_scores = None
     current_selected_idx = None
+    current_selected_source = None
+    current_vlm_selected_idx = None
+    current_vlm_confidence = None
+    current_vlm_reasoning = None
+    current_vlm_elapsed_sec = None
+    current_vlm_error = None
     overlay_front_dir = os.path.join(output, 'overlay_front')
     os.makedirs(overlay_front_dir, exist_ok=True)
     for name in os.listdir(overlay_front_dir):
@@ -324,11 +330,23 @@ def create_gym_env(cfg, output):
             current_topk_plans = None
             current_topk_scores = None
             current_selected_idx = None
+            current_selected_source = None
+            current_vlm_selected_idx = None
+            current_vlm_confidence = None
+            current_vlm_reasoning = None
+            current_vlm_elapsed_sec = None
+            current_vlm_error = None
             if isinstance(plan_payload, dict):
                 current_plan_traj = plan_payload.get('selected_plan')
                 current_topk_plans = plan_payload.get('topk_plans')
                 current_topk_scores = plan_payload.get('topk_scores')
                 current_selected_idx = plan_payload.get('selected_idx')
+                current_selected_source = plan_payload.get('selected_source')
+                current_vlm_selected_idx = plan_payload.get('vlm_selected_idx')
+                current_vlm_confidence = plan_payload.get('vlm_confidence')
+                current_vlm_reasoning = plan_payload.get('vlm_reasoning')
+                current_vlm_elapsed_sec = plan_payload.get('vlm_elapsed_sec')
+                current_vlm_error = plan_payload.get('vlm_error')
             else:
                 current_plan_traj = plan_payload
             current_plan_origin_pose = rt2pose(
@@ -379,8 +397,14 @@ def create_gym_env(cfg, output):
                     'min_step_m': plan_min_step,
                     'max_step_m': plan_max_step,
                     'selected_idx': current_selected_idx,
+                    'selected_source': current_selected_source,
                     'topk_scores': current_topk_scores,
                     'topk_count': 0 if current_topk_plans is None else int(len(current_topk_plans)),
+                    'vlm_selected_idx': current_vlm_selected_idx,
+                    'vlm_confidence': current_vlm_confidence,
+                    'vlm_reasoning': current_vlm_reasoning,
+                    'vlm_elapsed_sec': current_vlm_elapsed_sec,
+                    'vlm_error': current_vlm_error,
                     'overlay_plan_held': bool(overlay_plan_held),
                     'overlay_plan_stale_frames': int(last_valid_overlay_plan_stale_frames),
                 },
@@ -500,6 +524,17 @@ if __name__ == "__main__":
             'RAP_PYTHON_BIN': cfg.planner.rap.get('python_bin', 'python'),
             'RAP_DEVICE': cfg.planner.rap.get('device', 'cuda'),
             'RAP_IMAGE_SCALE': cfg.planner.rap.get('image_scale', 0.4),
+            'RAP_HF_HUB_OFFLINE': cfg.planner.rap.get('hf_hub_offline', True),
+            'RAP_TRANSFORMERS_OFFLINE': cfg.planner.rap.get('transformers_offline', True),
+            'RAP_VLM_ENABLED': cfg.planner.rap.vlm.get('enabled', False),
+            'RAP_VLM_BACKEND': cfg.planner.rap.vlm.get('backend', 'qwen3_vl'),
+            'RAP_VLM_MODEL_ID': cfg.planner.rap.vlm.get('model_id', 'Qwen/Qwen3-VL-8B-Instruct'),
+            'RAP_VLM_DEVICE': cfg.planner.rap.vlm.get('device', 'auto'),
+            'RAP_VLM_MAX_NEW_TOKENS': cfg.planner.rap.vlm.get('max_new_tokens', 300),
+            'RAP_VLM_CANDIDATE_LIMIT': cfg.planner.rap.vlm.get('candidate_limit', 10),
+            'RAP_VLM_TIMEOUT_SEC': cfg.planner.rap.vlm.get('timeout_sec', 10.0),
+            'RAP_VLM_SAVE_DEBUG_ARTIFACTS': cfg.planner.rap.vlm.get('save_debug_artifacts', True),
+            'RAP_VLM_DEBUG_DIR_NAME': cfg.planner.rap.vlm.get('debug_dir_name', 'vlm_debug'),
         }
 
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
