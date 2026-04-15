@@ -35,11 +35,23 @@ VIDEO_LAYOUT = [
 FRONT_CAM_NAME = 'CAM_FRONT'
 REFERENCE_COLOR = (255, 230, 0)
 PLAN_COLOR = (0, 120, 255)
+TOPK_BASE_COLORS = [
+    (0, 120, 255),
+    (0, 180, 255),
+    (0, 220, 200),
+    (60, 220, 120),
+    (120, 220, 60),
+    (200, 220, 40),
+    (255, 200, 0),
+    (255, 160, 0),
+    (255, 120, 0),
+    (255, 80, 0),
+]
 REFERENCE_FORWARD_OFFSET_M = 4.0
 PLAN_VIS_FORWARD_OFFSET_M = 4.5
 VIS_PLAN_MIN_PATH_M = 0.5
 VIS_PLAN_HOLD_FRAMES = 10**9
-PLAN_REPLAN_EVERY_STEPS = 8
+PLAN_REPLAN_EVERY_STEPS = 2
 
 def _resize_for_video(image, target_height):
     if image.shape[0] == target_height:
@@ -212,20 +224,15 @@ def _render_front_overlay(front_image, current_obs, current_info, env, plan_traj
     draw_projected_polyline(overlay, ref_pixels, ref_valid, color=REFERENCE_COLOR, thickness=4)
     _draw_projected_points(overlay, ref_pixels, ref_valid, color=REFERENCE_COLOR, radius=4)
 
-    if plan_traj is not None and len(plan_traj) > 0 and plan_origin_pose is not None:
-        plan_local = np.asarray(plan_traj, dtype=np.float32)
+    def draw_candidate(candidate_plan, color, thickness):
+        if candidate_plan is None or len(candidate_plan) == 0 or plan_origin_pose is None:
+            return
+        plan_local = np.asarray(candidate_plan, dtype=np.float32)
         plan_origin_front_c2w = get_camera_c2w(
             cam_params,
             np.asarray(plan_origin_pose, dtype=np.float32),
             FRONT_CAM_NAME,
             env.unwrapped.cam_rect,
-        )
-        plan_world = local_plan_to_front_world(
-            plan_local,
-            plan_origin_front_c2w,
-            cam_params[FRONT_CAM_NAME]['v2c'],
-            include_origin=False,
-            forward_offset=0.0,
         )
         plan_world_line = local_plan_to_front_world(
             plan_local,
@@ -235,16 +242,26 @@ def _render_front_overlay(front_image, current_obs, current_info, env, plan_traj
             forward_offset=PLAN_VIS_FORWARD_OFFSET_M,
         )
         plan_world_dense = resample_polyline(plan_world_line, spacing=0.08)
-        raw_plan_pixels, raw_plan_valid = project_world_points_to_image(plan_world, intrinsic, front_c2w)
         draw_projected_polyline_camera_clipped(
             overlay,
             plan_world_dense,
             intrinsic,
             front_c2w,
-            color=PLAN_COLOR,
-            thickness=4,
+            color=color,
+            thickness=thickness,
         )
-        _draw_projected_points(overlay, raw_plan_pixels, raw_plan_valid, color=PLAN_COLOR, radius=5)
+
+    candidate_plans = current_info.get('overlay_candidate_plans')
+    if candidate_plans:
+        for rank, candidate_plan in enumerate(candidate_plans):
+            base_color = TOPK_BASE_COLORS[min(rank, len(TOPK_BASE_COLORS) - 1)]
+            if rank >= len(TOPK_BASE_COLORS):
+                decay = min(rank - len(TOPK_BASE_COLORS) + 1, 8)
+                fade = max(0.35, 1.0 - 0.08 * decay)
+                base_color = tuple(int(channel * fade) for channel in base_color)
+            draw_candidate(candidate_plan, base_color, 4 if rank == 0 else 2)
+    elif plan_traj is not None and len(plan_traj) > 0:
+        draw_candidate(plan_traj, PLAN_COLOR, 4)
 
     return overlay
 
@@ -283,6 +300,9 @@ def create_gym_env(cfg, output):
     last_valid_overlay_plan_stale_frames = 0
     current_plan_traj = None
     current_plan_origin_pose = None
+    current_topk_plans = None
+    current_topk_scores = None
+    current_selected_idx = None
     overlay_front_dir = os.path.join(output, 'overlay_front')
     os.makedirs(overlay_front_dir, exist_ok=True)
     for name in os.listdir(overlay_front_dir):
@@ -300,7 +320,17 @@ def create_gym_env(cfg, output):
         should_replan = (cnt % PLAN_REPLAN_EVERY_STEPS == 0) or (current_plan_traj is None)
         if should_replan:
             write_pipe_message(obs_pipe, (current_obs, current_info))
-            current_plan_traj = read_pipe_message(plan_pipe)
+            plan_payload = read_pipe_message(plan_pipe)
+            current_topk_plans = None
+            current_topk_scores = None
+            current_selected_idx = None
+            if isinstance(plan_payload, dict):
+                current_plan_traj = plan_payload.get('selected_plan')
+                current_topk_plans = plan_payload.get('topk_plans')
+                current_topk_scores = plan_payload.get('topk_scores')
+                current_selected_idx = plan_payload.get('selected_idx')
+            else:
+                current_plan_traj = plan_payload
             current_plan_origin_pose = rt2pose(
                 np.asarray(current_info['ego_rot']),
                 np.asarray(current_info['ego_pos']),
@@ -348,6 +378,9 @@ def create_gym_env(cfg, output):
                     'endpoint_distance_m': plan_endpoint_distance,
                     'min_step_m': plan_min_step,
                     'max_step_m': plan_max_step,
+                    'selected_idx': current_selected_idx,
+                    'topk_scores': current_topk_scores,
+                    'topk_count': 0 if current_topk_plans is None else int(len(current_topk_plans)),
                     'overlay_plan_held': bool(overlay_plan_held),
                     'overlay_plan_stale_frames': int(last_valid_overlay_plan_stale_frames),
                 },
@@ -363,10 +396,12 @@ def create_gym_env(cfg, output):
                 cam_name: image.copy()
                 for cam_name, image in current_obs['rgb'].items()
             }
+            overlay_info = dict(current_info)
+            overlay_info['overlay_candidate_plans'] = current_topk_plans
             vis_rgb[FRONT_CAM_NAME] = _render_front_overlay(
                 current_obs['rgb'][FRONT_CAM_NAME],
                 current_obs,
-                current_info,
+                overlay_info,
                 env,
                 overlay_plan,
                 overlay_plan_origin_pose,

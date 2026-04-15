@@ -7,6 +7,7 @@ import pickle
 import struct
 import sys
 import traceback
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
@@ -45,7 +46,9 @@ DEFAULT_CAM_ORDER = [
     "CAM_FRONT_LEFT",
     "CAM_FRONT_RIGHT",
 ]
-DEFAULT_OUTPUT_POSES = 8
+DEFAULT_OUTPUT_POSES = 10
+TOPK_PROPOSALS_TO_SEND = 20
+EGO_HISTORY_FRAMES = 4
 
 MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
 STD = np.array([58.395, 57.12, 57.375], dtype=np.float32)
@@ -60,6 +63,8 @@ class AdapterConfig:
     image_scale: float
     device: torch.device
     debug_diagnostics: bool
+    use_scene_rig_lidar2img: bool
+    output_num_poses: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,6 +95,8 @@ def resolve_config(args: argparse.Namespace) -> AdapterConfig:
         image_scale=image_scale,
         device=torch.device(device_name),
         debug_diagnostics=os.environ.get("RAP_DEBUG_DIAGNOSTICS", "0") == "1",
+        use_scene_rig_lidar2img=os.environ.get("RAP_USE_SCENE_RIG_LIDAR2IMG", "0") == "1",
+        output_num_poses=DEFAULT_OUTPUT_POSES,
     )
 
 
@@ -137,6 +144,7 @@ def load_rap_model(cfg: AdapterConfig):
             num_poses=inferred_num_poses,
             interval_length=config.trajectory_sampling.interval_length,
         )
+        cfg.output_num_poses = inferred_num_poses
     model = RAPModel(config)
     model.progress = 1.0
     model.batch_size = 0
@@ -164,10 +172,11 @@ def load_rap_model(cfg: AdapterConfig):
 
 
 def make_command_one_hot(command: int) -> np.ndarray:
-    # HUGSIM commands: 0=right, 1=left, 2=forward. RAP uses a 4-way one-hot.
+    # HUGSIM commands: 0=right, 1=left, 2=forward.
+    # RAP training uses one-hot order: (left, forward, right, unknown).
     mapping = {
-        2: np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
-        1: np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+        1: np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        2: np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
         0: np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32),
     }
     return mapping.get(int(command), np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32))
@@ -206,11 +215,119 @@ def compute_lidar2img(cam_params: Dict[str, Dict[str, np.ndarray]], cam_name: st
     return viewpad @ lidar2cam
 
 
+def compute_scene_rig_lidar2img(
+    cam_params: Dict[str, Dict[str, np.ndarray]],
+    cam_name: str,
+    image_scale: float,
+) -> np.ndarray:
+    params = cam_params[cam_name]
+    intrinsic = params["intrinsic"]
+    front2cam = np.array(params["front2cam"], dtype=np.float32)
+
+    fx = intrinsic["W"] / (2.0 * math.tan(intrinsic["fovx"] / 2.0))
+    fy = intrinsic["H"] / (2.0 * math.tan(intrinsic["fovy"] / 2.0))
+    cx = intrinsic["cx"]
+    cy = intrinsic["cy"]
+
+    viewpad = np.eye(4, dtype=np.float32)
+    viewpad[0, 0] = fx * image_scale
+    viewpad[1, 1] = fy * image_scale
+    viewpad[0, 2] = cx * image_scale
+    viewpad[1, 2] = cy * image_scale
+
+    # HUGSIM local coordinates are [right, forward, up]. The scene rig is
+    # expressed relative to the rendered front camera, so convert into that
+    # camera-aligned frame before applying the per-camera extrinsic.
+    local_to_front_cam = np.array(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    return viewpad @ np.linalg.inv(front2cam) @ local_to_front_cam
+
+
+def normalize_angle(angle: float) -> float:
+    return float(math.atan2(math.sin(angle), math.cos(angle)))
+
+
+def forward_left_basis(yaw: float) -> Tuple[np.ndarray, np.ndarray]:
+    forward_dir = np.array([math.sin(yaw), math.cos(yaw)], dtype=np.float32)
+    left_dir = np.array([-math.cos(yaw), math.sin(yaw)], dtype=np.float32)
+    return forward_dir, left_dir
+
+
+def world_delta_to_local_components(delta_world: np.ndarray, yaw: float) -> np.ndarray:
+    forward_dir, left_dir = forward_left_basis(yaw)
+    return np.array(
+        [
+            float(np.dot(delta_world, forward_dir)),
+            float(np.dot(delta_world, left_dir)),
+        ],
+        dtype=np.float32,
+    )
+
+
+def timestamp_delta_seconds(prev_info: Dict[str, object], next_info: Dict[str, object], default_dt: float = 0.25) -> float:
+    dt = float(next_info["timestamp"]) - float(prev_info["timestamp"])
+    if dt <= 1e-6:
+        return default_dt
+    return dt
+
+
+def compute_local_velocity(info_history: Sequence[Dict[str, object]], index: int) -> np.ndarray:
+    if len(info_history) <= 1:
+        return np.zeros(2, dtype=np.float32)
+
+    curr_info = info_history[index]
+    curr_pos = np.asarray(curr_info["ego_pos"], dtype=np.float32)
+    curr_yaw = float(np.asarray(curr_info["ego_rot"], dtype=np.float32)[1])
+
+    if index > 0:
+        prev_info = info_history[index - 1]
+        prev_pos = np.asarray(prev_info["ego_pos"], dtype=np.float32)
+        dt = timestamp_delta_seconds(prev_info, curr_info)
+        delta_world = np.array(
+            [curr_pos[0] - prev_pos[0], curr_pos[2] - prev_pos[2]],
+            dtype=np.float32,
+        )
+        return world_delta_to_local_components(delta_world, curr_yaw) / dt
+
+    next_info = info_history[index + 1]
+    next_pos = np.asarray(next_info["ego_pos"], dtype=np.float32)
+    dt = timestamp_delta_seconds(curr_info, next_info)
+    delta_world = np.array(
+        [next_pos[0] - curr_pos[0], next_pos[2] - curr_pos[2]],
+        dtype=np.float32,
+    )
+    return world_delta_to_local_components(delta_world, curr_yaw) / dt
+
+
+def compute_local_acceleration(info_history: Sequence[Dict[str, object]], index: int) -> np.ndarray:
+    if len(info_history) <= 2:
+        return np.zeros(2, dtype=np.float32)
+
+    curr_vel = compute_local_velocity(info_history, index)
+
+    if index > 0:
+        prev_vel = compute_local_velocity(info_history, index - 1)
+        dt = timestamp_delta_seconds(info_history[index - 1], info_history[index])
+        return (curr_vel - prev_vel) / dt
+
+    next_vel = compute_local_velocity(info_history, index + 1)
+    dt = timestamp_delta_seconds(info_history[index], info_history[index + 1])
+    return (next_vel - curr_vel) / dt
+
+
 def build_features(
     obs: Dict[str, Dict[str, np.ndarray]],
-    info: Dict[str, object],
+    info_history: Sequence[Dict[str, object]],
     cfg: AdapterConfig,
 ) -> Dict[str, torch.Tensor]:
+    info = info_history[-1]
     rgb_obs = obs["rgb"]
     cam_params = info["cam_params"]
 
@@ -223,22 +340,43 @@ def build_features(
         image, img_shape = preprocess_image(rgb_obs[cam_name], cfg.image_scale)
         camera_images.append(np.transpose(image, (2, 0, 1)))
         img_shapes.append(img_shape)
-        lidar2img.append(compute_lidar2img(cam_params, cam_name, cfg.image_scale))
+        if cfg.use_scene_rig_lidar2img and "front2cam" in cam_params[cam_name]:
+            lidar2img.append(compute_scene_rig_lidar2img(cam_params, cam_name, cfg.image_scale))
+        else:
+            lidar2img.append(compute_lidar2img(cam_params, cam_name, cfg.image_scale))
 
-    ego_speed = float(info["ego_velo"])
-    ego_acc = float(info.get("accelerate", 0.0))
-    ego_status = np.concatenate(
-        [
-            np.zeros(3, dtype=np.float32),
-            np.array([ego_speed, 0.0], dtype=np.float32),
-            np.array([ego_acc, 0.0], dtype=np.float32),
-            make_command_one_hot(info.get("command", -1)),
-        ]
-    )
+    current_pos = np.asarray(info["ego_pos"], dtype=np.float32)
+    current_rot = np.asarray(info["ego_rot"], dtype=np.float32)
+    current_yaw = float(current_rot[1])
+    forward_dir, left_dir = forward_left_basis(current_yaw)
+
+    ego_status_history = []
+    for index, hist_info in enumerate(info_history):
+        hist_pos = np.asarray(hist_info["ego_pos"], dtype=np.float32)
+        hist_rot = np.asarray(hist_info["ego_rot"], dtype=np.float32)
+        hist_yaw = float(hist_rot[1])
+        delta_world = np.array(
+            [hist_pos[0] - current_pos[0], hist_pos[2] - current_pos[2]],
+            dtype=np.float32,
+        )
+        rel_forward = float(np.dot(delta_world, forward_dir))
+        rel_left = float(np.dot(delta_world, left_dir))
+        rel_yaw = normalize_angle(hist_yaw - current_yaw)
+        ego_velocity = compute_local_velocity(info_history, index)
+        ego_acceleration = compute_local_acceleration(info_history, index)
+        ego_status = np.concatenate(
+            [
+                np.array([rel_forward, rel_left, rel_yaw], dtype=np.float32),
+                ego_velocity,
+                ego_acceleration,
+                make_command_one_hot(hist_info.get("command", -1)),
+            ]
+        )
+        ego_status_history.append(ego_status)
 
     features = {
         "camera_feature": torch.from_numpy(np.stack(camera_images, axis=0)).unsqueeze(0).to(cfg.device),
-        "ego_status": torch.from_numpy(ego_status[None, None, :]).to(cfg.device),
+        "ego_status": torch.from_numpy(np.stack(ego_status_history, axis=0)[None]).to(cfg.device),
         "img_shape": torch.tensor(np.array(img_shapes, dtype=np.float32)).unsqueeze(0).to(cfg.device),
         "lidar2img": torch.tensor(np.array(lidar2img, dtype=np.float32)).unsqueeze(0).to(cfg.device),
     }
@@ -275,11 +413,36 @@ def write_plan(plan_pipe: Path, plan) -> None:
         pipe.write(payload)
 
 
+def build_plan_payload(
+    proposals: np.ndarray,
+    scores: np.ndarray,
+    output_num_poses: int,
+    topk: int = TOPK_PROPOSALS_TO_SEND,
+) -> Dict[str, object]:
+    topk = max(1, min(int(topk), int(len(scores))))
+    top_indices = np.argsort(scores)[-topk:][::-1]
+    selected_idx = int(top_indices[0])
+    selected_traj = proposals[selected_idx, :output_num_poses]
+    payload = {
+        "selected_idx": selected_idx,
+        "selected_score": float(scores[selected_idx]),
+        "selected_plan": rap_to_hugsim_plan(selected_traj),
+        "topk_indices": [int(idx) for idx in top_indices],
+        "topk_scores": [float(scores[idx]) for idx in top_indices],
+        "topk_plans": [
+            rap_to_hugsim_plan(proposals[idx, :output_num_poses])
+            for idx in top_indices
+        ],
+    }
+    return payload
+
+
 def main() -> int:
     args = parse_args()
     cfg = resolve_config(args)
     setup_logging(cfg.output_dir)
     logging.info("Starting RAP adapter with repo=%s checkpoint=%s", cfg.rap_repo_root, cfg.checkpoint_path)
+    logging.info("RAP lidar2img mode: %s", "scene_rig" if cfg.use_scene_rig_lidar2img else "static_l2c")
 
     try:
         model = load_rap_model(cfg)
@@ -289,6 +452,7 @@ def main() -> int:
 
     obs_pipe = cfg.output_dir / "obs_pipe"
     plan_pipe = cfg.output_dir / "plan_pipe"
+    info_history: deque[Dict[str, object]] = deque(maxlen=EGO_HISTORY_FRAMES)
 
     while True:
         try:
@@ -298,20 +462,24 @@ def main() -> int:
                 break
 
             obs, info = message
-            features = build_features(obs, info, cfg)
+            info_history.append(dict(info))
+            while len(info_history) < EGO_HISTORY_FRAMES:
+                info_history.appendleft(dict(info_history[0]))
+            features = build_features(obs, list(info_history), cfg)
             with torch.no_grad():
+                predictions = model(features, targets=None, return_score=True)
+                scores = predictions["score"][0].detach().cpu().numpy()
+                proposals = predictions["trajectory"][0].detach().cpu().numpy()
+                best_idx = int(np.argmax(scores))
+                trajectory = proposals[best_idx, :cfg.output_num_poses]
+                best_xy = trajectory[:, :2]
+                step_norms = np.linalg.norm(np.diff(best_xy, axis=0), axis=1) if len(best_xy) > 1 else np.zeros((0,), dtype=np.float32)
+
                 if cfg.debug_diagnostics:
-                    predictions = model(features, targets=None, return_score=True)
-                    scores = predictions["score"][0].detach().cpu().numpy()
-                    proposals = predictions["trajectory"][0].detach().cpu().numpy()
-                    best_idx = int(np.argmax(scores))
-                    trajectory = proposals[best_idx, :DEFAULT_OUTPUT_POSES]
-                    best_xy = trajectory[:, :2]
-                    step_norms = np.linalg.norm(np.diff(best_xy, axis=0), axis=1)
                     top_indices = np.argsort(scores)[-3:][::-1]
                     top_summary = []
                     for idx in top_indices:
-                        proposal_xy = proposals[idx, :DEFAULT_OUTPUT_POSES, :2]
+                        proposal_xy = proposals[idx, :cfg.output_num_poses, :2]
                         proposal_steps = np.linalg.norm(np.diff(proposal_xy, axis=0), axis=1)
                         top_summary.append(
                             (
@@ -336,11 +504,24 @@ def main() -> int:
                         float(step_norms.max(initial=0.0)),
                         top_summary,
                     )
-                else:
-                    predictions = model(features, targets=None, return_score=False)
-                    trajectory = predictions["trajectory"][0, :DEFAULT_OUTPUT_POSES].detach().cpu().numpy()
-            plan = rap_to_hugsim_plan(trajectory)
-            write_plan(plan_pipe, plan)
+
+                traj_path = float(step_norms.sum()) if len(step_norms) > 0 else 0.0
+                traj_extent = float(np.linalg.norm(trajectory[-1, :2] - trajectory[0, :2])) if len(trajectory) > 1 else 0.0
+                if traj_path < 0.5:
+                    logging.warning(
+                        "collapsed_plan ts=%.2f cmd=%s velo=%.3f accel=%.3f path=%.3f extent=%.3f "
+                        "head=%s proposal0=%s",
+                        float(info["timestamp"]),
+                        info.get("command"),
+                        float(info["ego_velo"]),
+                        float(info.get("accelerate", 0.0)),
+                        traj_path,
+                        traj_extent,
+                        np.round(trajectory[:5, :2], 3).tolist(),
+                        np.round(proposals[0, :5, :2], 3).tolist(),
+                    )
+            plan_payload = build_plan_payload(proposals, scores, output_num_poses=cfg.output_num_poses)
+            write_plan(plan_pipe, plan_payload)
         except Exception:
             logging.error("Inference failure in RAP adapter")
             logging.error(traceback.format_exc())
