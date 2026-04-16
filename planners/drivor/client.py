@@ -446,6 +446,7 @@ def main() -> int:
 
     # Create agent instance
     # We pass in the checkpoint path; DrivoRAgent.initialize() will load it.
+    LOG.info("DrivoRAgent instance going to be created using config var of type: ", type(drivo_config))
     agent = DrivoRAgent(config=drivo_config, lr_args=lr_args, checkpoint_path=checkpoint, progress_bar=False)
     LOG.info("DrivoRAgent instance created")
 
