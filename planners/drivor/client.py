@@ -458,6 +458,14 @@ def main() -> int:
     else:
         LOG.info("No DRIVOR_CONFIG specified; using minimal config dict. Set DRIVOR_CONFIG to a yaml to pass a full config.")
 
+    #unwrap config 
+    if omega_available and OmegaConf.is_config(drivo_config):
+        if "num_poses" not in drivo_config and "config" in drivo_config:
+            drivo_config = drivo_config.config
+    elif isinstance(drivo_config, dict):
+        if "num_poses" not in drivo_config and "config" in drivo_config:
+            drivo_config = drivo_config["config"]
+
     # learning rate / optimizer args (still a plain dict)
     lr_args = {"name": "AdamW", "base_lr": 5e-4, "base_batch_size": 64}
 
