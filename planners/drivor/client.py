@@ -401,10 +401,10 @@ def navsim_to_hugsim_plan(trajectory: np.ndarray) -> np.ndarray:
 def build_plan_payload_from_model_output(predictions: Dict, output_num_poses: int = 8, topk: int = TOPK) -> Dict:
     """
     Identify proposals & scores in model output (attempt several common keys).
-    Expected predictions dict may include:
-      - 'trajectory' : tensor [B, P, T, 3]
-      - 'score' or 'scores' : tensor [B, P] or [B, P]
-    We handle batch size 1
+    DrivoR may output trajectories in multiple formats:
+      - 'trajectory' : tensor [B, P, T, 3] or [P, T, 3] or [B, P, T]
+      - 'score' or 'scores' : tensor [B, P] or [P]
+    We handle batch size 1 and flatten as needed.
     """
     # find trajectory tensor
     traj = None
@@ -419,28 +419,39 @@ def build_plan_payload_from_model_output(predictions: Dict, output_num_poses: in
             break
 
     if traj is None:
-        # try to find any 4D tensor
+        # try to find any tensor that could be trajectory
         for v in predictions.values():
-            if isinstance(v, torch.Tensor) and v.ndim == 4 and v.shape[-1] == 3:
+            if isinstance(v, torch.Tensor) and v.ndim >= 3 and v.shape[-1] in [2, 3]:
                 traj = v
                 break
 
     if traj is None:
-        raise RuntimeError("Model output does not contain a recognizable trajectory tensor")
+        raise RuntimeError(f"Model output does not contain a recognizable trajectory tensor. Available keys: {list(predictions.keys())}")
 
     traj_np = traj.detach().cpu().numpy()
-    # assume batch dim first
+    
+    # Normalize to [P, T, 3] (proposals, timesteps, 3D coords)
+    # Handle batch dimension if present
     if traj_np.ndim == 4:
-        traj_np = traj_np[0]  # [P, T, 3]
+        # [B, P, T, D] -> take batch 0
+        traj_np = traj_np[0]  # [P, T, D]
+    elif traj_np.ndim == 3:
+        # Already [P, T, D] - good
+        pass
     else:
-        raise RuntimeError("Unexpected trajectory tensor shape")
+        raise RuntimeError(f"Unexpected trajectory tensor shape: {traj_np.shape}, expected [B,P,T,D] or [P,T,D]")
+    
+    # Ensure last dim is 3 (x, y, heading); if it's 2, pad with zeros
+    if traj_np.shape[-1] == 2:
+        traj_np = np.pad(traj_np, ((0, 0), (0, 0), (0, 1)), mode='constant', constant_values=0)
 
     if scores is not None:
         scores_np = scores.detach().cpu().numpy()
+        # Normalize scores to [P] (proposals)
         if scores_np.ndim == 2:
-            scores_np = scores_np[0]
+            scores_np = scores_np[0]  # [P]
     else:
-        # fallback: use zeros
+        # fallback: use zeros or argsort by norm
         scores_np = np.zeros(len(traj_np), dtype=np.float32)
 
     # choose topk
@@ -632,6 +643,17 @@ def main() -> int:
 
             # Build plan payload (select best proposal)
             try:
+                # Debug: log prediction dict structure before parsing
+                try:
+                    LOG.info("Model output keys: %s", list(pred.keys()) if isinstance(pred, dict) else type(pred))
+                    for k, v in (pred.items() if isinstance(pred, dict) else []):
+                        if isinstance(v, torch.Tensor):
+                            LOG.info("  pred['%s']: shape=%s dtype=%s", k, tuple(v.shape), v.dtype)
+                        else:
+                            LOG.info("  pred['%s']: type=%s", k, type(v))
+                except Exception:
+                    LOG.exception("Failed to log pred structure")
+                
                 plan_payload = build_plan_payload_from_model_output(pred, output_num_poses=agent._config.get("num_poses", 8) if hasattr(agent, "_config") and isinstance(agent._config, dict) else 8)
             except Exception as e:
                 LOG.exception("Failed to interpret model output: %s", e)
