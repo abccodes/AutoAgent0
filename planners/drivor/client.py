@@ -421,10 +421,27 @@ def main() -> int:
     except Exception:
         LOG.warning("omegaconf not found; proceeding with minimal dict config where needed")
 
-    # Minimal config: ideally you'd load your drivoR.yaml via OmegaConf to preserve all settings.
-    # Try to load a drivoR config file if DRIVOR_CONFIG is specified; otherwise build a tiny config
+    # Minimal config: prefer loading a Hydra/OmegaConf config if provided via env var
+    # Set DRIVOR_CONFIG to a YAML file path (Hydra/omega format) to have it loaded here.
     drivo_config = {}
-    # TODO: optionally load a full hydra config here if you want; for now use defaults in agent's code path
+    drivor_config_path = os.environ.get("DRIVOR_CONFIG", "").strip()
+    if drivor_config_path and 'OmegaConf' in globals():
+        try:
+            loaded = OmegaConf.load(drivor_config_path)
+            if isinstance(loaded, dict):
+                # convert plain dict to DictConfig
+                drivo_config = OmegaConf.create(loaded)
+            else:
+                drivo_config = loaded
+            LOG.info("Loaded DrivoR config from %s", drivor_config_path)
+        except Exception:
+            LOG.exception("Failed to load DRIVOR_CONFIG=%s; falling back to minimal dict", drivor_config_path)
+            drivo_config = {}
+    else:
+        if not drivor_config_path:
+            LOG.info("No DRIVOR_CONFIG specified; using minimal config dict. Set DRIVOR_CONFIG to a yaml to pass a full config.")
+
+    # learning rate / optimizer args (still a plain dict)
     lr_args = {"name": "AdamW", "base_lr": 5e-4, "base_batch_size": 64}
 
     # Create agent instance

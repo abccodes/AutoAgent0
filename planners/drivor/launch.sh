@@ -12,6 +12,8 @@ export CUDA_VISIBLE_DEVICES="${CUDA_ID}"
 : "${DRIVOR_REPO_ROOT:?DRIVOR_REPO_ROOT is not set}"
 : "${DRIVOR_CHECKPOINT:?DRIVOR_CHECKPOINT is not set}"
 : "${DRIVOR_DEVICE:=cuda}"
+: "${DRIVOR_DINO:?DRIVOR_DINO is not set}"
+: "${DRIVOR_CONFIG:?DRIVOR_CONFIG is not set}"
 
 # Optional: if you add config composition
 # : "${DRIVOR_CONFIG_DIR:?DRIVOR_CONFIG_DIR is not set}"

@@ -648,7 +648,8 @@ if __name__ == "__main__":
             'DRIVOR_CHECKPOINT': cfg.planner.drivor.get('checkpoint', ''),
             'DRIVOR_DINO': cfg.planner.drivor.get('dino', ''),
             'DRIVOR_PYTHON_BIN': cfg.planner.drivor.get('python_bin', 'python'),
-            'DRIVOR_DEVICE': cfg.planner.drivor.get('device', 'cuda')
+            'DRIVOR_DEVICE': cfg.planner.drivor.get('device', 'cuda'),
+            'DRIVOR_CONFIG': cfg.planner.drivor.get('config', '')
         }
 
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
