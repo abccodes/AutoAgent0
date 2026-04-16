@@ -194,8 +194,17 @@ def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: D
     if sensor2lidar_trans is None:
         sensor2lidar_trans = np.zeros(3, dtype=np.float32)
 
+    if rgb_image is None:
+        LOG.warning(
+            "Missing HUGSIM camera image for %s; using blank %dx%d black frame",
+            cam_name,
+            int(H),
+            int(W),
+        )
+        rgb_image = np.zeros((int(H), int(W), 3), dtype=np.uint8)
+
     cam = Camera(
-        image=(rgb_image if rgb_image is not None else None),
+        image=rgb_image,
         sensor2lidar_rotation=sensor2lidar_rot,
         sensor2lidar_translation=sensor2lidar_trans,
         intrinsics=cam_intrinsic,
@@ -282,6 +291,13 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
     cameras_list = []
     lidars_list = []
 
+    # Debug: log high-level obs/cam_params info to help diagnose missing images
+    try:
+        rgb_keys = list(obs.get("rgb", {}).keys()) if isinstance(obs, dict) else []
+        LOG.info("build_agent_input_from_hugsim: num_history=%d, obs rgb keys=%s", num_history, rgb_keys)
+    except Exception:
+        LOG.exception("Failed to summarize obs in build_agent_input_from_hugsim")
+
     for idx in range(-num_history, 0):
         info = info_history[idx]
         # compute ego_pose local: DrivoR feature builder expects local ego pose; the AgentInput factory normally converts global to local
@@ -300,11 +316,35 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
         cam_dict = {}
         cam_params = info.get("cam_params", {})
         rgb = obs.get("rgb", {})
+        # per-frame debug: timestamp and available camera keys
+        try:
+            LOG.debug("Frame idx=%d timestamp=%s obs.rgb keys=%s cam_params keys=%s", idx, info.get("timestamp"), list(rgb.keys()) if isinstance(rgb, dict) else None, list(cam_params.keys()) if isinstance(cam_params, dict) else None)
+        except Exception:
+            LOG.exception("Failed to log frame-level debug info")
+
         # create Camera objects for navsim Cameras
         cams_kwargs = {}
         for hug_name, drv_field in MAP_HUGSIM_TO_DRIVOR.items():
             img = rgb.get(hug_name, None)
             params = cam_params.get(hug_name, {})
+            # debug: missing/invalid image diagnostics
+            if img is None:
+                LOG.warning(
+                    "HUGSIM missing image for %s at frame idx=%d timestamp=%s; obs.rgb keys=%s; cam_params for this cam: %s",
+                    hug_name,
+                    idx,
+                    info.get("timestamp"),
+                    list(rgb.keys()) if isinstance(rgb, dict) else None,
+                    cam_params.get(hug_name),
+                )
+            else:
+                try:
+                    if isinstance(img, np.ndarray):
+                        LOG.debug("HUGSIM image %s shape=%s dtype=%s min=%s max=%s", hug_name, img.shape, img.dtype, int(img.min()) if img.size else None, int(img.max()) if img.size else None)
+                    else:
+                        LOG.warning("HUGSIM image for %s has unexpected type %s", hug_name, type(img))
+                except Exception:
+                    LOG.exception("Failed to inspect image for %s", hug_name)
             cam_obj = build_camera_from_hugsim(hug_name, img, params)
             cams_kwargs[drv_field] = cam_obj
         # fill missing fields with empty Camera

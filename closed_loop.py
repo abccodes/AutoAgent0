@@ -20,6 +20,7 @@ import pickle
 import json
 import pickle
 import struct
+import logging
 from sim.utils.launch_ad import launch, check_alive
 from omegaconf import OmegaConf
 import open3d as o3d
@@ -352,6 +353,34 @@ def create_gym_env(cfg, output):
 
         should_replan = (cnt % PLAN_REPLAN_EVERY_STEPS == 0) or (current_plan_traj is None)
         if should_replan:
+            # Ensure expected camera keys exist and fill missing ones with black frames
+            # Added to try to debug DrivoR related issues
+            try:
+                rgb = current_obs.setdefault("rgb", {})
+                cam_params = current_info.get("cam_params", {}) if isinstance(current_info, dict) else {}
+                expected_names = [
+                    'CAM_FRONT', 'CAM_FRONT_LEFT', 'CAM_FRONT_RIGHT',
+                    'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT'
+                ]
+                logger = logging.getLogger("closed_loop")
+                for name in expected_names:
+                    if name not in rgb or rgb.get(name) is None:
+                        intr = cam_params.get(name, {}).get('intrinsic', {}) if isinstance(cam_params.get(name, {}), dict) else {}
+                        W = int(intr.get('W', intr.get('width', 800)))
+                        H = int(intr.get('H', intr.get('height', 450)))
+                        rgb[name] = np.zeros((H, W, 3), dtype=np.uint8)
+                        logger.warning("Filled missing camera %s with black frame %dx%d before sending", name, H, W)
+
+                # Debug: summarize obs['rgb'] keys and shapes/types
+                rgb_details = []
+                for k, v in rgb.items():
+                    if hasattr(v, 'shape'):
+                        rgb_details.append(f"{k}: shape={getattr(v,'shape')} dtype={getattr(v,'dtype', None)}")
+                    else:
+                        rgb_details.append(f"{k}: type={type(v)}")
+                logger.info("Sending obs to adapter: rgb keys=%s; details=%s", list(rgb.keys()), "; ".join(rgb_details))
+            except Exception:
+                logging.getLogger("closed_loop").exception("Failed to prepare current_obs before sending")
             write_pipe_message(obs_pipe, (current_obs, current_info))
             plan_payload = read_pipe_message(plan_pipe)
             current_topk_plans = None
