@@ -363,8 +363,15 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
                     # Enabled camera but no HUGSIM source: create black frame
                     cams_kwargs[f] = build_camera_from_hugsim(f, None, {})
                 else:
-                    # Disabled camera: set to None (feature builder should skip)
-                    cams_kwargs[f] = None
+                    # Disabled camera: create a Camera object with image=None so the
+                    # DrivoR feature builder can check `cam.image is None` safely
+                    cams_kwargs[f] = Camera(
+                        image=None,
+                        sensor2lidar_rotation=np.eye(3, dtype=np.float32),
+                        sensor2lidar_translation=np.zeros(3, dtype=np.float32),
+                        intrinsics=np.eye(3, dtype=np.float32),
+                        distortion=None,
+                    )
         
         # Construct Cameras dataclass by positional order
         cameras_dataclass = Cameras(
