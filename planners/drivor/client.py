@@ -347,6 +347,14 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
                     LOG.exception("Failed to inspect image for %s", hug_name)
             cam_obj = build_camera_from_hugsim(hug_name, img, params)
             cams_kwargs[drv_field] = cam_obj
+
+        # Ensure all Cameras dataclass fields are Camera objects (no None). Some navsim Cameras
+        # include cam_l2 / cam_r2 which may not map from HUGSIM; create default black Camera for them.
+        required_fields = ["cam_f0", "cam_l0", "cam_l1", "cam_l2", "cam_r0", "cam_r1", "cam_r2", "cam_b0"]
+        for f in required_fields:
+            if f not in cams_kwargs or cams_kwargs.get(f) is None:
+                # create a default black Camera using empty params - build_camera_from_hugsim handles None image
+                cams_kwargs[f] = build_camera_from_hugsim(f, None, {})
         # fill missing fields with empty Camera
         # Construct Cameras dataclass by positional order
         cameras_dataclass = Cameras(
