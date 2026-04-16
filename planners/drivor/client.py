@@ -81,8 +81,8 @@ MAP_HUGSIM_TO_DRIVOR = {
     "CAM_BACK": "cam_b0",
     "CAM_FRONT_LEFT": "cam_l0",
     "CAM_FRONT_RIGHT": "cam_r0",
-    "CAM_BACK_LEFT": "cam_l1",
-    "CAM_BACK_RIGHT": "cam_r1",
+    "CAM_BACK_LEFT": "cam_l2",
+    "CAM_BACK_RIGHT": "cam_r2",
 }
 
 # history frames used to build AgentInput (DrivoR config often expects 4)
@@ -585,9 +585,31 @@ def main() -> int:
 
             # Run model forward (DrivoRAgent.forward delegates to DrivoRModel)
             with torch.no_grad():
+                # Debug: log shapes and dtypes of features before forwarding to the model
+                try:
+                    for k, v in features_batched.items():
+                        try:
+                            if isinstance(v, torch.Tensor):
+                                LOG.info("Feature '%s': tensor shape=%s dtype=%s", k, tuple(v.shape), v.dtype)
+                            else:
+                                LOG.info("Feature '%s': type=%s", k, type(v))
+                        except Exception:
+                            LOG.exception("Failed to describe feature %s", k)
+                except Exception:
+                    LOG.exception("Failed to iterate features_batched for debug")
+
                 try:
                     pred = agent.forward(features_batched)
                 except Exception:
+                    LOG.exception("agent.forward failed; dumping feature diagnostics and calling internal model")
+                    try:
+                        for k, v in features_batched.items():
+                            if isinstance(v, torch.Tensor):
+                                LOG.error("DIAG feature '%s' shape=%s dtype=%s", k, tuple(v.shape), v.dtype)
+                            else:
+                                LOG.error("DIAG feature '%s' type=%s", k, type(v))
+                    except Exception:
+                        LOG.exception("Failed diag dump of features_batched")
                     # fallback: call internal model directly
                     pred = agent._drivor_model(features_batched)
 
