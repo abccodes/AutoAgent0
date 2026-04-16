@@ -416,37 +416,54 @@ def main() -> int:
     # Minimal constructor params to match DrivoRAgent signature: (config, lr_args, checkpoint_path, ...)
     # We will build a minimal config dict familiar to the agent. If you have a Hydra config you'd prefer,
     # replace this block with hydra compose & instantiate.
+    # Attempt to import OmegaConf for Hydra-style configs; fall back gracefully.
     try:
         from omegaconf import OmegaConf  # type: ignore
+        omega_available = True
     except Exception:
-        LOG.warning("omegaconf not found; proceeding with minimal dict config where needed")
+        omega_available = False
+        LOG.warning("omegaconf not available; Hydra configs cannot be composed here")
 
     # Minimal config: prefer loading a Hydra/OmegaConf config if provided via env var
     # Set DRIVOR_CONFIG to a YAML file path (Hydra/omega format) to have it loaded here.
     drivo_config = {}
     drivor_config_path = os.environ.get("DRIVOR_CONFIG", "").strip()
-    if drivor_config_path and 'OmegaConf' in globals():
-        try:
-            loaded = OmegaConf.load(drivor_config_path)
-            if isinstance(loaded, dict):
-                # convert plain dict to DictConfig
-                drivo_config = OmegaConf.create(loaded)
-            else:
-                drivo_config = loaded
-            LOG.info("Loaded DrivoR config from %s", drivor_config_path)
-        except Exception:
-            LOG.exception("Failed to load DRIVOR_CONFIG=%s; falling back to minimal dict", drivor_config_path)
-            drivo_config = {}
+    LOG.info("DRIVOR_CONFIG env: '%s', OmegaConf available: %s", drivor_config_path, omega_available)
+
+    if drivor_config_path:
+        if omega_available:
+            try:
+                loaded = OmegaConf.load(drivor_config_path)
+                # If OmegaConf returned a plain dict (PyYAML backend), convert it to a DictConfig
+                if isinstance(loaded, dict):
+                    drivo_config = OmegaConf.create(loaded)
+                else:
+                    drivo_config = loaded
+                LOG.info("Loaded DrivoR config from %s (type=%s)", drivor_config_path, type(drivo_config))
+            except Exception:
+                LOG.exception("Failed to load DRIVOR_CONFIG=%s; falling back to minimal dict", drivor_config_path)
+                drivo_config = {}
+        else:
+            # Try to load as plain YAML to surface parse errors for easier debugging
+            try:
+                import yaml  # type: ignore
+
+                with open(drivor_config_path, "r") as f:
+                    loaded = yaml.safe_load(f)
+                drivo_config = loaded if isinstance(loaded, dict) else {}
+                LOG.info("Loaded plain YAML DRIVOR_CONFIG from %s (type=%s)", drivor_config_path, type(drivo_config))
+            except Exception:
+                LOG.exception("Failed to read DRIVOR_CONFIG=%s as YAML; falling back to minimal dict", drivor_config_path)
+                drivo_config = {}
     else:
-        if not drivor_config_path:
-            LOG.info("No DRIVOR_CONFIG specified; using minimal config dict. Set DRIVOR_CONFIG to a yaml to pass a full config.")
+        LOG.info("No DRIVOR_CONFIG specified; using minimal config dict. Set DRIVOR_CONFIG to a yaml to pass a full config.")
 
     # learning rate / optimizer args (still a plain dict)
     lr_args = {"name": "AdamW", "base_lr": 5e-4, "base_batch_size": 64}
 
     # Create agent instance
     # We pass in the checkpoint path; DrivoRAgent.initialize() will load it.
-    LOG.info("DrivoRAgent instance going to be created using config var of type: ", type(drivo_config))
+    LOG.info("DrivoRAgent instance going to be created using config var of type: %s", type(drivo_config))
     agent = DrivoRAgent(config=drivo_config, lr_args=lr_args, checkpoint_path=checkpoint, progress_bar=False)
     LOG.info("DrivoRAgent instance created")
 
