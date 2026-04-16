@@ -137,6 +137,8 @@ def resolve_config(args: argparse.Namespace) -> AdapterConfig:
             q_weight_shortplan=float(os.environ.get("RAP_VLM_Q_WEIGHT_SHORTPLAN", "0.18")),
             q_carry_score_decay=float(os.environ.get("RAP_VLM_Q_CARRY_SCORE_DECAY", "0.0")),
             intervention_plan_path_floor_m=float(os.environ.get("RAP_VLM_INTERVENTION_PLAN_PATH_FLOOR_M", "1.0")),
+            display_default_trajectories=env_flag("RAP_VLM_DISPLAY_DEFAULT_TRAJECTORIES", False),
+            include_default_candidates=env_flag("RAP_VLM_INCLUDE_DEFAULT_CANDIDATES", False),
         ),
     )
 
@@ -602,6 +604,17 @@ def candidate_disagreement_m(candidate_rows: Sequence[Dict[str, object]]) -> flo
     return best
 
 
+def get_default_trajectories(num_poses: int) -> np.ndarray:
+    num_poses = max(2, int(num_poses))
+    t = np.linspace(0.0, 1.0, num_poses, dtype=np.float32)
+    forward = np.stack([np.zeros_like(t), 40.0 * t], axis=1)
+    slight_left = np.stack([-5.0 * (t ** 2), 38.0 * t], axis=1)
+    slight_right = np.stack([5.0 * (t ** 2), 38.0 * t], axis=1)
+    sharp_left = np.stack([-25.0 * (t ** 3), 30.0 * t], axis=1)
+    sharp_right = np.stack([25.0 * (t ** 3), 30.0 * t], axis=1)
+    return np.stack([forward, slight_left, slight_right, sharp_left, sharp_right], axis=0).astype(np.float32)
+
+
 def read_obs(obs_pipe: Path):
     with open(obs_pipe, "rb") as pipe:
         header = pipe.read(8)
@@ -682,6 +695,12 @@ def build_plan_payload(
         candidate_pool_sources = ["current_rap" for _ in top_indices]
         candidate_pool_proposal_indices = [int(idx) for idx in top_indices]
 
+    default_overlay_plans = None
+    default_overlay_sources = None
+    if bool(selection_debug and selection_debug.get("display_default_trajectories")):
+        default_overlay_plans = [traj.tolist() for traj in get_default_trajectories(output_num_poses)]
+        default_overlay_sources = [f"default_fallback_{idx}" for idx in range(len(default_overlay_plans))]
+
     payload = {
         "selected_idx": selected_idx,
         "selected_score": selected_score,
@@ -699,6 +718,8 @@ def build_plan_payload(
         "candidate_pool_q_scores": candidate_pool_q_scores,
         "candidate_pool_sources": candidate_pool_sources,
         "candidate_pool_proposal_indices": candidate_pool_proposal_indices,
+        "default_overlay_plans": default_overlay_plans,
+        "default_overlay_sources": default_overlay_sources,
     }
     if selection_debug:
         payload.update(selection_debug)
@@ -727,6 +748,7 @@ def main() -> int:
     previous_selected_pose: Optional[np.ndarray] = None
     previous_selected_score: Optional[float] = None
     previous_selected_timestamp: Optional[float] = None
+    previous_selected_source: Optional[str] = None
 
     try:
         while True:
@@ -795,16 +817,20 @@ def main() -> int:
                             np.round(trajectory[:5, :2], 3).tolist(),
                             np.round(proposals[0, :5, :2], 3).tolist(),
                         )
-                sorted_indices = np.argsort(scores)[::-1]
+                allow_carry_previous = not (
+                    previous_selected_source is not None
+                    and str(previous_selected_source).startswith("default_fallback_")
+                )
                 carry_candidate = build_carry_plan_candidate(
-                    previous_plan=previous_selected_plan,
-                    previous_pose=previous_selected_pose,
-                    previous_selected_score=previous_selected_score,
-                    previous_timestamp=previous_selected_timestamp,
+                    previous_plan=previous_selected_plan if allow_carry_previous else None,
+                    previous_pose=previous_selected_pose if allow_carry_previous else None,
+                    previous_selected_score=previous_selected_score if allow_carry_previous else None,
+                    previous_timestamp=previous_selected_timestamp if allow_carry_previous else None,
                     current_info=info,
                     cfg=cfg,
                 )
 
+                sorted_indices = np.argsort(scores)[::-1]
                 current_candidate_limit = max(1, int(cfg.vlm.candidate_limit) - 1)
                 current_candidate_limit = min(current_candidate_limit, int(len(sorted_indices)))
                 candidate_indices = sorted_indices[:current_candidate_limit]
@@ -824,6 +850,18 @@ def main() -> int:
                             "proposal_score_norm": float(normalized_scores[idx]),
                         }
                     )
+                if cfg.vlm.include_default_candidates:
+                    for default_idx, default_plan in enumerate(get_default_trajectories(cfg.output_num_poses)):
+                        candidate_rows.append(
+                            {
+                                "source": f"default_fallback_{default_idx}",
+                                "proposal_index": None,
+                                "proposal_score": 0.0,
+                                "local_plan": default_plan,
+                                "execution_plan": default_plan.copy(),
+                                "proposal_score_norm": 0.0,
+                            }
+                        )
 
                 carry_row = next((row for row in candidate_rows if row.get("source") == "carry_prev"), None)
                 shared_horizon = len(carry_row["local_plan"]) if carry_row is not None else cfg.output_num_poses
@@ -932,6 +970,8 @@ def main() -> int:
                     "vlm_intervention_reasons": intervention_reasons,
                     "q_selected_path_length": q_selected_path,
                     "q_best_current_path_length": best_current_path,
+                    "display_default_trajectories": bool(cfg.vlm.display_default_trajectories),
+                    "include_default_candidates": bool(cfg.vlm.include_default_candidates),
                     "q_invoked_vlm": invoke_vlm,
                     "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
                     "vlm_confidence": selection_result.get("vlm_confidence"),
@@ -948,6 +988,8 @@ def main() -> int:
                     "vlm_q_carry_score": selection_result.get("vlm_q_carry_score"),
                     "adaptive_replan_decision": selection_result.get("adaptive_replan_decision"),
                     "carry_previous_valid": selection_result.get("carry_previous_valid"),
+                    "carry_previous_allowed": bool(allow_carry_previous),
+                    "previous_selected_source": previous_selected_source,
                     "latency_timeline_record": selection_result.get("latency_timeline_record"),
                 }
                 plan_payload = build_plan_payload(
@@ -967,6 +1009,7 @@ def main() -> int:
                 previous_selected_pose = info_to_pose(info)
                 previous_selected_score = selected_score
                 previous_selected_timestamp = float(info.get("timestamp", 0.0))
+                previous_selected_source = str(selected_row.get("source", selection_result["selected_source"]))
             except Exception:
                 logging.error("Inference failure in RAP adapter")
                 logging.error(traceback.format_exc())

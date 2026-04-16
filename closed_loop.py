@@ -669,6 +669,8 @@ if __name__ == "__main__":
             'RAP_VLM_Q_WEIGHT_SHORTPLAN': cfg.planner.rap.vlm.get('q_weight_shortplan', 0.18),
             'RAP_VLM_Q_CARRY_SCORE_DECAY': cfg.planner.rap.vlm.get('q_carry_score_decay', 0.0),
             'RAP_VLM_INTERVENTION_PLAN_PATH_FLOOR_M': cfg.planner.rap.vlm.get('intervention_plan_path_floor_m', 1.0),
+            'RAP_VLM_DISPLAY_DEFAULT_TRAJECTORIES': cfg.planner.rap.vlm.get('display_default_trajectories', False),
+            'RAP_VLM_INCLUDE_DEFAULT_CANDIDATES': cfg.planner.rap.vlm.get('include_default_candidates', False),
         }
         
     elif args.ad == "drivor":
