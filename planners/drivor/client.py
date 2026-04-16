@@ -76,13 +76,16 @@ DEFAULT_CAM_ORDER = [
 ]
 
 # Map HUGSIM camera names to navsim Cameras field names
+# NOTE: Only map cameras that are enabled in the model config.
+# DrivoR config has: cam_f0:[3], cam_l0:[3], cam_r0:[3], cam_b0:[3] (enabled)
+#                   cam_l1:[], cam_l2:[], cam_r1:[], cam_r2:[] (disabled/empty)
+# To avoid feature mismatch (8 cameras vs 4 scene tokens), we only populate enabled slots.
 MAP_HUGSIM_TO_DRIVOR = {
     "CAM_FRONT": "cam_f0",
     "CAM_BACK": "cam_b0",
     "CAM_FRONT_LEFT": "cam_l0",
     "CAM_FRONT_RIGHT": "cam_r0",
-    "CAM_BACK_LEFT": "cam_l2",
-    "CAM_BACK_RIGHT": "cam_r2",
+    # Disabled in model config: cam_l1, cam_l2, cam_r1, cam_r2
 }
 
 # history frames used to build AgentInput (DrivoR config often expects 4)
@@ -348,23 +351,30 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
             cam_obj = build_camera_from_hugsim(hug_name, img, params)
             cams_kwargs[drv_field] = cam_obj
 
-        # Ensure all Cameras dataclass fields are Camera objects (no None). Some navsim Cameras
-        # include cam_l2 / cam_r2 which may not map from HUGSIM; create default black Camera for them.
-        required_fields = ["cam_f0", "cam_l0", "cam_l1", "cam_l2", "cam_r0", "cam_r1", "cam_r2", "cam_b0"]
-        for f in required_fields:
-            if f not in cams_kwargs or cams_kwargs.get(f) is None:
-                # create a default black Camera using empty params - build_camera_from_hugsim handles None image
-                cams_kwargs[f] = build_camera_from_hugsim(f, None, {})
-        # fill missing fields with empty Camera
+        # Ensure all Cameras dataclass fields are populated, but only with enabled cameras.
+        # Disabled camera slots (per drivor.yaml config) are set to None to prevent feature mismatch.
+        # Enabled cameras: cam_f0, cam_l0, cam_r0, cam_b0 (4 cameras)
+        # Disabled cameras: cam_l1, cam_l2, cam_r1, cam_r2 (set to None so feature builder skips them)
+        all_fields = ["cam_f0", "cam_l0", "cam_l1", "cam_l2", "cam_r0", "cam_r1", "cam_r2", "cam_b0"]
+        enabled_fields = ["cam_f0", "cam_l0", "cam_r0", "cam_b0"]
+        for f in all_fields:
+            if f not in cams_kwargs:
+                if f in enabled_fields:
+                    # Enabled camera but no HUGSIM source: create black frame
+                    cams_kwargs[f] = build_camera_from_hugsim(f, None, {})
+                else:
+                    # Disabled camera: set to None (feature builder should skip)
+                    cams_kwargs[f] = None
+        
         # Construct Cameras dataclass by positional order
         cameras_dataclass = Cameras(
             cam_f0=cams_kwargs.get("cam_f0"),
             cam_l0=cams_kwargs.get("cam_l0"),
-            cam_l1=cams_kwargs.get("cam_l1"),
-            cam_l2=cams_kwargs.get("cam_l2"),
+            cam_l1=cams_kwargs.get("cam_l1"),  # None - disabled in config
+            cam_l2=cams_kwargs.get("cam_l2"),  # None - disabled in config
             cam_r0=cams_kwargs.get("cam_r0"),
-            cam_r1=cams_kwargs.get("cam_r1"),
-            cam_r2=cams_kwargs.get("cam_r2"),
+            cam_r1=cams_kwargs.get("cam_r1"),  # None - disabled in config
+            cam_r2=cams_kwargs.get("cam_r2"),  # None - disabled in config
             cam_b0=cams_kwargs.get("cam_b0"),
         )
         cameras_list.append(cameras_dataclass)
