@@ -3,6 +3,6 @@ drivor:
   repo_root: /data/guest_rui/ztrs_workspace/DrivoR
   checkpoint: data/guest_rui/ztrs_workspace/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
   dino: data/guest_rui/ztrs_workspace/DrivoR/weights/vit_small_patch14_reg4_dinov2.lvd142m
-  python_bin: /data/guest_rui/miniconda3/envs/drivor_py38/bin/python3.8
+  python_bin: /data2/guest_rui/miniconda3/envs/drivor_py38/bin/python3.8
   device: cuda
   image_scale: 0.4
