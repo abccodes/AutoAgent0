@@ -74,6 +74,8 @@ class VLMSelectorConfig:
     q_weight_shortplan: float = 0.18
     q_carry_score_decay: float = 0.0
     intervention_plan_path_floor_m: float = 1.0
+    display_default_trajectories: bool = False
+    include_default_candidates: bool = False
 
 
 def _fov2focal(fov: float, pixels: float) -> float:
@@ -342,13 +344,8 @@ def format_candidate_text(candidate_rows: Sequence[Dict[str, object]]) -> str:
     lines = []
     for row in candidate_rows:
         s = row["summary"]
-        q_score = row.get("q_score")
         line = (
             f"- candidate_{row['candidate_index']} | color={row['color_name']} | source={row['source']} | "
-            f"score={row['rap_score']:.4f} | "
-            f"q_score={float(q_score):.4f} | " if q_score is not None else
-            f"- candidate_{row['candidate_index']} | color={row['color_name']} | source={row['source']} | "
-            f"score={row['rap_score']:.4f} | "
         )
         line += (
             f"num_points={s['num_points']} | "
@@ -400,6 +397,7 @@ Important constraints:
 - Do not assume access to a hidden map or ground-truth future route.
 - If multiple candidates are similar, give them similar scores.
 - If all candidates are imperfect, prefer the least risky one.
+- Do not assume any hidden planner confidence or model score.
 - There are exactly {len(candidate_rows)} candidates in this frame.
 - You MUST return one score for every candidate index: {candidate_index_list}.
 - Do not omit any candidate index.
