@@ -30,6 +30,29 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
+import inspect
+
+# Bridge the pytree registration API for older torch versions.
+# Newer transformers expects torch>=2.2's public pytree registration name.
+# DrivoR environments may still run with torch 2.1, which exposes the private helper.
+try:
+    from torch.utils import _pytree as _torch_pytree
+
+    if hasattr(_torch_pytree, "_register_pytree_node"):
+        _raw_register_pytree_node = _torch_pytree._register_pytree_node
+        _raw_signature = inspect.signature(_raw_register_pytree_node)
+
+        def _compat_register_pytree_node(cls, flatten_fn, unflatten_fn, **kwargs):
+            supported_kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in _raw_signature.parameters
+            }
+            return _raw_register_pytree_node(cls, flatten_fn, unflatten_fn, **supported_kwargs)
+
+        _torch_pytree.register_pytree_node = _compat_register_pytree_node
+except Exception:
+    pass
 
 # Import navsim dataclasses (AgentInput, Camera, Cameras, Lidar, EgoStatus)
 # We add repo root to path based on env var DRIVOR_REPO_ROOT (set by HUGSIM launch)
