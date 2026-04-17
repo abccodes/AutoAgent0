@@ -48,7 +48,6 @@ PLAN_RESAMPLE_SPACING_M = 0.08
 @dataclass
 class VLMSelectorConfig:
     enabled: bool = False
-    intervention_mode: str = "uncertainty_only"
     backend: str = "qwen3_vl"
     model_id: str = "Qwen/Qwen3-VL-8B-Instruct"
     device: str = "auto"
@@ -64,16 +63,12 @@ class VLMSelectorConfig:
     latency_tracking_mode: str = "full_timeline"
     q_enabled: bool = True
     q_switch_margin: float = 0.05
-    q_uncertainty_margin: float = 0.03
-    q_quality_floor: float = 0.18
-    q_candidate_disagreement_threshold: float = 2.5
     q_weight_rap_score: float = 0.55
     q_weight_progress: float = 0.30
     q_weight_offcenter: float = 0.10
     q_weight_curvature: float = 0.08
     q_weight_shortplan: float = 0.18
     q_carry_score_decay: float = 0.0
-    intervention_plan_path_floor_m: float = 1.0
     display_default_trajectories: bool = False
     include_default_candidates: bool = False
 
@@ -360,7 +355,6 @@ def format_candidate_text(candidate_rows: Sequence[Dict[str, object]]) -> str:
 def build_scoring_prompt(
     candidate_rows: Sequence[Dict[str, object]],
     route_instruction: str,
-    uncertainty_reasons: Optional[Sequence[str]] = None,
 ) -> str:
     candidate_text = format_candidate_text(candidate_rows)
     score_schema_lines = ",\n".join(
@@ -368,10 +362,6 @@ def build_scoring_prompt(
         for row in candidate_rows
     )
     candidate_index_list = ", ".join(str(row["candidate_index"]) for row in candidate_rows)
-    uncertainty_text = ""
-    if uncertainty_reasons:
-        uncertainty_text = "Planner context:\n" + "\n".join(f"- {reason}" for reason in uncertainty_reasons)
-        uncertainty_text += "\n\n"
     return f"""
 You are a cautious autonomous-driving trajectory scorer.
 
@@ -394,10 +384,7 @@ Your job:
 
 Important constraints:
 - Use only what is visible in the image and candidate metadata.
-- Do not assume access to a hidden map or ground-truth future route.
-- If multiple candidates are similar, give them similar scores.
 - If all candidates are imperfect, prefer the least risky one.
-- Do not assume any hidden planner confidence or model score.
 - There are exactly {len(candidate_rows)} candidates in this frame.
 - You MUST return one score for every candidate index: {candidate_index_list}.
 - Do not omit any candidate index.
@@ -414,8 +401,6 @@ Important constraints:
 
 Route instruction:
 {route_instruction}
-
-{uncertainty_text}
 
 Candidate trajectories:
 {candidate_text}
@@ -534,9 +519,8 @@ class Qwen3TrajectorySelector:
         image_path: Path,
         candidate_rows: Sequence[Dict[str, object]],
         route_instruction: str,
-        uncertainty_reasons: Optional[Sequence[str]] = None,
     ) -> Dict[str, object]:
-        prompt = build_scoring_prompt(candidate_rows, route_instruction, uncertainty_reasons=uncertainty_reasons)
+        prompt = build_scoring_prompt(candidate_rows, route_instruction)
         started = time.time()
         raw_output = self._run_inference(image_path, prompt)
         parsed = try_parse_json(raw_output)
@@ -570,7 +554,11 @@ def build_candidate_rows(candidates: Sequence[Dict[str, object]]) -> List[Dict[s
             "color_bgr": list(color),
             "local_plan": plan.tolist(),
             "execution_plan": np.asarray(candidate.get("execution_plan", candidate["local_plan"]), dtype=np.float32).tolist(),
+            "proposal_score": float(candidate.get("proposal_score", 0.0)),
             "rap_score": float(candidate.get("proposal_score", 0.0)),
+            "origin_selected_score_raw": (
+                None if candidate.get("origin_selected_score_raw") is None else float(candidate["origin_selected_score_raw"])
+            ),
             "q_score": None if candidate.get("q_score") is None else float(candidate["q_score"]),
         }
         row["summary"] = summarize_candidate(row["local_plan"])
@@ -710,8 +698,6 @@ class VLMPlanSelector:
         candidate_rows: Sequence[Dict[str, object]],
         default_selected_index: int,
         default_selected_source: str,
-        invoke_vlm: bool,
-        uncertainty_reasons: Optional[Sequence[str]] = None,
     ) -> Dict[str, object]:
         route_instruction = command_to_route_instruction(info.get("command"))
         timestamp = float(info.get("timestamp", 0.0))
@@ -740,7 +726,6 @@ class VLMPlanSelector:
                 "adaptive_replan_decision": adaptive_replan_decision,
                 "error": error,
                 "q_invoked_vlm": False,
-                "q_uncertainty_reasons": list(uncertainty_reasons or []),
                 "vlm_q_valid": False,
             }
             self._record_timeline(timeline_record)
@@ -756,10 +741,8 @@ class VLMPlanSelector:
                 result["error"] = error
             return result
 
-        if not invoke_vlm:
-            return _fallback_result()
         if not self.cfg.enabled:
-            return _fallback_result("vlm_disabled_uncertain_q_fallback")
+            return _fallback_result("vlm_disabled")
 
         selector = self._ensure_selector()
         if selector is None:
@@ -786,7 +769,6 @@ class VLMPlanSelector:
                 image_path=image_path,
                 candidate_rows=candidate_rows,
                 route_instruction=route_instruction,
-                uncertainty_reasons=uncertainty_reasons,
             )
         except Exception as exc:
             LOG.exception("VLM-Q selector inference failed, falling back to fast-Q")
@@ -880,7 +862,6 @@ class VLMPlanSelector:
             "adaptive_replan_decision": adaptive_replan_decision,
             "error": error,
             "q_invoked_vlm": True,
-            "q_uncertainty_reasons": list(uncertainty_reasons or []),
         }
         self._record_timeline(timeline_record)
 

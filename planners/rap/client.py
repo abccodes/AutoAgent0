@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as SCR
 
-from vlm_selector import VLMPlanSelector, VLMSelectorConfig
+from planners.common.vlm_selector import VLMPlanSelector, VLMSelectorConfig
 
 # Newer transformers expects torch>=2.2's public pytree registration name.
 # RAP currently runs with torch 2.1 in this env, which still exposes the
@@ -85,6 +85,25 @@ def env_flag(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def env_get(primary: str, fallback: str, default: str) -> str:
+    raw = os.environ.get(primary)
+    if raw is not None:
+        return raw
+    raw = os.environ.get(fallback)
+    if raw is not None:
+        return raw
+    return default
+
+
+def env_flag_compat(primary: str, fallback: str, default: bool = False) -> bool:
+    raw = os.environ.get(primary)
+    if raw is None:
+        raw = os.environ.get(fallback)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def resolve_config(args: argparse.Namespace) -> AdapterConfig:
     output_dir = Path(args.output).resolve()
     rap_repo_root_raw = os.environ.get("RAP_REPO_ROOT", "").strip()
@@ -110,35 +129,30 @@ def resolve_config(args: argparse.Namespace) -> AdapterConfig:
         use_scene_rig_lidar2img=env_flag("RAP_USE_SCENE_RIG_LIDAR2IMG", False),
         output_num_poses=DEFAULT_OUTPUT_POSES,
         vlm=VLMSelectorConfig(
-            enabled=env_flag("RAP_VLM_ENABLED", False),
-            intervention_mode=os.environ.get("RAP_VLM_INTERVENTION_MODE", "uncertainty_only"),
-            backend=os.environ.get("RAP_VLM_BACKEND", "qwen3_vl"),
-            model_id=os.environ.get("RAP_VLM_MODEL_ID", "Qwen/Qwen3-VL-8B-Instruct"),
-            device=os.environ.get("RAP_VLM_DEVICE", "auto"),
-            max_new_tokens=int(os.environ.get("RAP_VLM_MAX_NEW_TOKENS", "300")),
-            candidate_limit=int(os.environ.get("RAP_VLM_CANDIDATE_LIMIT", "5")),
-            timeout_sec=float(os.environ.get("RAP_VLM_TIMEOUT_SEC", "10.0")),
-            save_debug_artifacts=env_flag("RAP_VLM_SAVE_DEBUG_ARTIFACTS", True),
-            debug_dir_name=os.environ.get("RAP_VLM_DEBUG_DIR_NAME", "vlm_debug"),
-            carry_previous_enabled=env_flag("RAP_VLM_CARRY_PREVIOUS_ENABLED", True),
-            carry_previous_min_path_m=float(os.environ.get("RAP_VLM_CARRY_PREVIOUS_MIN_PATH_M", "0.5")),
-            carry_previous_min_points=int(os.environ.get("RAP_VLM_CARRY_PREVIOUS_MIN_POINTS", "2")),
-            adaptive_replan_mode=os.environ.get("RAP_VLM_ADAPTIVE_REPLAN_MODE", "log_only"),
-            latency_tracking_mode=os.environ.get("RAP_VLM_LATENCY_TRACKING_MODE", "full_timeline"),
-            q_enabled=env_flag("RAP_VLM_Q_ENABLED", True),
-            q_switch_margin=float(os.environ.get("RAP_VLM_Q_SWITCH_MARGIN", "0.05")),
-            q_uncertainty_margin=float(os.environ.get("RAP_VLM_Q_UNCERTAINTY_MARGIN", "0.03")),
-            q_quality_floor=float(os.environ.get("RAP_VLM_Q_QUALITY_FLOOR", "0.18")),
-            q_candidate_disagreement_threshold=float(os.environ.get("RAP_VLM_Q_CANDIDATE_DISAGREEMENT_THRESHOLD", "2.5")),
-            q_weight_rap_score=float(os.environ.get("RAP_VLM_Q_WEIGHT_RAP_SCORE", "0.55")),
-            q_weight_progress=float(os.environ.get("RAP_VLM_Q_WEIGHT_PROGRESS", "0.30")),
-            q_weight_offcenter=float(os.environ.get("RAP_VLM_Q_WEIGHT_OFFCENTER", "0.10")),
-            q_weight_curvature=float(os.environ.get("RAP_VLM_Q_WEIGHT_CURVATURE", "0.08")),
-            q_weight_shortplan=float(os.environ.get("RAP_VLM_Q_WEIGHT_SHORTPLAN", "0.18")),
-            q_carry_score_decay=float(os.environ.get("RAP_VLM_Q_CARRY_SCORE_DECAY", "0.0")),
-            intervention_plan_path_floor_m=float(os.environ.get("RAP_VLM_INTERVENTION_PLAN_PATH_FLOOR_M", "1.0")),
-            display_default_trajectories=env_flag("RAP_VLM_DISPLAY_DEFAULT_TRAJECTORIES", False),
-            include_default_candidates=env_flag("RAP_VLM_INCLUDE_DEFAULT_CANDIDATES", False),
+            enabled=env_flag_compat("PLANNER_VLM_ENABLED", "RAP_VLM_ENABLED", False),
+            backend=env_get("PLANNER_VLM_BACKEND", "RAP_VLM_BACKEND", "qwen3_vl"),
+            model_id=env_get("PLANNER_VLM_MODEL_ID", "RAP_VLM_MODEL_ID", "Qwen/Qwen3-VL-8B-Instruct"),
+            device=env_get("PLANNER_VLM_DEVICE", "RAP_VLM_DEVICE", "auto"),
+            max_new_tokens=int(env_get("PLANNER_VLM_MAX_NEW_TOKENS", "RAP_VLM_MAX_NEW_TOKENS", "300")),
+            candidate_limit=int(env_get("PLANNER_VLM_CANDIDATE_LIMIT", "RAP_VLM_CANDIDATE_LIMIT", "5")),
+            timeout_sec=float(env_get("PLANNER_VLM_TIMEOUT_SEC", "RAP_VLM_TIMEOUT_SEC", "10.0")),
+            save_debug_artifacts=env_flag_compat("PLANNER_VLM_SAVE_DEBUG_ARTIFACTS", "RAP_VLM_SAVE_DEBUG_ARTIFACTS", True),
+            debug_dir_name=env_get("PLANNER_VLM_DEBUG_DIR_NAME", "RAP_VLM_DEBUG_DIR_NAME", "vlm_debug"),
+            carry_previous_enabled=env_flag_compat("PLANNER_VLM_CARRY_PREVIOUS_ENABLED", "RAP_VLM_CARRY_PREVIOUS_ENABLED", True),
+            carry_previous_min_path_m=float(env_get("PLANNER_VLM_CARRY_PREVIOUS_MIN_PATH_M", "RAP_VLM_CARRY_PREVIOUS_MIN_PATH_M", "0.5")),
+            carry_previous_min_points=int(env_get("PLANNER_VLM_CARRY_PREVIOUS_MIN_POINTS", "RAP_VLM_CARRY_PREVIOUS_MIN_POINTS", "2")),
+            adaptive_replan_mode=env_get("PLANNER_VLM_ADAPTIVE_REPLAN_MODE", "RAP_VLM_ADAPTIVE_REPLAN_MODE", "log_only"),
+            latency_tracking_mode=env_get("PLANNER_VLM_LATENCY_TRACKING_MODE", "RAP_VLM_LATENCY_TRACKING_MODE", "full_timeline"),
+            q_enabled=env_flag_compat("PLANNER_VLM_Q_ENABLED", "RAP_VLM_Q_ENABLED", True),
+            q_switch_margin=float(env_get("PLANNER_VLM_Q_SWITCH_MARGIN", "RAP_VLM_Q_SWITCH_MARGIN", "0.05")),
+            q_weight_rap_score=float(env_get("PLANNER_VLM_Q_WEIGHT_RAP_SCORE", "RAP_VLM_Q_WEIGHT_RAP_SCORE", "0.55")),
+            q_weight_progress=float(env_get("PLANNER_VLM_Q_WEIGHT_PROGRESS", "RAP_VLM_Q_WEIGHT_PROGRESS", "0.30")),
+            q_weight_offcenter=float(env_get("PLANNER_VLM_Q_WEIGHT_OFFCENTER", "RAP_VLM_Q_WEIGHT_OFFCENTER", "0.10")),
+            q_weight_curvature=float(env_get("PLANNER_VLM_Q_WEIGHT_CURVATURE", "RAP_VLM_Q_WEIGHT_CURVATURE", "0.08")),
+            q_weight_shortplan=float(env_get("PLANNER_VLM_Q_WEIGHT_SHORTPLAN", "RAP_VLM_Q_WEIGHT_SHORTPLAN", "0.18")),
+            q_carry_score_decay=float(env_get("PLANNER_VLM_Q_CARRY_SCORE_DECAY", "RAP_VLM_Q_CARRY_SCORE_DECAY", "0.0")),
+            display_default_trajectories=env_flag_compat("PLANNER_VLM_DISPLAY_DEFAULT_TRAJECTORIES", "RAP_VLM_DISPLAY_DEFAULT_TRAJECTORIES", False),
+            include_default_candidates=env_flag_compat("PLANNER_VLM_INCLUDE_DEFAULT_CANDIDATES", "RAP_VLM_INCLUDE_DEFAULT_CANDIDATES", False),
         ),
     )
 
@@ -517,7 +531,11 @@ def build_carry_plan_candidate(
     return {
         "source": "carry_prev",
         "proposal_index": None,
-        "proposal_score": float(previous_selected_score) if previous_selected_score is not None else 0.0,
+        # Do not give the carry path stale numeric advantage in the next decision.
+        # Keep the original selected score only as raw debug metadata.
+        "proposal_score": 0.0,
+        "proposal_score_norm": 0.0,
+        "origin_selected_score_raw": None if previous_selected_score is None else float(previous_selected_score),
         "local_plan": current_local.astype(np.float32),
         "execution_plan": current_local.astype(np.float32),
         "carry_elapsed_sec": elapsed_sec,
@@ -587,21 +605,6 @@ def compute_q_score(
     if is_carry and cfg.vlm.q_carry_score_decay > 0.0:
         score -= cfg.vlm.q_carry_score_decay
     return float(score)
-
-
-def candidate_disagreement_m(candidate_rows: Sequence[Dict[str, object]]) -> float:
-    endpoints = []
-    for row in candidate_rows:
-        if row.get("source") != "current_rap":
-            continue
-        endpoints.append(plan_endpoint(np.asarray(row["local_plan"], dtype=np.float32)))
-    if len(endpoints) < 2:
-        return 0.0
-    best = 0.0
-    for idx in range(len(endpoints)):
-        for jdx in range(idx + 1, len(endpoints)):
-            best = max(best, float(np.linalg.norm(endpoints[idx] - endpoints[jdx])))
-    return best
 
 
 def get_default_trajectories(num_poses: int) -> np.ndarray:
@@ -903,38 +906,9 @@ def main() -> int:
                         )
                         q_selected_source = "q_reuse_prev"
 
-                q_uncertainty_reasons: List[str] = []
-                sorted_current_q = sorted((float(row.get("q_score", -1e6)) for row in current_rows), reverse=True)
-                if carry_row is not None and q_score_gap is not None and abs(q_score_gap) < cfg.vlm.q_uncertainty_margin:
-                    q_uncertainty_reasons.append("carry_vs_current_gap_small")
-                if len(sorted_current_q) >= 2 and abs(sorted_current_q[0] - sorted_current_q[1]) < cfg.vlm.q_uncertainty_margin:
-                    q_uncertainty_reasons.append("top2_current_gap_small")
-                max_available_q = max(q_best_current_score, q_carry_score if q_carry_score is not None else -1e6)
-                if max_available_q < cfg.vlm.q_quality_floor:
-                    q_uncertainty_reasons.append("low_absolute_q")
-                if candidate_disagreement_m(candidate_rows) > cfg.vlm.q_candidate_disagreement_threshold:
-                    q_uncertainty_reasons.append("high_candidate_disagreement")
-                if carry_row is not None and path_length(np.asarray(carry_row["local_plan"], dtype=np.float32)) < max(
-                    cfg.vlm.carry_previous_min_path_m * 2.0, 1.0
-                ):
-                    q_uncertainty_reasons.append("weak_carry_validity")
-                intervention_reasons = list(q_uncertainty_reasons)
                 best_current_path = path_length(np.asarray(best_current_row["local_plan"], dtype=np.float32))
-                if best_current_path < float(cfg.vlm.intervention_plan_path_floor_m):
-                    intervention_reasons.append("best_current_short_path")
                 q_selected_row = candidate_rows[q_selected_pool_index]
                 q_selected_path = path_length(np.asarray(q_selected_row["local_plan"], dtype=np.float32))
-                if q_selected_path < float(cfg.vlm.intervention_plan_path_floor_m):
-                    intervention_reasons.append("selected_plan_short_path")
-
-                intervention_mode = str(cfg.vlm.intervention_mode).strip().lower()
-                if intervention_mode == "always":
-                    invoke_vlm = bool(cfg.vlm.enabled)
-                elif intervention_mode == "uncertainty_only":
-                    invoke_vlm = bool(cfg.vlm.enabled and len(intervention_reasons) > 0)
-                else:
-                    logging.warning("Unknown RAP VLM intervention mode '%s'; defaulting to uncertainty_only", cfg.vlm.intervention_mode)
-                    invoke_vlm = bool(cfg.vlm.enabled and len(intervention_reasons) > 0)
 
                 selection_result = vlm_selector.maybe_select(
                     frame_index=frame_index,
@@ -943,15 +917,21 @@ def main() -> int:
                     candidate_rows=candidate_rows,
                     default_selected_index=q_selected_pool_index,
                     default_selected_source=q_selected_source,
-                    invoke_vlm=invoke_vlm,
-                    uncertainty_reasons=intervention_reasons,
                 )
                 frame_index += 1
 
                 selected_row = selection_result["selected_candidate_row"]
                 selected_plan = np.asarray(selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32)
                 selected_idx = selected_row.get("proposal_index")
-                selected_score = float(selected_row.get("proposal_score", 0.0))
+                selected_score_value = selected_row.get("proposal_score")
+                if selected_score_value is None:
+                    selected_score_value = selected_row.get("rap_score", 0.0)
+                selected_score = float(selected_score_value)
+
+                selected_score_raw_value = selected_row.get("origin_selected_score_raw")
+                if selected_score_raw_value is None:
+                    selected_score_raw_value = selected_score
+                selected_score_raw = float(selected_score_raw_value)
 
                 selection_debug = {
                     "q_selected_idx": int(q_selected_pool_index),
@@ -961,18 +941,11 @@ def main() -> int:
                     "q_best_current_score": q_best_current_score,
                     "q_score_gap": q_score_gap,
                     "q_switch_margin": float(cfg.vlm.q_switch_margin),
-                    "q_uncertainty_margin": float(cfg.vlm.q_uncertainty_margin),
-                    "q_quality_floor": float(cfg.vlm.q_quality_floor),
-                    "q_uncertainty_triggered": bool(len(q_uncertainty_reasons) > 0),
-                    "q_uncertainty_reasons": q_uncertainty_reasons,
-                    "vlm_intervention_mode": intervention_mode,
-                    "vlm_intervention_triggered": bool(invoke_vlm),
-                    "vlm_intervention_reasons": intervention_reasons,
                     "q_selected_path_length": q_selected_path,
                     "q_best_current_path_length": best_current_path,
                     "display_default_trajectories": bool(cfg.vlm.display_default_trajectories),
                     "include_default_candidates": bool(cfg.vlm.include_default_candidates),
-                    "q_invoked_vlm": invoke_vlm,
+                    "q_invoked_vlm": bool(cfg.vlm.enabled),
                     "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
                     "vlm_confidence": selection_result.get("vlm_confidence"),
                     "vlm_reasoning": selection_result.get("vlm_reasoning"),
@@ -990,6 +963,7 @@ def main() -> int:
                     "carry_previous_valid": selection_result.get("carry_previous_valid"),
                     "carry_previous_allowed": bool(allow_carry_previous),
                     "previous_selected_source": previous_selected_source,
+                    "selected_score_raw": selected_score_raw,
                     "latency_timeline_record": selection_result.get("latency_timeline_record"),
                 }
                 plan_payload = build_plan_payload(
@@ -1007,7 +981,7 @@ def main() -> int:
 
                 previous_selected_plan = selected_plan.copy()
                 previous_selected_pose = info_to_pose(info)
-                previous_selected_score = selected_score
+                previous_selected_score = selected_score_raw
                 previous_selected_timestamp = float(info.get("timestamp", 0.0))
                 previous_selected_source = str(selected_row.get("source", selection_result["selected_source"]))
             except Exception:

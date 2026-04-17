@@ -334,8 +334,6 @@ def create_gym_env(cfg, output):
     current_q_carry_score = None
     current_q_best_current_score = None
     current_q_score_gap = None
-    current_q_uncertainty_triggered = None
-    current_q_uncertainty_reasons = None
     current_q_invoked_vlm = None
     overlay_front_dir = os.path.join(output, 'overlay_front')
     os.makedirs(overlay_front_dir, exist_ok=True)
@@ -408,8 +406,6 @@ def create_gym_env(cfg, output):
             current_q_carry_score = None
             current_q_best_current_score = None
             current_q_score_gap = None
-            current_q_uncertainty_triggered = None
-            current_q_uncertainty_reasons = None
             current_q_invoked_vlm = None
             if isinstance(plan_payload, dict):
                 current_plan_traj = plan_payload.get('selected_plan')
@@ -438,8 +434,6 @@ def create_gym_env(cfg, output):
                 current_q_carry_score = plan_payload.get('q_carry_score')
                 current_q_best_current_score = plan_payload.get('q_best_current_score')
                 current_q_score_gap = plan_payload.get('q_score_gap')
-                current_q_uncertainty_triggered = plan_payload.get('q_uncertainty_triggered')
-                current_q_uncertainty_reasons = plan_payload.get('q_uncertainty_reasons')
                 current_q_invoked_vlm = plan_payload.get('q_invoked_vlm')
             else:
                 current_plan_traj = plan_payload
@@ -512,8 +506,6 @@ def create_gym_env(cfg, output):
                     'q_carry_score': current_q_carry_score,
                     'q_best_current_score': current_q_best_current_score,
                     'q_score_gap': current_q_score_gap,
-                    'q_uncertainty_triggered': current_q_uncertainty_triggered,
-                    'q_uncertainty_reasons': current_q_uncertainty_reasons,
                     'q_invoked_vlm': current_q_invoked_vlm,
                     'adaptive_replan_decision': current_adaptive_replan_decision,
                     'carry_previous_valid': current_carry_previous_valid,
@@ -642,8 +634,31 @@ if __name__ == "__main__":
             'RAP_IMAGE_SCALE': cfg.planner.rap.get('image_scale', 0.4),
             'RAP_HF_HUB_OFFLINE': cfg.planner.rap.get('hf_hub_offline', True),
             'RAP_TRANSFORMERS_OFFLINE': cfg.planner.rap.get('transformers_offline', True),
+            'PLANNER_VLM_ENABLED': cfg.planner.rap.vlm.get('enabled', False),
+            'PLANNER_VLM_BACKEND': cfg.planner.rap.vlm.get('backend', 'qwen3_vl'),
+            'PLANNER_VLM_MODEL_ID': cfg.planner.rap.vlm.get('model_id', 'Qwen/Qwen3-VL-8B-Instruct'),
+            'PLANNER_VLM_DEVICE': cfg.planner.rap.vlm.get('device', 'auto'),
+            'PLANNER_VLM_MAX_NEW_TOKENS': cfg.planner.rap.vlm.get('max_new_tokens', 300),
+            'PLANNER_VLM_CANDIDATE_LIMIT': cfg.planner.rap.vlm.get('candidate_limit', 5),
+            'PLANNER_VLM_TIMEOUT_SEC': cfg.planner.rap.vlm.get('timeout_sec', 10.0),
+            'PLANNER_VLM_SAVE_DEBUG_ARTIFACTS': cfg.planner.rap.vlm.get('save_debug_artifacts', True),
+            'PLANNER_VLM_DEBUG_DIR_NAME': cfg.planner.rap.vlm.get('debug_dir_name', 'vlm_debug'),
+            'PLANNER_VLM_CARRY_PREVIOUS_ENABLED': cfg.planner.rap.vlm.get('carry_previous_enabled', True),
+            'PLANNER_VLM_CARRY_PREVIOUS_MIN_PATH_M': cfg.planner.rap.vlm.get('carry_previous_min_path_m', 0.5),
+            'PLANNER_VLM_CARRY_PREVIOUS_MIN_POINTS': cfg.planner.rap.vlm.get('carry_previous_min_points', 2),
+            'PLANNER_VLM_ADAPTIVE_REPLAN_MODE': cfg.planner.rap.vlm.get('adaptive_replan_mode', 'log_only'),
+            'PLANNER_VLM_LATENCY_TRACKING_MODE': cfg.planner.rap.vlm.get('latency_tracking_mode', 'full_timeline'),
+            'PLANNER_VLM_Q_ENABLED': cfg.planner.rap.vlm.get('q_enabled', True),
+            'PLANNER_VLM_Q_SWITCH_MARGIN': cfg.planner.rap.vlm.get('q_switch_margin', 0.05),
+            'PLANNER_VLM_Q_WEIGHT_RAP_SCORE': cfg.planner.rap.vlm.get('q_weight_rap_score', 0.55),
+            'PLANNER_VLM_Q_WEIGHT_PROGRESS': cfg.planner.rap.vlm.get('q_weight_progress', 0.30),
+            'PLANNER_VLM_Q_WEIGHT_OFFCENTER': cfg.planner.rap.vlm.get('q_weight_offcenter', 0.10),
+            'PLANNER_VLM_Q_WEIGHT_CURVATURE': cfg.planner.rap.vlm.get('q_weight_curvature', 0.08),
+            'PLANNER_VLM_Q_WEIGHT_SHORTPLAN': cfg.planner.rap.vlm.get('q_weight_shortplan', 0.18),
+            'PLANNER_VLM_Q_CARRY_SCORE_DECAY': cfg.planner.rap.vlm.get('q_carry_score_decay', 0.0),
+            'PLANNER_VLM_DISPLAY_DEFAULT_TRAJECTORIES': cfg.planner.rap.vlm.get('display_default_trajectories', False),
+            'PLANNER_VLM_INCLUDE_DEFAULT_CANDIDATES': cfg.planner.rap.vlm.get('include_default_candidates', False),
             'RAP_VLM_ENABLED': cfg.planner.rap.vlm.get('enabled', False),
-            'RAP_VLM_INTERVENTION_MODE': cfg.planner.rap.vlm.get('intervention_mode', 'uncertainty_only'),
             'RAP_VLM_BACKEND': cfg.planner.rap.vlm.get('backend', 'qwen3_vl'),
             'RAP_VLM_MODEL_ID': cfg.planner.rap.vlm.get('model_id', 'Qwen/Qwen3-VL-8B-Instruct'),
             'RAP_VLM_DEVICE': cfg.planner.rap.vlm.get('device', 'auto'),
@@ -659,16 +674,12 @@ if __name__ == "__main__":
             'RAP_VLM_LATENCY_TRACKING_MODE': cfg.planner.rap.vlm.get('latency_tracking_mode', 'full_timeline'),
             'RAP_VLM_Q_ENABLED': cfg.planner.rap.vlm.get('q_enabled', True),
             'RAP_VLM_Q_SWITCH_MARGIN': cfg.planner.rap.vlm.get('q_switch_margin', 0.05),
-            'RAP_VLM_Q_UNCERTAINTY_MARGIN': cfg.planner.rap.vlm.get('q_uncertainty_margin', 0.03),
-            'RAP_VLM_Q_QUALITY_FLOOR': cfg.planner.rap.vlm.get('q_quality_floor', 0.18),
-            'RAP_VLM_Q_CANDIDATE_DISAGREEMENT_THRESHOLD': cfg.planner.rap.vlm.get('q_candidate_disagreement_threshold', 2.5),
             'RAP_VLM_Q_WEIGHT_RAP_SCORE': cfg.planner.rap.vlm.get('q_weight_rap_score', 0.55),
             'RAP_VLM_Q_WEIGHT_PROGRESS': cfg.planner.rap.vlm.get('q_weight_progress', 0.30),
             'RAP_VLM_Q_WEIGHT_OFFCENTER': cfg.planner.rap.vlm.get('q_weight_offcenter', 0.10),
             'RAP_VLM_Q_WEIGHT_CURVATURE': cfg.planner.rap.vlm.get('q_weight_curvature', 0.08),
             'RAP_VLM_Q_WEIGHT_SHORTPLAN': cfg.planner.rap.vlm.get('q_weight_shortplan', 0.18),
             'RAP_VLM_Q_CARRY_SCORE_DECAY': cfg.planner.rap.vlm.get('q_carry_score_decay', 0.0),
-            'RAP_VLM_INTERVENTION_PLAN_PATH_FLOOR_M': cfg.planner.rap.vlm.get('intervention_plan_path_floor_m', 1.0),
             'RAP_VLM_DISPLAY_DEFAULT_TRAJECTORIES': cfg.planner.rap.vlm.get('display_default_trajectories', False),
             'RAP_VLM_INCLUDE_DEFAULT_CANDIDATES': cfg.planner.rap.vlm.get('include_default_candidates', False),
         }
