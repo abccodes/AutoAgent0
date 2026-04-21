@@ -626,13 +626,11 @@ if __name__ == "__main__":
     extra_env = {}
     if args.ad == 'rap':
         planner_python_bin = cfg.planner.rap.get('python_bin', 'python')
-        rap_device = os.environ.get('RAP_DEVICE_OVERRIDE', cfg.planner.rap.get('device', 'cuda'))
-        vlm_device = os.environ.get(
-            'PLANNER_VLM_DEVICE_OVERRIDE',
-            os.environ.get(
-                'RAP_VLM_DEVICE_OVERRIDE',
-                cfg.planner.rap.vlm.get('device', 'auto'),
-            ),
+        rap_device = os.environ.get('RAP_DEVICE_OVERRIDE') or cfg.planner.rap.get('device', 'cuda')
+        vlm_device = (
+            os.environ.get('PLANNER_VLM_DEVICE_OVERRIDE')
+            or os.environ.get('RAP_VLM_DEVICE_OVERRIDE')
+            or cfg.planner.rap.vlm.get('device', 'auto')
         )
         extra_env = {
             'RAP_REPO_ROOT': cfg.planner.rap.get('repo_root', ''),
