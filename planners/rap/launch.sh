@@ -3,20 +3,31 @@ set -euo pipefail
 
 CUDA_ID="${1:?missing cuda id}"
 OUTPUT_DIR="${2:?missing output dir}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
+HUGSIM_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_ID}"
+if [[ "${CUDA_ID}" != "inherit" ]]; then
+    export CUDA_VISIBLE_DEVICES="${CUDA_ID}"
+fi
 
 PYTHON_BIN="${RAP_PYTHON_BIN:-python}"
 HF_HOME_DIR="${RAP_HF_HOME:-${HOME}/.cache/huggingface}"
 HF_HUB_CACHE_DIR="${RAP_HF_HUB_CACHE:-${HF_HOME_DIR}/hub}"
 TRANSFORMERS_CACHE_DIR="${RAP_TRANSFORMERS_CACHE:-${HF_HUB_CACHE_DIR}}"
+NUPLAN_DEVKIT_DIR="${RAP_NUPLAN_DEVKIT_DIR:-/bigdata/jason/drivor_evaluation/DrivoR/nuplan-devkit}"
 
 export HF_HOME="${HF_HOME_DIR}"
 export HUGGINGFACE_HUB_CACHE="${HF_HUB_CACHE_DIR}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE_DIR}"
 export HF_HUB_OFFLINE="${RAP_HF_HUB_OFFLINE:-1}"
 export TRANSFORMERS_OFFLINE="${RAP_TRANSFORMERS_OFFLINE:-1}"
+
+if [[ -d "${NUPLAN_DEVKIT_DIR}" ]]; then
+    export PYTHONPATH="${NUPLAN_DEVKIT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+fi
+
+export PYTHONPATH="${HUGSIM_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Prevent the RAP env from accidentally loading HUGSIM pixi torch libs.
 if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then

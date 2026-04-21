@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,33 +16,9 @@ import numpy as np
 from PIL import Image
 from scipy.spatial.transform import Rotation as SCR
 
-LOG = logging.getLogger(__name__)
+from planners.common.candidate_visuals import get_candidate_visual_style
 
-TOPK_BASE_COLORS = [
-    (0, 120, 255),
-    (0, 180, 255),
-    (0, 220, 200),
-    (60, 220, 120),
-    (120, 220, 60),
-    (200, 220, 40),
-    (255, 200, 0),
-    (255, 160, 0),
-    (255, 90, 0),
-    (255, 0, 0),
-]
-PAST_TRAJECTORY_COLOR = (0, 0, 0)
-TOPK_COLOR_NAMES = [
-    "blue",
-    "light_blue",
-    "cyan",
-    "green",
-    "lime",
-    "yellow_green",
-    "amber",
-    "orange",
-    "orange_red",
-    "red",
-]
+LOG = logging.getLogger(__name__)
 PLAN_VIS_FORWARD_OFFSET_M = 4.5
 PLAN_RESAMPLE_SPACING_M = 0.08
 
@@ -51,6 +29,7 @@ class VLMSelectorConfig:
     backend: str = "qwen3_vl"
     model_id: str = "Qwen/Qwen3-VL-8B-Instruct"
     device: str = "auto"
+    python_bin: str = ""
     max_new_tokens: int = 300
     candidate_limit: int = 5
     timeout_sec: float = 10.0
@@ -363,7 +342,7 @@ def build_scoring_prompt(
     )
     candidate_index_list = ", ".join(str(row["candidate_index"]) for row in candidate_rows)
     return f"""
-You are a cautious autonomous-driving trajectory scorer.
+You are an autonomous-driving trajectory scorer.
 
 You are given:
 1. A front-facing driving image with multiple color-coded candidate trajectories overlaid.
@@ -372,34 +351,26 @@ You are given:
 
 Your job:
 - Score EVERY candidate trajectory with a scalar Q-like value.
-- Also identify the single best candidate.
-- Judge based on visible scene context and trajectory plausibility.
-- Prefer:
-  - staying in the drivable region,
-  - maintaining lane alignment,
-  - avoiding nearby vehicles/obstacles,
-  - avoiding sidewalk/off-road/wrong-way behavior,
-  - smooth and realistic motion,
-  - following the route instruction as much as possible.
-
-Important constraints:
-- Use only what is visible in the image and candidate metadata.
-- If all candidates are imperfect, prefer the least risky one.
+- Identify the single best candidate based on the highest generated Q-value.\
 - There are exactly {len(candidate_rows)} candidates in this frame.
 - You MUST return one score for every candidate index: {candidate_index_list}.
 - Do not omit any candidate index.
 - Do not shorten the score dictionary to a partial example.
-- One candidate may be "carry_prev", which means continue following the
-  previously selected plan instead of switching to a fresh current proposal.
-- Treat scores as relative action values:
-  - higher is better,
-  - score based on visible safety, lane alignment, route following, and smoothness,
-  - penalize trajectories that visibly leave the road, cut across lanes, or
-    look inconsistent with the scene.
 - Keep score scale internally consistent within this frame.
 - Keep the response compact. Do not include long explanations.
+- Judge based on the following constraints:
+  - higher scores are better,
+  - staying in the drivable region,
+  - maintaining lane alignment and smoothness,
+  - avoiding nearby vehicles/obstacles,
+  - avoiding sidewalk/off-road/wrong-way behavior,
+  - smooth and realistic motion,
+  - following the route instruction,
+  - penalize trajectories unsafe trajectories.
+    - Use only what is visible in the image and candidate metadata.
+    - If all candidates are imperfect, prefer the least risky one.
 
-Route instruction:
+Route instruction (right,left,or straight):
 {route_instruction}
 
 Candidate trajectories:
@@ -441,9 +412,9 @@ def try_parse_json(text: str) -> Optional[Dict[str, object]]:
 
 def command_to_route_instruction(command: object) -> str:
     mapping = {
-        0: "Turn right safely and follow the road.",
-        1: "Turn left safely and follow the road.",
-        2: "Drive forward safely and follow the lane.",
+        0: "right",
+        1: "left",
+        2: "straight",
     }
     try:
         return mapping.get(int(command), "Drive safely and choose the most reasonable trajectory.")
@@ -532,17 +503,91 @@ class Qwen3TrajectorySelector:
         }
 
 
+class SubprocessQwen3TrajectorySelector:
+    def __init__(self, python_bin: str, worker_script: Path, model_id: str, device: str, max_new_tokens: int) -> None:
+        if not python_bin:
+            raise ValueError("VLM python_bin is not set")
+        self.python_bin = python_bin
+        self.worker_script = worker_script
+        self.model_id = model_id
+        self.device = device
+        self.max_new_tokens = max_new_tokens
+        self._proc: Optional[subprocess.Popen[str]] = None
+
+    def _ensure_proc(self) -> subprocess.Popen[str]:
+        if self._proc is not None and self._proc.poll() is None:
+            return self._proc
+        self._proc = subprocess.Popen(
+            [
+                self.python_bin,
+                str(self.worker_script),
+                "--model-id",
+                self.model_id,
+                "--device",
+                self.device,
+                "--max-new-tokens",
+                str(self.max_new_tokens),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=os.environ.copy(),
+        )
+        return self._proc
+
+    def select(
+        self,
+        image_path: Path,
+        candidate_rows: Sequence[Dict[str, object]],
+        route_instruction: str,
+    ) -> Dict[str, object]:
+        prompt = build_scoring_prompt(candidate_rows, route_instruction)
+        proc = self._ensure_proc()
+        if proc.stdin is None or proc.stdout is None:
+            raise RuntimeError("VLM worker stdio is unavailable")
+
+        started = time.time()
+        proc.stdin.write(json.dumps({"image_path": str(image_path), "prompt": prompt}) + "\n")
+        proc.stdin.flush()
+        line = proc.stdout.readline()
+        if not line:
+            stderr = ""
+            if proc.stderr is not None:
+                stderr = proc.stderr.read()
+            raise RuntimeError(f"VLM worker exited unexpectedly: {stderr.strip()}")
+        response = json.loads(line)
+        if response.get("error"):
+            raise RuntimeError(str(response["error"]))
+        raw_output = str(response.get("raw_output", ""))
+        return {
+            "raw_output": raw_output,
+            "parsed_output": try_parse_json(raw_output),
+            "elapsed_sec": time.time() - started,
+            "prompt": prompt,
+        }
+
+    def close(self) -> None:
+        if self._proc is None:
+            return
+        if self._proc.stdin is not None:
+            try:
+                self._proc.stdin.close()
+            except Exception:
+                pass
+        if self._proc.poll() is None:
+            self._proc.terminate()
+        self._proc = None
+
+
 def build_candidate_rows(candidates: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     current_rank = 0
     for rank, candidate in enumerate(candidates):
         source = str(candidate.get("source", "current_rap"))
-        if source == "carry_prev":
-            color = PAST_TRAJECTORY_COLOR
-            color_name = "black"
-        else:
-            color = TOPK_BASE_COLORS[min(current_rank, len(TOPK_BASE_COLORS) - 1)]
-            color_name = TOPK_COLOR_NAMES[min(current_rank, len(TOPK_COLOR_NAMES) - 1)]
+        style = get_candidate_visual_style(source, current_rank)
+        if source != "carry_prev":
             current_rank += 1
         plan = np.asarray(candidate["local_plan"], dtype=np.float32)
         row = {
@@ -550,8 +595,8 @@ def build_candidate_rows(candidates: Sequence[Dict[str, object]]) -> List[Dict[s
             "candidate_rank": rank,
             "proposal_index": None if candidate.get("proposal_index") is None else int(candidate["proposal_index"]),
             "source": source,
-            "color_name": color_name,
-            "color_bgr": list(color),
+            "color_name": style.color_name,
+            "color_bgr": list(style.color_bgr),
             "local_plan": plan.tolist(),
             "execution_plan": np.asarray(candidate.get("execution_plan", candidate["local_plan"]), dtype=np.float32).tolist(),
             "proposal_score": float(candidate.get("proposal_score", 0.0)),
@@ -645,7 +690,7 @@ class VLMPlanSelector:
         self.debug_dir = output_dir / cfg.debug_dir_name
         self.timeline_path = self.debug_dir / "latency_timeline.jsonl"
         self.summary_path = self.debug_dir / "latency_summary.json"
-        self._selector: Optional[Qwen3TrajectorySelector] = None
+        self._selector: Optional[object] = None
         self._disabled_reason: Optional[str] = None
         self._timeline_records: List[Dict[str, object]] = []
 
@@ -664,25 +709,35 @@ class VLMPlanSelector:
             with self.timeline_path.open("a", encoding="utf-8") as wf:
                 wf.write(json.dumps(record) + "\n")
 
-    def _ensure_selector(self) -> Optional[Qwen3TrajectorySelector]:
+    def _ensure_selector(self) -> Optional[object]:
         if self._selector is not None:
             return self._selector
         if self._disabled_reason is not None:
             return None
-        if self.cfg.backend != "qwen3_vl":
-            self._disabled_reason = f"unsupported_backend:{self.cfg.backend}"
-            return None
-        try:
-            self._selector = Qwen3TrajectorySelector(
+        if self.cfg.backend == "qwen3_vl":
+            selector_factory = lambda: Qwen3TrajectorySelector(
                 model_id=self.cfg.model_id,
                 device=self.cfg.device,
                 max_new_tokens=self.cfg.max_new_tokens,
             )
+        elif self.cfg.backend == "subprocess_qwen3_vl":
+            selector_factory = lambda: SubprocessQwen3TrajectorySelector(
+                python_bin=self.cfg.python_bin,
+                worker_script=Path(__file__).with_name("vlm_worker.py"),
+                model_id=self.cfg.model_id,
+                device=self.cfg.device,
+                max_new_tokens=self.cfg.max_new_tokens,
+            )
+        else:
+            self._disabled_reason = f"unsupported_backend:{self.cfg.backend}"
+            return None
+        try:
+            self._selector = selector_factory()
             LOG.info(
                 "Initialized VLM selector backend=%s model=%s device=%s",
                 self.cfg.backend,
                 self.cfg.model_id,
-                self._selector.device,
+                getattr(self._selector, "device", self.cfg.device),
             )
             return self._selector
         except Exception as exc:
@@ -925,6 +980,11 @@ class VLMPlanSelector:
         }
 
     def finalize(self) -> None:
+        if hasattr(self._selector, "close"):
+            try:
+                self._selector.close()
+            except Exception:
+                LOG.exception("Failed to close VLM selector")
         if not self._timeline_records or not self.cfg.save_debug_artifacts:
             return
 

@@ -3,9 +3,13 @@ set -euo pipefail
 
 CUDA_ID="${1:?missing cuda id}"
 OUTPUT_DIR="${2:?missing output dir}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
+HUGSIM_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_ID}"
+if [[ "${CUDA_ID}" != "inherit" ]]; then
+    export CUDA_VISIBLE_DEVICES="${CUDA_ID}"
+fi
 
 # Provided by HUGSIM closed_loop.py via extra_env
 : "${DRIVOR_PYTHON_BIN:=python}"
@@ -18,6 +22,8 @@ export CUDA_VISIBLE_DEVICES="${CUDA_ID}"
 # Optional: if you add config composition
 # : "${DRIVOR_CONFIG_DIR:?DRIVOR_CONFIG_DIR is not set}"
 # : "${DRIVOR_EXPERIMENT:?DRIVOR_EXPERIMENT is not set}"
+
+export PYTHONPATH="${HUGSIM_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Prevent the DrivoR env from accidentally loading HUGSIM pixi torch libs.
 if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then

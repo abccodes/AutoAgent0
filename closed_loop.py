@@ -18,7 +18,6 @@ from sim.utils.sim_utils import (
 )
 import pickle
 import json
-import pickle
 import struct
 import logging
 from sim.utils.launch_ad import launch, check_alive
@@ -28,6 +27,8 @@ from sim.utils.score_calculator import hugsim_evaluate
 import numpy as np
 import cv2
 from moviepy import ImageSequenceClip
+from planners.common.candidate_visuals import get_candidate_visual_style
+from planners.common.vlm_env import build_prefixed_vlm_env
 
 VIDEO_LAYOUT = [
     ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT'],
@@ -36,19 +37,6 @@ VIDEO_LAYOUT = [
 FRONT_CAM_NAME = 'CAM_FRONT'
 REFERENCE_COLOR = (255, 230, 0)
 PLAN_COLOR = (0, 120, 255)
-TOPK_BASE_COLORS = [
-    (0, 120, 255),
-    (0, 180, 255),
-    (0, 220, 200),
-    (60, 220, 120),
-    (120, 220, 60),
-    (200, 220, 40),
-    (255, 200, 0),
-    (255, 160, 0),
-    (255, 120, 0),
-    (255, 80, 0),
-]
-PAST_TRAJECTORY_COLOR = (0, 0, 0)
 REFERENCE_FORWARD_OFFSET_M = 4.0
 PLAN_VIS_FORWARD_OFFSET_M = 4.5
 VIS_PLAN_MIN_PATH_M = 0.5
@@ -209,6 +197,15 @@ def _build_reference_worldline(reference_poses, ground_height_fn, forward_offset
     return resample_polyline(reference_world, spacing=0.5)
 
 
+def _resolve_reference_ground_height_fn(env):
+    env_unwrapped = env.unwrapped
+    if hasattr(env_unwrapped, 'scene_ground_height'):
+        return env_unwrapped.scene_ground_height
+    if hasattr(env_unwrapped, 'planner') and hasattr(env_unwrapped.planner, 'ground_height'):
+        return env_unwrapped.planner.ground_height
+    return env_unwrapped.ground_height
+
+
 def _render_front_overlay(front_image, current_obs, current_info, env, plan_traj, plan_origin_pose):
     ego_pose = rt2pose(np.asarray(current_info['ego_rot']), np.asarray(current_info['ego_pos']))
     cam_params = current_info['cam_params']
@@ -220,7 +217,7 @@ def _render_front_overlay(front_image, current_obs, current_info, env, plan_traj
     reference_poses = _select_reference_pose_segment(env.unwrapped.ground_model[0], front_c2w, lookahead=40)
     reference_world = _build_reference_worldline(
         reference_poses,
-        env.unwrapped.scene_ground_height,
+        _resolve_reference_ground_height_fn(env),
     )
     ref_pixels, ref_valid = project_world_points_to_image(reference_world, intrinsic, front_c2w)
     draw_projected_polyline(overlay, ref_pixels, ref_valid, color=REFERENCE_COLOR, thickness=4)
@@ -259,14 +256,9 @@ def _render_front_overlay(front_image, current_obs, current_info, env, plan_traj
         current_rank = 0
         for rank, candidate_plan in enumerate(candidate_plans):
             source = None if candidate_sources is None or rank >= len(candidate_sources) else candidate_sources[rank]
-            if source == 'carry_prev':
-                base_color = PAST_TRAJECTORY_COLOR
-            else:
-                base_color = TOPK_BASE_COLORS[min(current_rank, len(TOPK_BASE_COLORS) - 1)]
-                if current_rank >= len(TOPK_BASE_COLORS):
-                    decay = min(current_rank - len(TOPK_BASE_COLORS) + 1, 8)
-                    fade = max(0.35, 1.0 - 0.08 * decay)
-                    base_color = tuple(int(channel * fade) for channel in base_color)
+            style = get_candidate_visual_style(source or 'current_rap', current_rank)
+            base_color = style.color_bgr
+            if source != 'carry_prev':
                 current_rank += 1
             draw_candidate(candidate_plan, base_color, 4 if rank == 0 else 2)
     elif plan_traj is not None and len(plan_traj) > 0:
@@ -602,7 +594,10 @@ if __name__ == "__main__":
         {"kinematic": kinematic_config},
         {"planner": planner_config},
     )
-    cfg.base.output_dir = cfg.base.output_dir + args.ad
+    planner_output_suffix = args.ad
+    if args.ad == 'rap' and planner_config.get('rap', {}).get('vlm', {}).get('enabled', False):
+        planner_output_suffix = 'rap_vlm'
+    cfg.base.output_dir = cfg.base.output_dir + planner_output_suffix
 
     model_path = os.path.join(cfg.base.model_base, cfg.scenario.scene_name)
     model_config = OmegaConf.load(os.path.join(model_path, 'cfg.yaml'))
@@ -626,63 +621,28 @@ if __name__ == "__main__":
 
     extra_env = {}
     if args.ad == 'rap':
+        planner_python_bin = cfg.planner.rap.get('python_bin', 'python')
         extra_env = {
             'RAP_REPO_ROOT': cfg.planner.rap.get('repo_root', ''),
             'RAP_CHECKPOINT': cfg.planner.rap.get('checkpoint', ''),
-            'RAP_PYTHON_BIN': cfg.planner.rap.get('python_bin', 'python'),
+            'RAP_PYTHON_BIN': planner_python_bin,
             'RAP_DEVICE': cfg.planner.rap.get('device', 'cuda'),
             'RAP_IMAGE_SCALE': cfg.planner.rap.get('image_scale', 0.4),
+            'RAP_USE_SCENE_RIG_LIDAR2IMG': cfg.planner.rap.get('use_scene_rig_lidar2img', False),
             'RAP_HF_HUB_OFFLINE': cfg.planner.rap.get('hf_hub_offline', True),
             'RAP_TRANSFORMERS_OFFLINE': cfg.planner.rap.get('transformers_offline', True),
-            'PLANNER_VLM_ENABLED': cfg.planner.rap.vlm.get('enabled', False),
-            'PLANNER_VLM_BACKEND': cfg.planner.rap.vlm.get('backend', 'qwen3_vl'),
-            'PLANNER_VLM_MODEL_ID': cfg.planner.rap.vlm.get('model_id', 'Qwen/Qwen3-VL-8B-Instruct'),
-            'PLANNER_VLM_DEVICE': cfg.planner.rap.vlm.get('device', 'auto'),
-            'PLANNER_VLM_MAX_NEW_TOKENS': cfg.planner.rap.vlm.get('max_new_tokens', 300),
-            'PLANNER_VLM_CANDIDATE_LIMIT': cfg.planner.rap.vlm.get('candidate_limit', 5),
-            'PLANNER_VLM_TIMEOUT_SEC': cfg.planner.rap.vlm.get('timeout_sec', 10.0),
-            'PLANNER_VLM_SAVE_DEBUG_ARTIFACTS': cfg.planner.rap.vlm.get('save_debug_artifacts', True),
-            'PLANNER_VLM_DEBUG_DIR_NAME': cfg.planner.rap.vlm.get('debug_dir_name', 'vlm_debug'),
-            'PLANNER_VLM_CARRY_PREVIOUS_ENABLED': cfg.planner.rap.vlm.get('carry_previous_enabled', True),
-            'PLANNER_VLM_CARRY_PREVIOUS_MIN_PATH_M': cfg.planner.rap.vlm.get('carry_previous_min_path_m', 0.5),
-            'PLANNER_VLM_CARRY_PREVIOUS_MIN_POINTS': cfg.planner.rap.vlm.get('carry_previous_min_points', 2),
-            'PLANNER_VLM_ADAPTIVE_REPLAN_MODE': cfg.planner.rap.vlm.get('adaptive_replan_mode', 'log_only'),
-            'PLANNER_VLM_LATENCY_TRACKING_MODE': cfg.planner.rap.vlm.get('latency_tracking_mode', 'full_timeline'),
-            'PLANNER_VLM_Q_ENABLED': cfg.planner.rap.vlm.get('q_enabled', True),
-            'PLANNER_VLM_Q_SWITCH_MARGIN': cfg.planner.rap.vlm.get('q_switch_margin', 0.05),
-            'PLANNER_VLM_Q_WEIGHT_RAP_SCORE': cfg.planner.rap.vlm.get('q_weight_rap_score', 0.55),
-            'PLANNER_VLM_Q_WEIGHT_PROGRESS': cfg.planner.rap.vlm.get('q_weight_progress', 0.30),
-            'PLANNER_VLM_Q_WEIGHT_OFFCENTER': cfg.planner.rap.vlm.get('q_weight_offcenter', 0.10),
-            'PLANNER_VLM_Q_WEIGHT_CURVATURE': cfg.planner.rap.vlm.get('q_weight_curvature', 0.08),
-            'PLANNER_VLM_Q_WEIGHT_SHORTPLAN': cfg.planner.rap.vlm.get('q_weight_shortplan', 0.18),
-            'PLANNER_VLM_Q_CARRY_SCORE_DECAY': cfg.planner.rap.vlm.get('q_carry_score_decay', 0.0),
-            'PLANNER_VLM_DISPLAY_DEFAULT_TRAJECTORIES': cfg.planner.rap.vlm.get('display_default_trajectories', False),
-            'PLANNER_VLM_INCLUDE_DEFAULT_CANDIDATES': cfg.planner.rap.vlm.get('include_default_candidates', False),
-            'RAP_VLM_ENABLED': cfg.planner.rap.vlm.get('enabled', False),
-            'RAP_VLM_BACKEND': cfg.planner.rap.vlm.get('backend', 'qwen3_vl'),
-            'RAP_VLM_MODEL_ID': cfg.planner.rap.vlm.get('model_id', 'Qwen/Qwen3-VL-8B-Instruct'),
-            'RAP_VLM_DEVICE': cfg.planner.rap.vlm.get('device', 'auto'),
-            'RAP_VLM_MAX_NEW_TOKENS': cfg.planner.rap.vlm.get('max_new_tokens', 300),
-            'RAP_VLM_CANDIDATE_LIMIT': cfg.planner.rap.vlm.get('candidate_limit', 5),
-            'RAP_VLM_TIMEOUT_SEC': cfg.planner.rap.vlm.get('timeout_sec', 10.0),
-            'RAP_VLM_SAVE_DEBUG_ARTIFACTS': cfg.planner.rap.vlm.get('save_debug_artifacts', True),
-            'RAP_VLM_DEBUG_DIR_NAME': cfg.planner.rap.vlm.get('debug_dir_name', 'vlm_debug'),
-            'RAP_VLM_CARRY_PREVIOUS_ENABLED': cfg.planner.rap.vlm.get('carry_previous_enabled', True),
-            'RAP_VLM_CARRY_PREVIOUS_MIN_PATH_M': cfg.planner.rap.vlm.get('carry_previous_min_path_m', 0.5),
-            'RAP_VLM_CARRY_PREVIOUS_MIN_POINTS': cfg.planner.rap.vlm.get('carry_previous_min_points', 2),
-            'RAP_VLM_ADAPTIVE_REPLAN_MODE': cfg.planner.rap.vlm.get('adaptive_replan_mode', 'log_only'),
-            'RAP_VLM_LATENCY_TRACKING_MODE': cfg.planner.rap.vlm.get('latency_tracking_mode', 'full_timeline'),
-            'RAP_VLM_Q_ENABLED': cfg.planner.rap.vlm.get('q_enabled', True),
-            'RAP_VLM_Q_SWITCH_MARGIN': cfg.planner.rap.vlm.get('q_switch_margin', 0.05),
-            'RAP_VLM_Q_WEIGHT_RAP_SCORE': cfg.planner.rap.vlm.get('q_weight_rap_score', 0.55),
-            'RAP_VLM_Q_WEIGHT_PROGRESS': cfg.planner.rap.vlm.get('q_weight_progress', 0.30),
-            'RAP_VLM_Q_WEIGHT_OFFCENTER': cfg.planner.rap.vlm.get('q_weight_offcenter', 0.10),
-            'RAP_VLM_Q_WEIGHT_CURVATURE': cfg.planner.rap.vlm.get('q_weight_curvature', 0.08),
-            'RAP_VLM_Q_WEIGHT_SHORTPLAN': cfg.planner.rap.vlm.get('q_weight_shortplan', 0.18),
-            'RAP_VLM_Q_CARRY_SCORE_DECAY': cfg.planner.rap.vlm.get('q_carry_score_decay', 0.0),
-            'RAP_VLM_DISPLAY_DEFAULT_TRAJECTORIES': cfg.planner.rap.vlm.get('display_default_trajectories', False),
-            'RAP_VLM_INCLUDE_DEFAULT_CANDIDATES': cfg.planner.rap.vlm.get('include_default_candidates', False),
+            'RAP_HF_HOME': cfg.planner.rap.get('hf_home', ''),
+            'RAP_HF_HUB_CACHE': cfg.planner.rap.get('hf_hub_cache', ''),
+            'RAP_TRANSFORMERS_CACHE': cfg.planner.rap.get('transformers_cache', ''),
+            'RAP_NUPLAN_DEVKIT_DIR': cfg.planner.rap.get('nuplan_devkit_dir', ''),
+            'RAP_BACKBONE_PATH': cfg.planner.rap.get('backbone_path', ''),
         }
+        extra_env.update(
+            build_prefixed_vlm_env(
+                cfg.planner.rap.vlm,
+                planner_python_bin=planner_python_bin,
+            )
+        )
         
     elif args.ad == "drivor":
         extra_env = {

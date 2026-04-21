@@ -18,6 +18,11 @@ import torch
 from scipy.spatial.transform import Rotation as SCR
 
 from planners.common.vlm_selector import VLMPlanSelector, VLMSelectorConfig
+from planners.common.vlm_env import (
+    VLM_ENV_DEFAULTS,
+    VLM_ENV_FIELD_NAMES,
+    get_prefixed_env_value,
+)
 
 # Newer transformers expects torch>=2.2's public pytree registration name.
 # RAP currently runs with torch 2.1 in this env, which still exposes the
@@ -85,23 +90,26 @@ def env_flag(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def env_get(primary: str, fallback: str, default: str) -> str:
-    raw = os.environ.get(primary)
-    if raw is not None:
-        return raw
-    raw = os.environ.get(fallback)
-    if raw is not None:
-        return raw
-    return default
+def _coerce_env_value(raw_value, default_value):
+    if isinstance(default_value, bool):
+        return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(default_value, int) and not isinstance(default_value, bool):
+        return int(raw_value)
+    if isinstance(default_value, float):
+        return float(raw_value)
+    return str(raw_value)
 
 
-def env_flag_compat(primary: str, fallback: str, default: bool = False) -> bool:
-    raw = os.environ.get(primary)
-    if raw is None:
-        raw = os.environ.get(fallback)
-    if raw is None:
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+def resolve_vlm_config() -> VLMSelectorConfig:
+    values = {}
+    rap_python_bin = os.environ.get("RAP_PYTHON_BIN", "")
+    for suffix, field_name in VLM_ENV_FIELD_NAMES.items():
+        default_value = VLM_ENV_DEFAULTS[suffix]
+        if suffix == "PYTHON_BIN":
+            default_value = rap_python_bin
+        raw_value = get_prefixed_env_value(suffix, default=default_value)
+        values[field_name] = _coerce_env_value(raw_value, default_value)
+    return VLMSelectorConfig(**values)
 
 
 def resolve_config(args: argparse.Namespace) -> AdapterConfig:
@@ -128,32 +136,7 @@ def resolve_config(args: argparse.Namespace) -> AdapterConfig:
         debug_diagnostics=env_flag("RAP_DEBUG_DIAGNOSTICS", False),
         use_scene_rig_lidar2img=env_flag("RAP_USE_SCENE_RIG_LIDAR2IMG", False),
         output_num_poses=DEFAULT_OUTPUT_POSES,
-        vlm=VLMSelectorConfig(
-            enabled=env_flag_compat("PLANNER_VLM_ENABLED", "RAP_VLM_ENABLED", False),
-            backend=env_get("PLANNER_VLM_BACKEND", "RAP_VLM_BACKEND", "qwen3_vl"),
-            model_id=env_get("PLANNER_VLM_MODEL_ID", "RAP_VLM_MODEL_ID", "Qwen/Qwen3-VL-8B-Instruct"),
-            device=env_get("PLANNER_VLM_DEVICE", "RAP_VLM_DEVICE", "auto"),
-            max_new_tokens=int(env_get("PLANNER_VLM_MAX_NEW_TOKENS", "RAP_VLM_MAX_NEW_TOKENS", "300")),
-            candidate_limit=int(env_get("PLANNER_VLM_CANDIDATE_LIMIT", "RAP_VLM_CANDIDATE_LIMIT", "5")),
-            timeout_sec=float(env_get("PLANNER_VLM_TIMEOUT_SEC", "RAP_VLM_TIMEOUT_SEC", "10.0")),
-            save_debug_artifacts=env_flag_compat("PLANNER_VLM_SAVE_DEBUG_ARTIFACTS", "RAP_VLM_SAVE_DEBUG_ARTIFACTS", True),
-            debug_dir_name=env_get("PLANNER_VLM_DEBUG_DIR_NAME", "RAP_VLM_DEBUG_DIR_NAME", "vlm_debug"),
-            carry_previous_enabled=env_flag_compat("PLANNER_VLM_CARRY_PREVIOUS_ENABLED", "RAP_VLM_CARRY_PREVIOUS_ENABLED", True),
-            carry_previous_min_path_m=float(env_get("PLANNER_VLM_CARRY_PREVIOUS_MIN_PATH_M", "RAP_VLM_CARRY_PREVIOUS_MIN_PATH_M", "0.5")),
-            carry_previous_min_points=int(env_get("PLANNER_VLM_CARRY_PREVIOUS_MIN_POINTS", "RAP_VLM_CARRY_PREVIOUS_MIN_POINTS", "2")),
-            adaptive_replan_mode=env_get("PLANNER_VLM_ADAPTIVE_REPLAN_MODE", "RAP_VLM_ADAPTIVE_REPLAN_MODE", "log_only"),
-            latency_tracking_mode=env_get("PLANNER_VLM_LATENCY_TRACKING_MODE", "RAP_VLM_LATENCY_TRACKING_MODE", "full_timeline"),
-            q_enabled=env_flag_compat("PLANNER_VLM_Q_ENABLED", "RAP_VLM_Q_ENABLED", True),
-            q_switch_margin=float(env_get("PLANNER_VLM_Q_SWITCH_MARGIN", "RAP_VLM_Q_SWITCH_MARGIN", "0.05")),
-            q_weight_rap_score=float(env_get("PLANNER_VLM_Q_WEIGHT_RAP_SCORE", "RAP_VLM_Q_WEIGHT_RAP_SCORE", "0.55")),
-            q_weight_progress=float(env_get("PLANNER_VLM_Q_WEIGHT_PROGRESS", "RAP_VLM_Q_WEIGHT_PROGRESS", "0.30")),
-            q_weight_offcenter=float(env_get("PLANNER_VLM_Q_WEIGHT_OFFCENTER", "RAP_VLM_Q_WEIGHT_OFFCENTER", "0.10")),
-            q_weight_curvature=float(env_get("PLANNER_VLM_Q_WEIGHT_CURVATURE", "RAP_VLM_Q_WEIGHT_CURVATURE", "0.08")),
-            q_weight_shortplan=float(env_get("PLANNER_VLM_Q_WEIGHT_SHORTPLAN", "RAP_VLM_Q_WEIGHT_SHORTPLAN", "0.18")),
-            q_carry_score_decay=float(env_get("PLANNER_VLM_Q_CARRY_SCORE_DECAY", "RAP_VLM_Q_CARRY_SCORE_DECAY", "0.0")),
-            display_default_trajectories=env_flag_compat("PLANNER_VLM_DISPLAY_DEFAULT_TRAJECTORIES", "RAP_VLM_DISPLAY_DEFAULT_TRAJECTORIES", False),
-            include_default_candidates=env_flag_compat("PLANNER_VLM_INCLUDE_DEFAULT_CANDIDATES", "RAP_VLM_INCLUDE_DEFAULT_CANDIDATES", False),
-        ),
+        vlm=resolve_vlm_config(),
     )
 
 
@@ -729,6 +712,152 @@ def build_plan_payload(
     return payload
 
 
+def build_plain_rap_plan_result(
+    proposals: np.ndarray,
+    scores: np.ndarray,
+    cfg: AdapterConfig,
+) -> Dict[str, object]:
+    best_idx = int(np.argmax(scores))
+    selected_plan = rap_to_hugsim_plan(proposals[best_idx, :cfg.output_num_poses])
+    selected_score = float(scores[best_idx])
+    return {
+        "selected_plan": selected_plan,
+        "selected_score": selected_score,
+        "selected_score_raw": selected_score,
+        "selected_row": {
+            "source": "current_rap",
+            "proposal_index": best_idx,
+        },
+        "plan_payload": build_plan_payload(
+            proposals,
+            scores,
+            output_num_poses=cfg.output_num_poses,
+            selected_idx=best_idx,
+            selected_source="rap_argmax",
+            topk=10,
+        ),
+    }
+
+
+def build_vlm_candidate_rows(
+    proposals: np.ndarray,
+    scores: np.ndarray,
+    cfg: AdapterConfig,
+    current_info: Dict[str, object],
+    previous_selected_plan: Optional[np.ndarray],
+    previous_selected_pose: Optional[np.ndarray],
+    previous_selected_score: Optional[float],
+    previous_selected_timestamp: Optional[float],
+    previous_selected_source: Optional[str],
+) -> Tuple[List[Dict[str, object]], bool]:
+    allow_carry_previous = not (
+        previous_selected_source is not None
+        and str(previous_selected_source).startswith("default_fallback_")
+    )
+    carry_candidate = build_carry_plan_candidate(
+        previous_plan=previous_selected_plan if allow_carry_previous else None,
+        previous_pose=previous_selected_pose if allow_carry_previous else None,
+        previous_selected_score=previous_selected_score if allow_carry_previous else None,
+        previous_timestamp=previous_selected_timestamp if allow_carry_previous else None,
+        current_info=current_info,
+        cfg=cfg,
+    )
+
+    sorted_indices = np.argsort(scores)[::-1]
+    current_candidate_limit = max(1, int(cfg.vlm.candidate_limit) - 1)
+    current_candidate_limit = min(current_candidate_limit, int(len(sorted_indices)))
+    candidate_indices = sorted_indices[:current_candidate_limit]
+    candidate_rows: List[Dict[str, object]] = []
+    if carry_candidate is not None:
+        candidate_rows.append(carry_candidate)
+
+    normalized_scores = normalize_scores(scores)
+    for idx in candidate_indices:
+        full_plan = rap_to_hugsim_plan(proposals[idx, :cfg.output_num_poses])
+        candidate_rows.append(
+            {
+                "source": "current_rap",
+                "proposal_index": int(idx),
+                "proposal_score": float(scores[idx]),
+                "local_plan": full_plan,
+                "execution_plan": full_plan.copy(),
+                "proposal_score_norm": float(normalized_scores[idx]),
+            }
+        )
+
+    if cfg.vlm.include_default_candidates:
+        for default_idx, default_plan in enumerate(get_default_trajectories(cfg.output_num_poses)):
+            candidate_rows.append(
+                {
+                    "source": f"default_fallback_{default_idx}",
+                    "proposal_index": None,
+                    "proposal_score": 0.0,
+                    "local_plan": default_plan,
+                    "execution_plan": default_plan.copy(),
+                    "proposal_score_norm": 0.0,
+                }
+            )
+
+    carry_row = next((row for row in candidate_rows if row.get("source") == "carry_prev"), None)
+    shared_horizon = len(carry_row["local_plan"]) if carry_row is not None else cfg.output_num_poses
+    shared_horizon = max(1, int(shared_horizon))
+    for row in candidate_rows:
+        execution_plan = np.asarray(row.get("execution_plan", row["local_plan"]), dtype=np.float32)
+        row["execution_plan"] = execution_plan
+        row["local_plan"] = truncate_plan(execution_plan, shared_horizon)
+        if "proposal_score_norm" not in row:
+            row["proposal_score_norm"] = float(row.get("proposal_score", 0.0))
+        row["q_score"] = compute_q_score(
+            row["local_plan"],
+            float(row.get("proposal_score_norm", row.get("proposal_score", 0.0))),
+            cfg,
+            is_carry=(row.get("source") == "carry_prev"),
+        )
+
+    return candidate_rows, allow_carry_previous
+
+
+def resolve_q_selection(
+    candidate_rows: Sequence[Dict[str, object]],
+    cfg: AdapterConfig,
+) -> Dict[str, object]:
+    current_rows = [row for row in candidate_rows if row.get("source") == "current_rap"]
+    if not current_rows:
+        raise RuntimeError("No current RAP candidates available for Q selection")
+
+    carry_row = next((row for row in candidate_rows if row.get("source") == "carry_prev"), None)
+    best_current_row = max(current_rows, key=lambda row: float(row.get("q_score", -1e6)))
+    best_current_pool_index = next(
+        idx for idx, row in enumerate(candidate_rows)
+        if row is best_current_row
+    )
+    q_best_current_score = float(best_current_row.get("q_score", -1e6))
+    q_carry_score = None if carry_row is None else float(carry_row.get("q_score", -1e6))
+    q_selected_pool_index = best_current_pool_index
+    q_selected_source = "q_switch_to_current"
+    q_score_gap = None
+
+    if carry_row is not None:
+        q_score_gap = q_best_current_score - float(q_carry_score)
+        if q_score_gap < cfg.vlm.q_switch_margin:
+            q_selected_pool_index = next(
+                idx for idx, row in enumerate(candidate_rows)
+                if row is carry_row
+            )
+            q_selected_source = "q_reuse_prev"
+
+    q_selected_row = candidate_rows[q_selected_pool_index]
+    return {
+        "q_selected_pool_index": q_selected_pool_index,
+        "q_selected_source": q_selected_source,
+        "q_best_current_score": q_best_current_score,
+        "q_carry_score": q_carry_score,
+        "q_score_gap": q_score_gap,
+        "q_selected_path": path_length(np.asarray(q_selected_row["local_plan"], dtype=np.float32)),
+        "best_current_path": path_length(np.asarray(best_current_row["local_plan"], dtype=np.float32)),
+    }
+
+
 def main() -> int:
     args = parse_args()
     cfg = resolve_config(args)
@@ -820,170 +949,106 @@ def main() -> int:
                             np.round(trajectory[:5, :2], 3).tolist(),
                             np.round(proposals[0, :5, :2], 3).tolist(),
                         )
-                allow_carry_previous = not (
-                    previous_selected_source is not None
-                    and str(previous_selected_source).startswith("default_fallback_")
-                )
-                carry_candidate = build_carry_plan_candidate(
-                    previous_plan=previous_selected_plan if allow_carry_previous else None,
-                    previous_pose=previous_selected_pose if allow_carry_previous else None,
-                    previous_selected_score=previous_selected_score if allow_carry_previous else None,
-                    previous_timestamp=previous_selected_timestamp if allow_carry_previous else None,
-                    current_info=info,
-                    cfg=cfg,
-                )
-
-                sorted_indices = np.argsort(scores)[::-1]
-                current_candidate_limit = max(1, int(cfg.vlm.candidate_limit) - 1)
-                current_candidate_limit = min(current_candidate_limit, int(len(sorted_indices)))
-                candidate_indices = sorted_indices[:current_candidate_limit]
-                candidate_rows: List[Dict[str, object]] = []
-                if carry_candidate is not None:
-                    candidate_rows.append(carry_candidate)
-                normalized_scores = normalize_scores(scores)
-                for idx in candidate_indices:
-                    full_plan = rap_to_hugsim_plan(proposals[idx, :cfg.output_num_poses])
-                    candidate_rows.append(
-                        {
-                            "source": "current_rap",
-                            "proposal_index": int(idx),
-                            "proposal_score": float(scores[idx]),
-                            "local_plan": full_plan,
-                            "execution_plan": full_plan.copy(),
-                            "proposal_score_norm": float(normalized_scores[idx]),
-                        }
+                if not cfg.vlm.enabled:
+                    plain_result = build_plain_rap_plan_result(proposals, scores, cfg)
+                    selected_plan = plain_result["selected_plan"]
+                    selected_score = plain_result["selected_score"]
+                    selected_score_raw = plain_result["selected_score_raw"]
+                    selected_row = plain_result["selected_row"]
+                    plan_payload = plain_result["plan_payload"]
+                else:
+                    candidate_rows, allow_carry_previous = build_vlm_candidate_rows(
+                        proposals=proposals,
+                        scores=scores,
+                        cfg=cfg,
+                        current_info=info,
+                        previous_selected_plan=previous_selected_plan,
+                        previous_selected_pose=previous_selected_pose,
+                        previous_selected_score=previous_selected_score,
+                        previous_selected_timestamp=previous_selected_timestamp,
+                        previous_selected_source=previous_selected_source,
                     )
-                if cfg.vlm.include_default_candidates:
-                    for default_idx, default_plan in enumerate(get_default_trajectories(cfg.output_num_poses)):
-                        candidate_rows.append(
-                            {
-                                "source": f"default_fallback_{default_idx}",
-                                "proposal_index": None,
-                                "proposal_score": 0.0,
-                                "local_plan": default_plan,
-                                "execution_plan": default_plan.copy(),
-                                "proposal_score_norm": 0.0,
-                            }
-                        )
+                    q_selection = resolve_q_selection(candidate_rows, cfg)
 
-                carry_row = next((row for row in candidate_rows if row.get("source") == "carry_prev"), None)
-                shared_horizon = len(carry_row["local_plan"]) if carry_row is not None else cfg.output_num_poses
-                shared_horizon = max(1, int(shared_horizon))
-                for row in candidate_rows:
-                    execution_plan = np.asarray(row.get("execution_plan", row["local_plan"]), dtype=np.float32)
-                    row["execution_plan"] = execution_plan
-                    row["local_plan"] = truncate_plan(execution_plan, shared_horizon)
-                    if "proposal_score_norm" not in row:
-                        row["proposal_score_norm"] = float(row.get("proposal_score", 0.0))
-                    row["q_score"] = compute_q_score(
-                        row["local_plan"],
-                        float(row.get("proposal_score_norm", row.get("proposal_score", 0.0))),
-                        cfg,
-                        is_carry=(row.get("source") == "carry_prev"),
+                    selection_result = vlm_selector.maybe_select(
+                        frame_index=frame_index,
+                        front_image=obs["rgb"]["CAM_FRONT"],
+                        info=info,
+                        candidate_rows=candidate_rows,
+                        default_selected_index=q_selection["q_selected_pool_index"],
+                        default_selected_source=q_selection["q_selected_source"],
                     )
+                    frame_index += 1
 
-                current_rows = [row for row in candidate_rows if row.get("source") == "current_rap"]
-                if not current_rows:
-                    raise RuntimeError("No current RAP candidates available for Q selection")
+                    selected_row = selection_result["selected_candidate_row"]
+                    selected_plan = np.asarray(selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32)
+                    selected_idx = selected_row.get("proposal_index")
+                    selected_score_value = selected_row.get("proposal_score")
+                    if selected_score_value is None:
+                        selected_score_value = selected_row.get("rap_score", 0.0)
+                    selected_score = float(selected_score_value)
 
-                best_current_row = max(current_rows, key=lambda row: float(row.get("q_score", -1e6)))
-                best_current_pool_index = next(
-                    idx for idx, row in enumerate(candidate_rows)
-                    if row is best_current_row
-                )
-                q_best_current_score = float(best_current_row.get("q_score", -1e6))
-                q_carry_score = None if carry_row is None else float(carry_row.get("q_score", -1e6))
-                q_selected_pool_index = best_current_pool_index
-                q_selected_source = "q_switch_to_current"
-                q_score_gap = None
+                    selected_score_raw_value = selected_row.get("origin_selected_score_raw")
+                    if selected_score_raw_value is None:
+                        selected_score_raw_value = selected_score
+                    selected_score_raw = float(selected_score_raw_value)
 
-                if carry_row is not None:
-                    q_score_gap = q_best_current_score - float(q_carry_score)
-                    if q_score_gap < cfg.vlm.q_switch_margin:
-                        q_selected_pool_index = next(
-                            idx for idx, row in enumerate(candidate_rows)
-                            if row is carry_row
-                        )
-                        q_selected_source = "q_reuse_prev"
-
-                best_current_path = path_length(np.asarray(best_current_row["local_plan"], dtype=np.float32))
-                q_selected_row = candidate_rows[q_selected_pool_index]
-                q_selected_path = path_length(np.asarray(q_selected_row["local_plan"], dtype=np.float32))
-
-                selection_result = vlm_selector.maybe_select(
-                    frame_index=frame_index,
-                    front_image=obs["rgb"]["CAM_FRONT"],
-                    info=info,
-                    candidate_rows=candidate_rows,
-                    default_selected_index=q_selected_pool_index,
-                    default_selected_source=q_selected_source,
-                )
-                frame_index += 1
-
-                selected_row = selection_result["selected_candidate_row"]
-                selected_plan = np.asarray(selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32)
-                selected_idx = selected_row.get("proposal_index")
-                selected_score_value = selected_row.get("proposal_score")
-                if selected_score_value is None:
-                    selected_score_value = selected_row.get("rap_score", 0.0)
-                selected_score = float(selected_score_value)
-
-                selected_score_raw_value = selected_row.get("origin_selected_score_raw")
-                if selected_score_raw_value is None:
-                    selected_score_raw_value = selected_score
-                selected_score_raw = float(selected_score_raw_value)
-
-                selection_debug = {
-                    "q_selected_idx": int(q_selected_pool_index),
-                    "q_selected_source": q_selected_source,
-                    "q_candidate_scores": [float(row.get("q_score", 0.0)) for row in candidate_rows],
-                    "q_carry_score": q_carry_score,
-                    "q_best_current_score": q_best_current_score,
-                    "q_score_gap": q_score_gap,
-                    "q_switch_margin": float(cfg.vlm.q_switch_margin),
-                    "q_selected_path_length": q_selected_path,
-                    "q_best_current_path_length": best_current_path,
-                    "display_default_trajectories": bool(cfg.vlm.display_default_trajectories),
-                    "include_default_candidates": bool(cfg.vlm.include_default_candidates),
-                    "q_invoked_vlm": bool(cfg.vlm.enabled),
-                    "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
-                    "vlm_confidence": selection_result.get("vlm_confidence"),
-                    "vlm_reasoning": selection_result.get("vlm_reasoning"),
-                    "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
-                    "vlm_error": selection_result.get("vlm_error"),
-                    "vlm_candidate_count": selection_result.get("vlm_candidate_count"),
-                    "vlm_q_valid": selection_result.get("vlm_q_valid"),
-                    "vlm_q_candidate_scores": selection_result.get("vlm_q_candidate_scores"),
-                    "vlm_q_best_candidate_index": selection_result.get("vlm_q_best_candidate_index"),
-                    "vlm_q_score_gap_to_carry": selection_result.get("vlm_q_score_gap_to_carry"),
-                    "vlm_q_score_gap_top2": selection_result.get("vlm_q_score_gap_top2"),
-                    "vlm_q_best_current_score": selection_result.get("vlm_q_best_current_score"),
-                    "vlm_q_carry_score": selection_result.get("vlm_q_carry_score"),
-                    "adaptive_replan_decision": selection_result.get("adaptive_replan_decision"),
-                    "carry_previous_valid": selection_result.get("carry_previous_valid"),
-                    "carry_previous_allowed": bool(allow_carry_previous),
-                    "previous_selected_source": previous_selected_source,
-                    "selected_score_raw": selected_score_raw,
-                    "latency_timeline_record": selection_result.get("latency_timeline_record"),
-                }
-                plan_payload = build_plan_payload(
-                    proposals,
-                    scores,
-                    output_num_poses=cfg.output_num_poses,
-                    selected_idx=None if selected_idx is None else int(selected_idx),
-                    selected_source=str(selection_result["selected_source"]),
-                    selection_debug=selection_debug,
-                    selected_plan_override=selected_plan,
-                    selected_score_override=selected_score,
-                    candidate_pool_rows=candidate_rows,
-                )
+                    selection_debug = {
+                        "q_selected_idx": int(q_selection["q_selected_pool_index"]),
+                        "q_selected_source": q_selection["q_selected_source"],
+                        "q_candidate_scores": [float(row.get("q_score", 0.0)) for row in candidate_rows],
+                        "q_carry_score": q_selection["q_carry_score"],
+                        "q_best_current_score": q_selection["q_best_current_score"],
+                        "q_score_gap": q_selection["q_score_gap"],
+                        "q_switch_margin": float(cfg.vlm.q_switch_margin),
+                        "q_selected_path_length": q_selection["q_selected_path"],
+                        "q_best_current_path_length": q_selection["best_current_path"],
+                        "display_default_trajectories": bool(cfg.vlm.display_default_trajectories),
+                        "include_default_candidates": bool(cfg.vlm.include_default_candidates),
+                        "q_invoked_vlm": bool(cfg.vlm.enabled),
+                        "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
+                        "vlm_confidence": selection_result.get("vlm_confidence"),
+                        "vlm_reasoning": selection_result.get("vlm_reasoning"),
+                        "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
+                        "vlm_error": selection_result.get("vlm_error"),
+                        "vlm_candidate_count": selection_result.get("vlm_candidate_count"),
+                        "vlm_q_valid": selection_result.get("vlm_q_valid"),
+                        "vlm_q_candidate_scores": selection_result.get("vlm_q_candidate_scores"),
+                        "vlm_q_best_candidate_index": selection_result.get("vlm_q_best_candidate_index"),
+                        "vlm_q_score_gap_to_carry": selection_result.get("vlm_q_score_gap_to_carry"),
+                        "vlm_q_score_gap_top2": selection_result.get("vlm_q_score_gap_top2"),
+                        "vlm_q_best_current_score": selection_result.get("vlm_q_best_current_score"),
+                        "vlm_q_carry_score": selection_result.get("vlm_q_carry_score"),
+                        "adaptive_replan_decision": selection_result.get("adaptive_replan_decision"),
+                        "carry_previous_valid": selection_result.get("carry_previous_valid"),
+                        "carry_previous_allowed": bool(allow_carry_previous),
+                        "previous_selected_source": previous_selected_source,
+                        "selected_score_raw": selected_score_raw,
+                        "latency_timeline_record": selection_result.get("latency_timeline_record"),
+                    }
+                    plan_payload = build_plan_payload(
+                        proposals,
+                        scores,
+                        output_num_poses=cfg.output_num_poses,
+                        selected_idx=None if selected_idx is None else int(selected_idx),
+                        selected_source=str(selection_result["selected_source"]),
+                        selection_debug=selection_debug,
+                        selected_plan_override=selected_plan,
+                        selected_score_override=selected_score,
+                        candidate_pool_rows=candidate_rows,
+                    )
                 write_plan(plan_pipe, plan_payload)
 
                 previous_selected_plan = selected_plan.copy()
                 previous_selected_pose = info_to_pose(info)
                 previous_selected_score = selected_score_raw
                 previous_selected_timestamp = float(info.get("timestamp", 0.0))
-                previous_selected_source = str(selected_row.get("source", selection_result["selected_source"]))
+                previous_selected_source = str(
+                    selected_row.get(
+                        "source",
+                        "rap_argmax" if not cfg.vlm.enabled else "vlm_selected",
+                    )
+                )
             except Exception:
                 logging.error("Inference failure in RAP adapter")
                 logging.error(traceback.format_exc())
