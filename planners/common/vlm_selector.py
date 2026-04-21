@@ -31,7 +31,7 @@ class VLMSelectorConfig:
     device: str = "auto"
     python_bin: str = ""
     max_new_tokens: int = 300
-    candidate_limit: int = 5
+    candidate_limit: int = 10
     timeout_sec: float = 10.0
     save_debug_artifacts: bool = True
     debug_dir_name: str = "vlm_debug"
@@ -378,11 +378,11 @@ Candidate trajectories:
 
 Return ONLY valid JSON in this exact schema:
 {{
+  "best_candidate_index": <int>,
+  "confidence": <float between 0 and 1>
   "candidate_scores": {{
 {score_schema_lines}
   }},
-  "best_candidate_index": <int>,
-  "confidence": <float between 0 and 1>
 }}
 """.strip()
 
@@ -634,51 +634,37 @@ def _coerce_candidate_scores(raw_scores: object, num_candidates: int) -> Tuple[O
     return [float(score) for score in scores], None
 
 
-def _select_from_vlm_q_scores(
+def _select_from_vlm_scores(
     candidate_rows: Sequence[Dict[str, object]],
-    vlm_q_scores: Sequence[float],
-    carry_switch_margin: float,
+    vlm_scores: Sequence[float],
 ) -> Dict[str, object]:
-    vlm_q_scores = [float(score) for score in vlm_q_scores]
-    if len(vlm_q_scores) != len(candidate_rows):
-        raise ValueError("VLM Q score count does not match candidate rows")
+    vlm_scores = [float(score) for score in vlm_scores]
+    if len(vlm_scores) != len(candidate_rows):
+        raise ValueError("VLM score count does not match candidate rows")
 
-    carry_idx = next((idx for idx, row in enumerate(candidate_rows) if row.get("source") == "carry_prev"), None)
-    current_indices = [idx for idx, row in enumerate(candidate_rows) if row.get("source") != "carry_prev"]
-    if not current_indices:
-        raise ValueError("No current candidates available for VLM-Q selection")
+    selected_idx = int(max(range(len(vlm_scores)), key=lambda idx: vlm_scores[idx]))
+    selected_row = dict(candidate_rows[selected_idx])
+    selected_source = (
+        "vlm_selected_carry_prev"
+        if selected_row.get("source") == "carry_prev"
+        else "vlm_selected_current"
+    )
+    decision = (
+        "vlm_selected_reuse_prev"
+        if selected_row.get("source") == "carry_prev"
+        else "vlm_selected_current"
+    )
 
-    best_current_idx = max(current_indices, key=lambda idx: vlm_q_scores[idx])
-    best_current_score = float(vlm_q_scores[best_current_idx])
-    carry_score = None if carry_idx is None else float(vlm_q_scores[carry_idx])
-
-    selected_idx = int(best_current_idx)
-    selected_source = "vlm_q_current"
-    decision = "vlm_q_switch_to_current"
-    score_gap_to_carry = None
-
-    if carry_idx is not None and carry_score is not None:
-        score_gap_to_carry = best_current_score - carry_score
-        if score_gap_to_carry < float(carry_switch_margin):
-            selected_idx = int(carry_idx)
-            selected_source = "vlm_q_carry_prev"
-            decision = "vlm_q_reuse_prev"
-
-    sorted_scores = sorted(((float(score), idx) for idx, score in enumerate(vlm_q_scores)), reverse=True)
+    sorted_scores = sorted(((float(score), idx) for idx, score in enumerate(vlm_scores)), reverse=True)
     score_gap_top2 = None
     if len(sorted_scores) >= 2:
         score_gap_top2 = float(sorted_scores[0][0] - sorted_scores[1][0])
 
     return {
         "selected_candidate_index": selected_idx,
-        "selected_candidate_row": dict(candidate_rows[selected_idx]),
+        "selected_candidate_row": selected_row,
         "selected_source": selected_source,
-        "adaptive_replan_decision": decision if carry_idx is not None else "no_valid_prev",
-        "vlm_q_best_current_index": int(best_current_idx),
-        "vlm_q_best_current_score": best_current_score,
-        "vlm_q_carry_index": None if carry_idx is None else int(carry_idx),
-        "vlm_q_carry_score": carry_score,
-        "vlm_q_score_gap_to_carry": score_gap_to_carry,
+        "adaptive_replan_decision": decision,
         "vlm_q_score_gap_top2": score_gap_top2,
     }
 
@@ -762,9 +748,7 @@ class VLMPlanSelector:
 
         def _fallback_result(error: Optional[str] = None) -> Dict[str, object]:
             selected_row = dict(candidate_rows[default_selected_index])
-            adaptive_replan_decision = "no_valid_prev" if not carry_previous_valid else (
-                "q_reuse_prev" if selected_row.get("source") == "carry_prev" else "q_switch_to_current"
-            )
+            adaptive_replan_decision = "vlm_failed_fallback_rap"
             timeline_record = {
                 "frame_index": frame_index,
                 "timestamp": timestamp,
@@ -782,6 +766,7 @@ class VLMPlanSelector:
                 "error": error,
                 "q_invoked_vlm": False,
                 "vlm_q_valid": False,
+                "vlm_failed": True,
             }
             self._record_timeline(timeline_record)
             result = {
@@ -791,6 +776,7 @@ class VLMPlanSelector:
                 "carry_previous_valid": carry_previous_valid,
                 "latency_timeline_record": timeline_record,
                 "vlm_q_valid": False,
+                "vlm_failed": True,
             }
             if error is not None:
                 result["error"] = error
@@ -815,7 +801,7 @@ class VLMPlanSelector:
 
         try:
             LOG.info(
-                "Running VLM-Q selection for frame=%d candidates=%d route='%s'",
+                "Running VLM selection for frame=%d candidates=%d route='%s'",
                 frame_index,
                 len(candidate_rows),
                 route_instruction,
@@ -826,7 +812,7 @@ class VLMPlanSelector:
                 route_instruction=route_instruction,
             )
         except Exception as exc:
-            LOG.exception("VLM-Q selector inference failed, falling back to fast-Q")
+            LOG.exception("VLM selector inference failed, falling back to RAP argmax")
             result = {
                 "raw_output": "",
                 "parsed_output": None,
@@ -856,10 +842,9 @@ class VLMPlanSelector:
             coerced_scores, score_error = _coerce_candidate_scores(parsed.get("candidate_scores"), len(candidate_rows))
             candidate_idx = parsed.get("best_candidate_index")
             if coerced_scores is not None:
-                selection = _select_from_vlm_q_scores(
+                selection = _select_from_vlm_scores(
                     candidate_rows=candidate_rows,
-                    vlm_q_scores=coerced_scores,
-                    carry_switch_margin=self.cfg.q_switch_margin,
+                    vlm_scores=coerced_scores,
                 )
                 vlm_q_valid = True
                 vlm_q_candidate_scores = [float(score) for score in coerced_scores]
@@ -867,10 +852,7 @@ class VLMPlanSelector:
                 selected_row = dict(selection["selected_candidate_row"])
                 selected_source = str(selection["selected_source"])
                 vlm_q_best_candidate_index = int(max(range(len(vlm_q_candidate_scores)), key=lambda idx: vlm_q_candidate_scores[idx]))
-                vlm_q_score_gap_to_carry = selection["vlm_q_score_gap_to_carry"]
                 vlm_q_score_gap_top2 = selection["vlm_q_score_gap_top2"]
-                vlm_q_best_current_score = selection["vlm_q_best_current_score"]
-                vlm_q_carry_score = selection["vlm_q_carry_score"]
                 if isinstance(candidate_idx, int) and 0 <= candidate_idx < len(candidate_rows):
                     vlm_candidate_index = int(candidate_idx)
                 vlm_confidence = float(parsed.get("confidence", 0.0))
@@ -888,9 +870,15 @@ class VLMPlanSelector:
 
         latency_equivalent_steps = elapsed_sec / max(dt_sec, 1e-6)
         latency_equivalent_steps_ceil = int(math.ceil(latency_equivalent_steps))
-        adaptive_replan_decision = "no_valid_prev"
-        if carry_previous_valid:
-            adaptive_replan_decision = "vlm_q_reuse_prev" if selected_row.get("source") == "carry_prev" else "vlm_q_switch_to_current"
+        adaptive_replan_decision = (
+            "vlm_failed_fallback_rap"
+            if not vlm_q_valid
+            else (
+                "vlm_selected_reuse_prev"
+                if selected_row.get("source") == "carry_prev"
+                else "vlm_selected_current"
+            )
+        )
 
         timeline_record = {
             "frame_index": frame_index,
@@ -917,6 +905,7 @@ class VLMPlanSelector:
             "adaptive_replan_decision": adaptive_replan_decision,
             "error": error,
             "q_invoked_vlm": True,
+            "vlm_failed": not vlm_q_valid,
         }
         self._record_timeline(timeline_record)
 
@@ -942,6 +931,7 @@ class VLMPlanSelector:
             "carry_previous_valid": carry_previous_valid,
             "latency_timeline_record": timeline_record,
             "error": error,
+            "vlm_failed": not vlm_q_valid,
         }
         if self.cfg.save_debug_artifacts:
             result_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
@@ -949,7 +939,7 @@ class VLMPlanSelector:
             image_path.unlink(missing_ok=True)
 
         LOG.info(
-            "VLM-Q selection frame=%d source=%s proposal=%d candidate=%s elapsed=%.3f error=%s",
+            "VLM selection frame=%d source=%s proposal=%d candidate=%s elapsed=%.3f error=%s",
             frame_index,
             selected_source,
             -1 if selected_row.get("proposal_index") is None else int(selected_row["proposal_index"]),
@@ -977,6 +967,7 @@ class VLMPlanSelector:
             "adaptive_replan_decision": adaptive_replan_decision,
             "carry_previous_valid": carry_previous_valid,
             "latency_timeline_record": timeline_record,
+            "vlm_failed": not vlm_q_valid,
         }
 
     def finalize(self) -> None:

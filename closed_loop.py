@@ -320,6 +320,7 @@ def create_gym_env(cfg, output):
     current_adaptive_replan_decision = None
     current_carry_previous_valid = None
     current_latency_timeline_record = None
+    current_vlm_failed = None
     current_q_selected_idx = None
     current_q_selected_source = None
     current_q_candidate_scores = None
@@ -392,6 +393,7 @@ def create_gym_env(cfg, output):
             current_adaptive_replan_decision = None
             current_carry_previous_valid = None
             current_latency_timeline_record = None
+            current_vlm_failed = None
             current_q_selected_idx = None
             current_q_selected_source = None
             current_q_candidate_scores = None
@@ -420,6 +422,7 @@ def create_gym_env(cfg, output):
                 current_adaptive_replan_decision = plan_payload.get('adaptive_replan_decision')
                 current_carry_previous_valid = plan_payload.get('carry_previous_valid')
                 current_latency_timeline_record = plan_payload.get('latency_timeline_record')
+                current_vlm_failed = plan_payload.get('vlm_failed')
                 current_q_selected_idx = plan_payload.get('q_selected_idx')
                 current_q_selected_source = plan_payload.get('q_selected_source')
                 current_q_candidate_scores = plan_payload.get('q_candidate_scores')
@@ -502,6 +505,7 @@ def create_gym_env(cfg, output):
                     'adaptive_replan_decision': current_adaptive_replan_decision,
                     'carry_previous_valid': current_carry_previous_valid,
                     'latency_timeline_record': current_latency_timeline_record,
+                    'vlm_failed': current_vlm_failed,
                     'overlay_plan_held': bool(overlay_plan_held),
                     'overlay_plan_stale_frames': int(last_valid_overlay_plan_stale_frames),
                 },
@@ -622,11 +626,19 @@ if __name__ == "__main__":
     extra_env = {}
     if args.ad == 'rap':
         planner_python_bin = cfg.planner.rap.get('python_bin', 'python')
+        rap_device = os.environ.get('RAP_DEVICE_OVERRIDE', cfg.planner.rap.get('device', 'cuda'))
+        vlm_device = os.environ.get(
+            'PLANNER_VLM_DEVICE_OVERRIDE',
+            os.environ.get(
+                'RAP_VLM_DEVICE_OVERRIDE',
+                cfg.planner.rap.vlm.get('device', 'auto'),
+            ),
+        )
         extra_env = {
             'RAP_REPO_ROOT': cfg.planner.rap.get('repo_root', ''),
             'RAP_CHECKPOINT': cfg.planner.rap.get('checkpoint', ''),
             'RAP_PYTHON_BIN': planner_python_bin,
-            'RAP_DEVICE': cfg.planner.rap.get('device', 'cuda'),
+            'RAP_DEVICE': rap_device,
             'RAP_IMAGE_SCALE': cfg.planner.rap.get('image_scale', 0.4),
             'RAP_USE_SCENE_RIG_LIDAR2IMG': cfg.planner.rap.get('use_scene_rig_lidar2img', False),
             'RAP_HF_HUB_OFFLINE': cfg.planner.rap.get('hf_hub_offline', True),
@@ -643,6 +655,8 @@ if __name__ == "__main__":
                 planner_python_bin=planner_python_bin,
             )
         )
+        extra_env['PLANNER_VLM_DEVICE'] = vlm_device
+        extra_env['RAP_VLM_DEVICE'] = vlm_device
         
     elif args.ad == "drivor":
         extra_env = {
