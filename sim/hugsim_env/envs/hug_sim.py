@@ -89,7 +89,7 @@ class HUGSimEnv(gymnasium.Env):
         if cfg.scenario.load_HD_map:
             self.planner.update_agent_route()
         
-        self.cam_params, cam_align, self.cam_rect = load_camera_cfg(cfg.camera)
+        self.cam_params, cam_align, self.cam_rect = load_camera_cfg(cfg.camera, cfg.model_path)
         
         self.ego_verts = np.array([[0.5, 0, 0.5], [0.5, 0, -0.5], [0.5, 1.0,  0.5], [0.5, 1.0, -0.5],
                     [-0.5, 0, -0.5], [-0.5, 0, 0.5], [-0.5, 1.0, -0.5], [-0.5, 1.0, 0.5]])

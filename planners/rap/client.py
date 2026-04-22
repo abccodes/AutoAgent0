@@ -263,6 +263,7 @@ def compute_scene_rig_lidar2img(
     params = cam_params[cam_name]
     intrinsic = params["intrinsic"]
     front2cam = np.array(params["front2cam"], dtype=np.float32)
+    front_v2c = np.array(cam_params["CAM_FRONT"]["v2c"], dtype=np.float32)
 
     fx = intrinsic["W"] / (2.0 * math.tan(intrinsic["fovx"] / 2.0))
     fy = intrinsic["H"] / (2.0 * math.tan(intrinsic["fovy"] / 2.0))
@@ -275,9 +276,16 @@ def compute_scene_rig_lidar2img(
     viewpad[0, 2] = cx * image_scale
     viewpad[1, 2] = cy * image_scale
 
-    # HUGSIM local coordinates are [right, forward, up]. The scene rig is
-    # expressed relative to the rendered front camera, so convert into that
-    # camera-aligned frame before applying the per-camera extrinsic.
+    # HUGSIM local coordinates are [right, forward, up] around the rear axle.
+    # The scene rig is expressed relative to the rendered front camera, so we
+    # must first shift from rear-axle origin into the front-camera origin, then
+    # rotate into the front-camera frame before applying the per-camera rig
+    # transform.
+    camera_in_vehicle = np.linalg.inv(front_v2c)[:3, 3]
+    camera_in_local = np.array(
+        [-camera_in_vehicle[1], camera_in_vehicle[0], camera_in_vehicle[2]],
+        dtype=np.float32,
+    )
     local_to_front_cam = np.array(
         [
             [1.0, 0.0, 0.0, 0.0],
@@ -287,6 +295,7 @@ def compute_scene_rig_lidar2img(
         ],
         dtype=np.float32,
     )
+    local_to_front_cam[:3, 3] = -(local_to_front_cam[:3, :3] @ camera_in_local)
     return viewpad @ np.linalg.inv(front2cam) @ local_to_front_cam
 
 

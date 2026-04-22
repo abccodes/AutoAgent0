@@ -288,6 +288,8 @@ def summarize_candidate(points: List[Sequence[float]]) -> Dict[str, object]:
             "max_y": None,
             "delta_x": None,
             "delta_y": None,
+            "path_length_m": None,
+            "forward_progress_m": None,
         }
 
     xs = [float(p[0]) for p in points]
@@ -304,6 +306,8 @@ def summarize_candidate(points: List[Sequence[float]]) -> Dict[str, object]:
         "max_y": round(max(ys), 3),
         "delta_x": round(end[0] - start[0], 3),
         "delta_y": round(end[1] - start[1], 3),
+        "path_length_m": round(path_length(np.asarray(points, dtype=np.float32)), 3),
+        "forward_progress_m": round(max(0.0, end[1] - start[1]), 3),
     }
 
 
@@ -325,7 +329,9 @@ def format_candidate_text(candidate_rows: Sequence[Dict[str, object]]) -> str:
             f"num_points={s['num_points']} | "
             f"start={s['start']} | end={s['end']} | "
             f"x_range=[{s['min_x']},{s['max_x']}] | y_range=[{s['min_y']},{s['max_y']}] | "
-            f"delta=({s['delta_x']},{s['delta_y']})"
+            f"delta=({s['delta_x']},{s['delta_y']}) | "
+            f"path_length_m={s['path_length_m']} | "
+            f"forward_progress_m={s['forward_progress_m']}"
         )
         lines.append(line)
     return "\n".join(lines)
@@ -336,11 +342,26 @@ def build_scoring_prompt(
     route_instruction: str,
 ) -> str:
     candidate_text = format_candidate_text(candidate_rows)
+    has_default_candidates = any(
+        str(row.get("source", "")).startswith("default_fallback_")
+        for row in candidate_rows
+    )
     score_schema_lines = ",\n".join(
         f'    "{row["candidate_index"]}": <float>'
         for row in candidate_rows
     )
     candidate_index_list = ", ".join(str(row["candidate_index"]) for row in candidate_rows)
+    default_candidate_guidance = ""
+    if has_default_candidates:
+        default_candidate_guidance = """
+- Some candidates are default recovery / fallback trajectories. These represent simple options such as continuing straight or steering back toward the lane.
+- The planner replans every 0.5 seconds, so the selected trajectory does NOT need to be globally perfect for the full horizon.
+- Score candidates based on whether they are the best immediate action for the next 0.5 seconds.
+- If a default trajectory is the safest and most directionally correct short-horizon choice, it should receive the highest score.
+- Do not penalize a default trajectory just because it is simple or less committed over the long horizon.
+- Favor candidates that preserve reasonable forward progress and momentum when it is safe to do so.
+- Do not prefer unnecessary slowing or hesitation if a safe straight or lane-return trajectory can keep the vehicle moving correctly for the next 0.5 seconds.
+""".strip()
     return f"""
 You are an autonomous-driving trajectory scorer.
 
@@ -351,13 +372,17 @@ You are given:
 
 Your job:
 - Score EVERY candidate trajectory with a scalar Q-like value.
-- Identify the single best candidate based on the highest generated Q-value.\
+- Identify the single best candidate based on the highest generated Q-value.
 - There are exactly {len(candidate_rows)} candidates in this frame.
 - You MUST return one score for every candidate index: {candidate_index_list}.
 - Do not omit any candidate index.
 - Do not shorten the score dictionary to a partial example.
 - Keep score scale internally consistent within this frame.
-- Keep the response compact. Do not include long explanations.
+- Keep the response compact.
+- Include a short reasoning string that specifically argues why the selected candidate is the best overall choice in this frame.
+- The reasoning must justify the selected candidate relative to the alternatives using safety, route-following, lane alignment, obstacle avoidance, and motion smoothness.
+- The reasoning should describe why the selected candidate is best, not just restate its index.
+{default_candidate_guidance}
 - Judge based on the following constraints:
   - higher scores are better,
   - staying in the drivable region,
@@ -365,7 +390,15 @@ Your job:
   - avoiding nearby vehicles/obstacles,
   - avoiding sidewalk/off-road/wrong-way behavior,
   - smooth and realistic motion,
-  - following the route instruction,
+  - maintaining safe forward progress when possible,
+  - following the route instruction directly and literally when safe,
+    - if the instruction is straight, prefer trajectories that continue in the current lane/direction rather than drifting left or right,
+    - if the instruction is left or right, prefer trajectories that clearly begin that turn direction when it is safe and drivable,
+    - do not deviate from the instructed direction unless obstacles, lane geometry, or safety clearly require it,
+  - obeying lane rules,
+    - avoid unnecessary lane changes,
+    - respect lane boundaries and markings such as solid vs dotted lines when they are visible,
+    - only change lanes or cross lane boundaries when required for safety, obstacle avoidance, passing a blocked vehicle, or because the road geometry clearly demands it,
   - penalize trajectories unsafe trajectories.
     - Use only what is visible in the image and candidate metadata.
     - If all candidates are imperfect, prefer the least risky one.
@@ -379,7 +412,8 @@ Candidate trajectories:
 Return ONLY valid JSON in this exact schema:
 {{
   "best_candidate_index": <int>,
-  "confidence": <float between 0 and 1>
+  "confidence": <float between 0 and 1>,
+  "reasoning": "<short explanation for why this selected candidate is best>",
   "candidate_scores": {{
 {score_schema_lines}
   }},
@@ -644,16 +678,16 @@ def _select_from_vlm_scores(
 
     selected_idx = int(max(range(len(vlm_scores)), key=lambda idx: vlm_scores[idx]))
     selected_row = dict(candidate_rows[selected_idx])
-    selected_source = (
-        "vlm_selected_carry_prev"
-        if selected_row.get("source") == "carry_prev"
-        else "vlm_selected_current"
-    )
-    decision = (
-        "vlm_selected_reuse_prev"
-        if selected_row.get("source") == "carry_prev"
-        else "vlm_selected_current"
-    )
+    row_source = str(selected_row.get("source", "current_rap"))
+    if row_source == "carry_prev":
+        selected_source = "vlm_selected_carry_prev"
+        decision = "vlm_selected_reuse_prev"
+    elif row_source.startswith("default_fallback_"):
+        selected_source = "vlm_selected_default_fallback"
+        decision = "vlm_selected_default_fallback"
+    else:
+        selected_source = "vlm_selected_current"
+        decision = "vlm_selected_current"
 
     sorted_scores = sorted(((float(score), idx) for idx, score in enumerate(vlm_scores)), reverse=True)
     score_gap_top2 = None
@@ -667,6 +701,30 @@ def _select_from_vlm_scores(
         "adaptive_replan_decision": decision,
         "vlm_q_score_gap_top2": score_gap_top2,
     }
+
+
+def _selected_path_reasoning(
+    selected_row: Dict[str, object],
+    selected_candidate_index: int,
+    selected_source: str,
+    vlm_scores: Optional[Sequence[float]],
+    parsed_reasoning: Optional[object],
+) -> str:
+    if isinstance(parsed_reasoning, str) and parsed_reasoning.strip():
+        return parsed_reasoning.strip()
+
+    summary = selected_row.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        summary = "selected path"
+
+    score_text = ""
+    if vlm_scores is not None and 0 <= int(selected_candidate_index) < len(vlm_scores):
+        score_text = f" with highest q-score {float(vlm_scores[int(selected_candidate_index)]):.3f}"
+
+    return (
+        f"Selected {selected_source} candidate {int(selected_candidate_index)}{score_text}: "
+        f"{summary}."
+    )
 
 
 class VLMPlanSelector:
@@ -837,6 +895,7 @@ class VLMPlanSelector:
         vlm_q_score_gap_top2 = None
         vlm_q_best_current_score = None
         vlm_q_carry_score = None
+        selected_path_reasoning = None
 
         if isinstance(parsed, dict):
             coerced_scores, score_error = _coerce_candidate_scores(parsed.get("candidate_scores"), len(candidate_rows))
@@ -857,6 +916,13 @@ class VLMPlanSelector:
                     vlm_candidate_index = int(candidate_idx)
                 vlm_confidence = float(parsed.get("confidence", 0.0))
                 vlm_reasoning = parsed.get("reasoning")
+                selected_path_reasoning = _selected_path_reasoning(
+                    selected_row=selected_row,
+                    selected_candidate_index=selected_candidate_index,
+                    selected_source=selected_source,
+                    vlm_scores=vlm_q_candidate_scores,
+                    parsed_reasoning=vlm_reasoning,
+                )
                 if elapsed_sec > self.cfg.timeout_sec:
                     error = f"selector_slow:{elapsed_sec:.3f}"
             else:
@@ -866,6 +932,15 @@ class VLMPlanSelector:
                 f"selector_timeout_budget_exceeded:{elapsed_sec:.3f}"
                 if elapsed_sec > self.cfg.timeout_sec
                 else str(result.get("error") or "invalid_selector_output")
+            )
+
+        if selected_path_reasoning is None:
+            selected_path_reasoning = _selected_path_reasoning(
+                selected_row=selected_row,
+                selected_candidate_index=selected_candidate_index,
+                selected_source=selected_source,
+                vlm_scores=vlm_q_candidate_scores,
+                parsed_reasoning=vlm_reasoning,
             )
 
         latency_equivalent_steps = elapsed_sec / max(dt_sec, 1e-6)
@@ -918,6 +993,7 @@ class VLMPlanSelector:
             "selector_result": result,
             "selected_index": int(selected_candidate_index),
             "selected_source": selected_source,
+            "selected_path_reasoning": selected_path_reasoning,
             "vlm_candidate_index": vlm_candidate_index,
             "vlm_confidence": vlm_confidence,
             "vlm_q_valid": vlm_q_valid,
@@ -951,6 +1027,7 @@ class VLMPlanSelector:
         return {
             "selected_candidate_row": selected_row,
             "selected_source": selected_source,
+            "selected_path_reasoning": selected_path_reasoning,
             "vlm_candidate_index": vlm_candidate_index,
             "vlm_confidence": vlm_confidence,
             "vlm_reasoning": vlm_reasoning,
