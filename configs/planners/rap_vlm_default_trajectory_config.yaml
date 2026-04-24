@@ -1,4 +1,5 @@
 rap:
+  output_suffix: rap_vlm_default_trajectory
   launch_path: ./planners/rap/launch.sh
   repo_root: /bigdata/aidan/RAP
   checkpoint: /bigdata/aidan/models/RAP_ckpts/RAP_DINO_navsimv2.ckpt
@@ -16,13 +17,17 @@ rap:
 
   vlm:
     enabled: true
-    backend: subprocess_qwen3_vl
+    intervention_enabled: true
+    backend: local_transformers_subprocess
     model_id: Qwen/Qwen3-VL-8B-Instruct
+    output_model_slug: qwen3-vl-8b-instruct
     device: auto
     python_bin: /bigdata/aidan/.home/envs/vlm/bin/python
     max_new_tokens: 300
+    intervention_max_new_tokens: 120
     candidate_limit: 5
-    timeout_sec: 10.0
+    timeout_sec: 30.0
+    intervention_timeout_sec: 15.0
     save_debug_artifacts: true
     debug_dir_name: vlm_debug
     carry_previous_enabled: true

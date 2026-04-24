@@ -1,4 +1,5 @@
 rap:
+  output_suffix: rap_vlm_default_trajectory_intervention
   launch_path: ./planners/rap/launch.sh
   repo_root: /bigdata/aidan/RAP
   checkpoint: /bigdata/aidan/models/RAP_ckpts/RAP_DINO_navsimv2.ckpt
@@ -24,7 +25,7 @@ rap:
     python_bin: /bigdata/aidan/.home/envs/vlm/bin/python
     max_new_tokens: 300
     intervention_max_new_tokens: 120
-    candidate_limit: 10
+    candidate_limit: 5
     timeout_sec: 30.0
     intervention_timeout_sec: 15.0
     save_debug_artifacts: true
@@ -42,5 +43,5 @@ rap:
     q_weight_curvature: 0.08
     q_weight_shortplan: 0.18
     q_carry_score_decay: 0.0
-    display_default_trajectories: false
-    include_default_candidates: false
+    display_default_trajectories: true
+    include_default_candidates: true

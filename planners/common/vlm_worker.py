@@ -41,14 +41,14 @@ def main() -> int:
             continue
         try:
             payload = json.loads(line)
-            image = Image.open(Path(payload["image_path"])).convert("RGB")
+            raw_image_paths = payload.get("image_paths")
+            if raw_image_paths is None:
+                raw_image_paths = [payload["image_path"]]
+            images = [Image.open(Path(image_path)).convert("RGB") for image_path in raw_image_paths]
             messages = [
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "image"},
-                        {"type": "text", "text": payload["prompt"]},
-                    ],
+                    "content": ([{"type": "image"} for _ in images] + [{"type": "text", "text": payload["prompt"]}]),
                 }
             ]
             text = processor.apply_chat_template(
@@ -56,15 +56,16 @@ def main() -> int:
                 tokenize=False,
                 add_generation_prompt=True,
             )
-            inputs = processor(text=text, images=[image], return_tensors="pt")
+            inputs = processor(text=text, images=images, return_tensors="pt")
             inputs = {
                 key: value.to(model.device) if hasattr(value, "to") else value
                 for key, value in inputs.items()
             }
+            max_new_tokens = int(payload.get("max_new_tokens", args.max_new_tokens))
             with torch.inference_mode():
                 generated_ids = model.generate(
                     **inputs,
-                    max_new_tokens=args.max_new_tokens,
+                    max_new_tokens=max_new_tokens,
                     do_sample=False,
                 )
             trimmed_ids = []

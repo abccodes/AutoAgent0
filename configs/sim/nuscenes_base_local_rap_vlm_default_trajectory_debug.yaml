@@ -3,7 +3,7 @@ model_base: /bigdata/datasets/HUGSIM/scenes/nuscenes
 uniad_path: ""
 vad_path: ""
 ltf_path: ""
-output_dir: /bigdata/aidan/outputs/benchmark/out/debug/rap_vlm_default_trajectory/nusc_
+output_dir: /bigdata/aidan/outputs/benchmark/out/debug/nusc_
 HD_map:
   path: /bigdata/datasets/nuscenes
   version: nusc_trainval

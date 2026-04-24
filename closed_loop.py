@@ -20,6 +20,7 @@ import pickle
 import json
 import struct
 import logging
+import re
 from sim.utils.launch_ad import launch, check_alive
 from omegaconf import OmegaConf
 import open3d as o3d
@@ -42,6 +43,50 @@ PLAN_VIS_FORWARD_OFFSET_M = 4.5
 VIS_PLAN_MIN_PATH_M = 0.5
 VIS_PLAN_HOLD_FRAMES = 10**9
 PLAN_REPLAN_EVERY_STEPS = 2
+
+
+def _slugify_model_name(value, default='model'):
+    value = '' if value is None else str(value).strip()
+    if not value:
+        value = default
+    value = value.rstrip('/').split('/')[-1]
+    if value.endswith('.ckpt') or value.endswith('.pth') or value.endswith('.pt'):
+        value = os.path.splitext(value)[0]
+    value = re.sub(r'[^A-Za-z0-9]+', '-', value).strip('-').lower()
+    return value or default
+
+
+def _resolve_output_model_slug(ad_name, planner_config):
+    if ad_name != 'rap':
+        return ''
+
+    rap_cfg = planner_config.get('rap', {})
+    vlm_cfg = rap_cfg.get('vlm', {})
+    if vlm_cfg.get('enabled', False):
+        explicit_slug = vlm_cfg.get('output_model_slug', '')
+        if explicit_slug:
+            return _slugify_model_name(explicit_slug)
+        return _slugify_model_name(vlm_cfg.get('model_id', 'vlm'))
+
+    explicit_slug = rap_cfg.get('output_model_slug', '')
+    if explicit_slug:
+        return _slugify_model_name(explicit_slug)
+    checkpoint = rap_cfg.get('checkpoint', '')
+    return _slugify_model_name(checkpoint, default='rap')
+
+
+def _prefix_output_dir_with_model(output_dir, model_slug):
+    output_dir = str(output_dir)
+    model_slug = str(model_slug or '').strip()
+    if not model_slug:
+        return output_dir
+
+    parent, name = os.path.split(output_dir.rstrip(os.sep))
+    if not name:
+        return os.path.join(output_dir, model_slug)
+    if name.startswith(f'{model_slug}_'):
+        return output_dir
+    return os.path.join(parent, f'{model_slug}_{name}')
 
 def _resize_for_video(image, target_height):
     if image.shape[0] == target_height:
@@ -600,7 +645,9 @@ if __name__ == "__main__":
     )
     planner_output_suffix = args.ad
     if args.ad == 'rap' and planner_config.get('rap', {}).get('vlm', {}).get('enabled', False):
-        planner_output_suffix = 'rap_vlm'
+        planner_output_suffix = planner_config.get('rap', {}).get('output_suffix', 'rap_vlm')
+    output_model_slug = _resolve_output_model_slug(args.ad, planner_config)
+    cfg.base.output_dir = _prefix_output_dir_with_model(cfg.base.output_dir, output_model_slug)
     cfg.base.output_dir = cfg.base.output_dir + planner_output_suffix
 
     model_path = os.path.join(cfg.base.model_base, cfg.scenario.scene_name)

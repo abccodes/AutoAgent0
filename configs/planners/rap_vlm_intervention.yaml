@@ -1,4 +1,5 @@
 rap:
+  output_suffix: rap_vlm_intervention
   launch_path: ./planners/rap/launch.sh
   repo_root: /bigdata/aidan/RAP
   checkpoint: /bigdata/aidan/models/RAP_ckpts/RAP_DINO_navsimv2.ckpt
