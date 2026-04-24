@@ -1,0 +1,37 @@
+drivor:
+  launch_path: ./planners/drivor/launch.sh
+  repo_root: /data/guest_rui/ztrs_workspace/DrivoR
+  checkpoint: /data/guest_rui/ztrs_workspace/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
+  dino: /data/guest_rui/ztrs_workspace/DrivoR/weights/vit_small_patch14_reg4_dinov2.lvd142m
+  python_bin: /data2/guest_rui/miniconda3/envs/drivor_py38/bin/python3.8
+  config: /data/guest_rui/ztrs_workspace/DrivoR/navsim/planning/script/config/common/agent/drivoR.yaml
+
+  device: cuda
+  image_scale: 0.4
+
+  vlm:
+    enabled: true
+    backend: subprocess_qwen3_vl
+    model_id: Qwen/Qwen3-VL-8B-Instruct
+    device: auto
+    python_bin: /bigdata/aidan/.home/envs/vlm/bin/python
+    max_new_tokens: 300
+    candidate_limit: 10
+    timeout_sec: 10.0
+    save_debug_artifacts: true
+    debug_dir_name: vlm_debug
+    carry_previous_enabled: true
+    carry_previous_min_path_m: 0.5
+    carry_previous_min_points: 2
+    adaptive_replan_mode: log_only
+    latency_tracking_mode: full_timeline
+    q_enabled: true
+    q_switch_margin: 0.05
+    q_weight_rap_score: 0.55
+    q_weight_progress: 0.30
+    q_weight_offcenter: 0.10
+    q_weight_curvature: 0.08
+    q_weight_shortplan: 0.18
+    q_carry_score_decay: 0.0
+    display_default_trajectories: false
+    include_default_candidates: false

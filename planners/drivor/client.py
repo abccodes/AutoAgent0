@@ -54,6 +54,14 @@ try:
 except Exception:
     pass
 
+from scipy.spatial.transform import Rotation as SCR
+from planners.common.vlm_selector import VLMPlanSelector, VLMSelectorConfig
+from planners.common.vlm_env import (
+    VLM_ENV_DEFAULTS,
+    VLM_ENV_FIELD_NAMES,
+    get_prefixed_env_value,
+)
+
 # Import navsim dataclasses (AgentInput, Camera, Cameras, Lidar, EgoStatus)
 # We add repo root to path based on env var DRIVOR_REPO_ROOT (set by HUGSIM launch)
 DRIVOR_REPO_ROOT = os.environ.get("DRIVOR_REPO_ROOT", "")
@@ -93,11 +101,90 @@ EGO_HISTORY_FRAMES = 4
 
 TOPK = 8
 
+PLAN_DT_SEC = 0.5
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="DrivoR FIFO client for HUGSIM")
     parser.add_argument("--output", required=True, help="HUGSIM output directory containing FIFO pipes")
     return parser.parse_args()
+
+
+#helper functions to retreive environment variables, and replace them with defaults if not found
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+def _coerce_env_value(raw_value, default_value):
+    if isinstance(default_value, bool):
+        return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(default_value, int) and not isinstance(default_value, bool):
+        return int(raw_value)
+    if isinstance(default_value, float):
+        return float(raw_value)
+    return str(raw_value)
+
+#automatically resolves VLM config values based on vlm_env.py
+def resolve_vlm_config() -> VLMSelectorConfig:
+    values = {}
+    drivor_python_bin = os.environ.get("DRIVOR_PYTHON_BIN", "")
+    for suffix, field_name in VLM_ENV_FIELD_NAMES.items():
+        default_value = VLM_ENV_DEFAULTS[suffix]
+        if suffix == "PYTHON_BIN":
+            default_value = drivor_python_bin
+        raw_value = get_prefixed_env_value(suffix, default=default_value)
+        values[field_name] = _coerce_env_value(raw_value, default_value)
+    return VLMSelectorConfig(**values)
+
+# don't need resolve_config since DrivoR uses Hydra for it's configs rather than env vars
+
+# def env_get(primary: str, fallback: str, default: str) -> str:
+#     raw = os.environ.get(primary)
+#     if raw is not None:
+#         return raw
+#     raw = os.environ.get(fallback)
+#     if raw is not None:
+#         return raw
+#     return default
+
+
+# def env_flag_compat(primary: str, fallback: str, default: bool = False) -> bool:
+#     raw = os.environ.get(primary)
+#     if raw is None:
+#         raw = os.environ.get(fallback)
+#     if raw is None:
+#         return default
+#     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+# def resolve_vlm_config() -> VLMSelectorConfig:
+#     return VLMSelectorConfig(
+#         enabled=env_flag_compat("PLANNER_VLM_ENABLED", "DRIVOR_VLM_ENABLED", False),
+#         backend=env_get("PLANNER_VLM_BACKEND", "DRIVOR_VLM_BACKEND", "qwen3_vl"),
+#         model_id=env_get("PLANNER_VLM_MODEL_ID", "DRIVOR_VLM_MODEL_ID", "Qwen/Qwen3-VL-8B-Instruct"),
+#         device=env_get("PLANNER_VLM_DEVICE", "DRIVOR_VLM_DEVICE", "auto"),
+#         max_new_tokens=int(env_get("PLANNER_VLM_MAX_NEW_TOKENS", "DRIVOR_VLM_MAX_NEW_TOKENS", "300")),
+#         candidate_limit=int(env_get("PLANNER_VLM_CANDIDATE_LIMIT", "DRIVOR_VLM_CANDIDATE_LIMIT", "5")),
+#         timeout_sec=float(env_get("PLANNER_VLM_TIMEOUT_SEC", "DRIVOR_VLM_TIMEOUT_SEC", "10.0")),
+#         save_debug_artifacts=env_flag_compat("PLANNER_VLM_SAVE_DEBUG_ARTIFACTS", "DRIVOR_VLM_SAVE_DEBUG_ARTIFACTS", True),
+#         debug_dir_name=env_get("PLANNER_VLM_DEBUG_DIR_NAME", "DRIVOR_VLM_DEBUG_DIR_NAME", "vlm_debug"),
+#         carry_previous_enabled=env_flag_compat("PLANNER_VLM_CARRY_PREVIOUS_ENABLED", "DRIVOR_VLM_CARRY_PREVIOUS_ENABLED", True),
+#         carry_previous_min_path_m=float(env_get("PLANNER_VLM_CARRY_PREVIOUS_MIN_PATH_M", "DRIVOR_VLM_CARRY_PREVIOUS_MIN_PATH_M", "0.5")),
+#         carry_previous_min_points=int(env_get("PLANNER_VLM_CARRY_PREVIOUS_MIN_POINTS", "DRIVOR_VLM_CARRY_PREVIOUS_MIN_POINTS", "2")),
+#         adaptive_replan_mode=env_get("PLANNER_VLM_ADAPTIVE_REPLAN_MODE", "DRIVOR_VLM_ADAPTIVE_REPLAN_MODE", "log_only"),
+#         latency_tracking_mode=env_get("PLANNER_VLM_LATENCY_TRACKING_MODE", "DRIVOR_VLM_LATENCY_TRACKING_MODE", "full_timeline"),
+#         q_enabled=env_flag_compat("PLANNER_VLM_Q_ENABLED", "DRIVOR_VLM_Q_ENABLED", True),
+#         q_switch_margin=float(env_get("PLANNER_VLM_Q_SWITCH_MARGIN", "DRIVOR_VLM_Q_SWITCH_MARGIN", "0.05")),
+#         q_weight_rap_score=float(env_get("PLANNER_VLM_Q_WEIGHT_RAP_SCORE", "DRIVOR_VLM_Q_WEIGHT_RAP_SCORE", "0.55")),
+#         q_weight_progress=float(env_get("PLANNER_VLM_Q_WEIGHT_PROGRESS", "DRIVOR_VLM_Q_WEIGHT_PROGRESS", "0.30")),
+#         q_weight_offcenter=float(env_get("PLANNER_VLM_Q_WEIGHT_OFFCENTER", "DRIVOR_VLM_Q_WEIGHT_OFFCENTER", "0.10")),
+#         q_weight_curvature=float(env_get("PLANNER_VLM_Q_WEIGHT_CURVATURE", "DRIVOR_VLM_Q_WEIGHT_CURVATURE", "0.08")),
+#         q_weight_shortplan=float(env_get("PLANNER_VLM_Q_WEIGHT_SHORTPLAN", "DRIVOR_VLM_Q_WEIGHT_SHORTPLAN", "0.18")),
+#         q_carry_score_decay=float(env_get("PLANNER_VLM_Q_CARRY_SCORE_DECAY", "DRIVOR_VLM_Q_CARRY_SCORE_DECAY", "0.0")),
+#         display_default_trajectories=env_flag_compat("PLANNER_VLM_DISPLAY_DEFAULT_TRAJECTORIES", "DRIVOR_VLM_DISPLAY_DEFAULT_TRAJECTORIES", False),
+#         include_default_candidates=env_flag_compat("PLANNER_VLM_INCLUDE_DEFAULT_CANDIDATES", "DRIVOR_VLM_INCLUDE_DEFAULT_CANDIDATES", False),
+#     )
 
 
 def setup_logging(output_dir: Path) -> None:
@@ -109,30 +196,20 @@ def setup_logging(output_dir: Path) -> None:
         handlers=[logging.FileHandler(log_path, mode="w"), logging.StreamHandler(sys.stdout)],
     )
 
+#no need for load_rap_model since it's abstracted to DrivoRAgent.initialize()
 
-def read_obs(obs_pipe: Path):
-    """Read pickled object from pipe: 8-byte length prefix + payload"""
-    with open(obs_pipe, "rb") as pipe:
-        header = pipe.read(8)
-        if len(header) != 8:
-            raise EOFError(f"Incomplete pipe header from {obs_pipe}")
-        payload_size = struct.unpack("<Q", header)[0]
-        payload = bytearray()
-        while len(payload) < payload_size:
-            chunk = pipe.read(payload_size - len(payload))
-            if not chunk:
-                raise EOFError(f"Incomplete pipe payload from {obs_pipe}")
-            payload.extend(chunk)
-    return pickle.loads(payload)
+def make_command_one_hot(command: int) -> np.ndarray:
+    # HUGSIM commands: 0=right, 1=left, 2=forward
+    mapping = {
+        1: np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        2: np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+        0: np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32),
+    }
+    return mapping.get(int(command), np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32))
 
+# no need for preprocess_image because DrivoR uses its own feature builders to perform preprocessing
 
-def write_plan(plan_pipe: Path, plan) -> None:
-    payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
-    with open(plan_pipe, "wb") as pipe:
-        pipe.write(struct.pack("<Q", len(payload)))
-        pipe.write(payload)
-
-
+#helper functions for camera and ego state related calculations/transformations
 def euler_deg_to_rot_matrix(angles_deg: Sequence[float]) -> np.ndarray:
     """
     Convert Euler angles in degrees to rotation matrix.
@@ -215,8 +292,24 @@ def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: D
     )
     return cam
 
+def forward_left_basis(yaw: float):
+        forward_dir = np.array([math.sin(yaw), math.cos(yaw)], dtype=np.float32)
+        left_dir = np.array([-math.cos(yaw), math.sin(yaw)], dtype=np.float32)
+        return forward_dir, left_dir
 
-def compute_local_velocity(info_history: Sequence[Dict], index: int) -> np.ndarray:
+def world_delta_to_local_components(delta_world: np.ndarray, yaw: float) -> np.ndarray:
+    fwd, left = forward_left_basis(yaw)
+    return np.array([float(np.dot(delta_world, fwd)), float(np.dot(delta_world, left))], dtype=np.float32)
+
+
+#need to figure out what this does
+def timestamp_delta_seconds(prev_info: Dict[str, object], next_info: Dict[str, object], default_dt: float = 0.25) -> float:
+    dt = float(next_info["timestamp"]) - float(prev_info["timestamp"])
+    if dt <= 1e-6:
+        return default_dt
+    return dt
+
+def compute_local_velocity(info_history: Sequence[Dict[str, object]], index: int) -> np.ndarray:
     """Compute local velocity (forward, left) using RAP's approach (finite differences)"""
     if len(info_history) <= 1:
         return np.zeros(2, dtype=np.float32)
@@ -225,31 +318,23 @@ def compute_local_velocity(info_history: Sequence[Dict], index: int) -> np.ndarr
     curr_pos = np.asarray(curr_info["ego_pos"], dtype=np.float32)
     curr_yaw = float(np.asarray(curr_info["ego_rot"], dtype=np.float32)[1])
 
-    def forward_left_basis(yaw: float):
-        forward_dir = np.array([math.sin(yaw), math.cos(yaw)], dtype=np.float32)
-        left_dir = np.array([-math.cos(yaw), math.sin(yaw)], dtype=np.float32)
-        return forward_dir, left_dir
-
-    def world_delta_to_local_components(delta_world: np.ndarray, yaw: float) -> np.ndarray:
-        fwd, left = forward_left_basis(yaw)
-        return np.array([float(np.dot(delta_world, fwd)), float(np.dot(delta_world, left))], dtype=np.float32)
-
     if index > 0:
         prev_info = info_history[index - 1]
         prev_pos = np.asarray(prev_info["ego_pos"], dtype=np.float32)
-        dt = float(curr_info["timestamp"]) - float(prev_info["timestamp"])
-        if dt <= 1e-6:
-            return np.zeros(2, dtype=np.float32)
-        delta_world = np.array([curr_pos[0] - prev_pos[0], curr_pos[2] - prev_pos[2]], dtype=np.float32)
+        dt = timestamp_delta_seconds(prev_info, curr_info)
+        delta_world = np.array(
+            [curr_pos[0] - prev_pos[0], curr_pos[2] - prev_pos[2]],
+            dtype=np.float32)
         return world_delta_to_local_components(delta_world, curr_yaw) / dt
 
     # forward diff
     next_info = info_history[index + 1]
     next_pos = np.asarray(next_info["ego_pos"], dtype=np.float32)
-    dt = float(next_info["timestamp"]) - float(curr_info["timestamp"])
-    if dt <= 1e-6:
-        return np.zeros(2, dtype=np.float32)
-    delta_world = np.array([next_pos[0] - curr_pos[0], next_pos[2] - curr_pos[2]], dtype=np.float32)
+    dt = timestamp_delta_seconds(curr_info, next_info)
+    delta_world = np.array(
+        [next_pos[0] - curr_pos[0], next_pos[2] - curr_pos[2]], 
+        dtype=np.float32,
+    )
     return world_delta_to_local_components(delta_world, curr_yaw) / dt
 
 
@@ -270,16 +355,8 @@ def compute_local_acceleration(info_history: Sequence[Dict], index: int) -> np.n
     return (next_vel - curr_vel) / dt
 
 
-def make_command_one_hot(command: int) -> np.ndarray:
-    # HUGSIM commands: 0=right, 1=left, 2=forward
-    mapping = {
-        1: np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
-        2: np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
-        0: np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32),
-    }
-    return mapping.get(int(command), np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32))
 
-
+#comparable to build_features for RAP
 def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_history: int = EGO_HISTORY_FRAMES) -> AgentInput:
     """
     Convert HUGSIM obs + info_history into navsim.AgentInput.
@@ -390,23 +467,224 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
 
     return AgentInput(ego_statuses=ego_statuses, cameras=cameras_list, lidars=lidars_list)
 
-
-def navsim_to_hugsim_plan(trajectory: np.ndarray) -> np.ndarray:
+#comparable to rap_to_hugsim_plan
+def drivor_to_hugsim_plan(trajectory: np.ndarray) -> np.ndarray:
     # NAVSIM predictions: [x_forward, y_left, heading] -> HUGSIM expects [x_right, y_forward]
     right = -trajectory[:, 1]
     forward = trajectory[:, 0]
     return np.stack([right, forward], axis=-1).astype(np.float32)
 
+#gotta figure out what the functions up to world_points_to_current_local do
 
-def build_plan_payload_from_model_output(predictions: Dict, output_num_poses: int = 8, topk: int = TOPK) -> Dict:
+def info_to_pose(info: Dict[str, object]) -> np.ndarray:
+    pose = np.eye(4, dtype=np.float32)
+    pose[:3, :3] = SCR.from_euler(
+        "XYZ",
+        np.asarray(info["ego_rot"], dtype=np.float32),
+        degrees=False,
+    ).as_matrix().astype(np.float32)
+    pose[:3, 3] = np.asarray(info["ego_pos"], dtype=np.float32)
+    return pose
+
+
+def local_plan_to_world(plan_traj: np.ndarray, ego_pose: np.ndarray) -> np.ndarray:
+    plan_traj = np.asarray(plan_traj, dtype=np.float32)
+    if len(plan_traj) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    origin = ego_pose[:3, 3]
+    right_dir = ego_pose[:3, 0]
+    forward_dir = ego_pose[:3, 2]
+    points_world = [
+        origin + float(right) * right_dir + float(forward) * forward_dir
+        for right, forward in plan_traj
+    ]
+    return np.asarray(points_world, dtype=np.float32)
+
+
+def world_points_to_current_local(points_world: np.ndarray, ego_pose: np.ndarray) -> np.ndarray:
+    if len(points_world) == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+
+    homogeneous = np.concatenate(
+        [np.asarray(points_world, dtype=np.float32), np.ones((len(points_world), 1), dtype=np.float32)],
+        axis=1,
+    )
+    ego_points = (np.linalg.inv(ego_pose) @ homogeneous.T).T[:, :3]
+    return np.stack([ego_points[:, 0], ego_points[:, 2]], axis=1).astype(np.float32)
+
+
+def path_length(plan_traj: np.ndarray) -> float:
+    plan_traj = np.asarray(plan_traj, dtype=np.float32)
+    if len(plan_traj) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(plan_traj, axis=0), axis=1).sum())
+
+
+
+def curvature_cost(plan_traj: np.ndarray) -> float:
+    plan_traj = np.asarray(plan_traj, dtype=np.float32)
+    if len(plan_traj) < 3:
+        return 0.0
+    diffs = np.diff(plan_traj, axis=0)
+    headings = np.arctan2(diffs[:, 0], np.clip(diffs[:, 1], 1e-6, None))
+    heading_deltas = np.diff(headings)
+    heading_deltas = np.arctan2(np.sin(heading_deltas), np.cos(heading_deltas))
+    return float(np.mean(np.abs(heading_deltas)))
+
+
+# def compute_q_score(
+#     plan_traj: np.ndarray,
+#     proposal_score_norm: float,
+#     vlm_cfg: VLMSelectorConfig,
+#     is_carry: bool,
+# ) -> float:
+#     plan_traj = np.asarray(plan_traj, dtype=np.float32)
+#     if len(plan_traj) == 0:
+#         return -1e6
+
+#     path = path_length(plan_traj)
+#     endpoint = plan_endpoint(plan_traj)
+#     progress = max(0.0, float(endpoint[1]))
+#     offcenter = abs(float(endpoint[0]))
+#     curvature = curvature_cost(plan_traj)
+#     shortfall = max(0.0, 1.0 - path)
+
+#     score = 0.0
+#     score += vlm_cfg.q_weight_rap_score * float(proposal_score_norm)
+#     score += vlm_cfg.q_weight_progress * progress
+#     score -= vlm_cfg.q_weight_offcenter * offcenter
+#     score -= vlm_cfg.q_weight_curvature * curvature
+#     score -= vlm_cfg.q_weight_shortplan * shortfall
+#     if is_carry and vlm_cfg.q_carry_score_decay > 0.0:
+#         score -= vlm_cfg.q_carry_score_decay
+#     return float(score)
+
+
+def build_carry_plan_candidate(
+    previous_plan: Optional[np.ndarray],
+    previous_pose: Optional[np.ndarray],
+    previous_selected_score: Optional[float],
+    previous_timestamp: Optional[float],
+    current_info: Dict[str, object],
+    vlm_cfg: VLMSelectorConfig,
+) -> Optional[Dict[str, object]]:
+    if not vlm_cfg.carry_previous_enabled or previous_plan is None or previous_pose is None or previous_timestamp is None:
+        return None
+
+    current_timestamp = float(current_info.get("timestamp", previous_timestamp))
+    elapsed_sec = max(0.0, current_timestamp - float(previous_timestamp))
+    elapsed_pose_steps = int(round(elapsed_sec / PLAN_DT_SEC))
+    if elapsed_pose_steps >= len(previous_plan):
+        return None
+
+    trimmed_plan = np.asarray(previous_plan[elapsed_pose_steps:], dtype=np.float32)
+    if len(trimmed_plan) < vlm_cfg.carry_previous_min_points:
+        return None
+
+    points_world = local_plan_to_world(trimmed_plan, np.asarray(previous_pose, dtype=np.float32))
+    current_local = world_points_to_current_local(points_world, info_to_pose(current_info))
+
+    valid_mask = current_local[:, 1] > 0.0
+    if not np.any(valid_mask):
+        return None
+    first_valid_idx = int(np.argmax(valid_mask))
+    current_local = current_local[first_valid_idx:]
+
+    if len(current_local) < vlm_cfg.carry_previous_min_points:
+        return None
+    if path_length(current_local) < vlm_cfg.carry_previous_min_path_m:
+        return None
+
+    return {
+        "source": "carry_prev",
+        "proposal_index": None,
+        "proposal_score": 0.0,
+        "proposal_score_norm": 0.0,
+        "origin_selected_score_raw": None if previous_selected_score is None else float(previous_selected_score),
+        "local_plan": current_local.astype(np.float32),
+        "execution_plan": current_local.astype(np.float32),
+        "carry_elapsed_sec": elapsed_sec,
+        "carry_elapsed_pose_steps": elapsed_pose_steps,
+    }
+
+
+def truncate_plan(plan_traj: np.ndarray, num_poses: int) -> np.ndarray:
+    plan_traj = np.asarray(plan_traj, dtype=np.float32)
+    if num_poses <= 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    return np.asarray(plan_traj[: min(len(plan_traj), int(num_poses))], dtype=np.float32)
+
+def plan_endpoint(plan_traj: np.ndarray) -> np.ndarray:
+    plan_traj = np.asarray(plan_traj, dtype=np.float32)
+    if len(plan_traj) == 0:
+        return np.zeros(2, dtype=np.float32)
+    return np.asarray(plan_traj[-1], dtype=np.float32)
+
+
+def normalize_scores(scores: np.ndarray) -> np.ndarray:
+    scores = np.asarray(scores, dtype=np.float32)
+    if len(scores) == 0:
+        return np.zeros((0,), dtype=np.float32)
+    score_min = float(scores.min())
+    score_max = float(scores.max())
+    if score_max - score_min < 1e-6:
+        return np.ones_like(scores, dtype=np.float32)
+    return (scores - score_min) / (score_max - score_min)
+
+
+def get_default_trajectories(num_poses: int) -> np.ndarray:
+    num_poses = max(2, int(num_poses))
+    t = np.linspace(0.0, 1.0, num_poses, dtype=np.float32)
+    forward = np.stack([np.zeros_like(t), 40.0 * t], axis=1)
+    slight_left = np.stack([-5.0 * (t ** 2), 38.0 * t], axis=1)
+    slight_right = np.stack([5.0 * (t ** 2), 38.0 * t], axis=1)
+    sharp_left = np.stack([-25.0 * (t ** 3), 30.0 * t], axis=1)
+    sharp_right = np.stack([25.0 * (t ** 3), 30.0 * t], axis=1)
+    return np.stack([forward, slight_left, slight_right, sharp_left, sharp_right], axis=0).astype(np.float32)
+
+#reads from HUGSIM FIFO pipe
+def read_obs(obs_pipe: Path):
+    """ pickled object from pipe: 8-byte length prefix + payload"""
+    with open(obs_pipe, "rb") as pipe:
+        header = pipe.read(8)
+        if len(header) != 8:
+            raise EOFError(f"Incomplete pipe header from {obs_pipe}")
+        payload_size = struct.unpack("<Q", header)[0]
+        payload = bytearray()
+        while len(payload) < payload_size:
+            chunk = pipe.read(payload_size - len(payload))
+            if not chunk:
+                raise EOFError(f"Incomplete pipe payload from {obs_pipe}")
+            payload.extend(chunk)
+    return pickle.loads(payload)
+
+#writes DrivoR plan back to HUGSIM
+def write_plan(plan_pipe: Path, plan) -> None:
+    payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(plan_pipe, "wb") as pipe:
+        pipe.write(struct.pack("<Q", len(payload)))
+        pipe.write(payload)
+
+# ============================================================================
+# NEW FUNCTIONS: RAP-compatible candidate generation and payload building
+# ============================================================================
+
+def extract_proposals_and_scores_from_predictions(
+    predictions: Dict,
+    output_num_poses: int = 8,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Identify proposals & scores in model output (attempt several common keys).
-    DrivoR may output trajectories in multiple formats:
-      - 'trajectory' : tensor [B, P, T, 3] or [P, T, 3] or [B, P, T]
-      - 'score' or 'scores' : tensor [B, P] or [P]
-    We handle batch size 1 and flatten as needed.
+    Extract trajectory and score tensors from model predictions and normalize to [P,T,3] and [P].
+    
+    Mirrors model output extraction from build_plan_payload_from_model_output,
+    but returns only proposals and scores without payload construction.
+    
+    Returns:
+        proposals: np.ndarray of shape [P, T, 3] (proposals, timesteps, xyz with padded heading)
+        scores: np.ndarray of shape [P] (proposal scores)
     """
-    # find trajectory tensor
+    # Find trajectory tensor (try multiple keys)
     traj = None
     scores = None
     for key in ["trajectory", "proposals", "proposals_traj", "trajectories"]:
@@ -418,57 +696,356 @@ def build_plan_payload_from_model_output(predictions: Dict, output_num_poses: in
             scores = predictions[key]
             break
 
+    # Fallback: search for any tensor with right dimensionality
     if traj is None:
-        # try to find any tensor that could be trajectory
         for v in predictions.values():
             if isinstance(v, torch.Tensor) and v.ndim >= 3 and v.shape[-1] in [2, 3]:
                 traj = v
                 break
 
     if traj is None:
-        raise RuntimeError(f"Model output does not contain a recognizable trajectory tensor. Available keys: {list(predictions.keys())}")
+        raise RuntimeError(f"Model output has no trajectory tensor. Available keys: {list(predictions.keys())}")
 
+    # Convert to numpy and normalize shape to [P, T, D]
     traj_np = traj.detach().cpu().numpy()
-    
-    # Normalize to [P, T, 3] (proposals, timesteps, 3D coords)
-    # Handle batch dimension if present
     if traj_np.ndim == 4:
-        # [B, P, T, D] -> take batch 0
-        traj_np = traj_np[0]  # [P, T, D]
+        traj_np = traj_np[0]  # [B, P, T, D] -> [P, T, D]
     elif traj_np.ndim == 3:
-        # Already [P, T, D] - good
-        pass
+        pass  # Already [P, T, D]
     else:
-        raise RuntimeError(f"Unexpected trajectory tensor shape: {traj_np.shape}, expected [B,P,T,D] or [P,T,D]")
-    
-    # Ensure last dim is 3 (x, y, heading); if it's 2, pad with zeros
+        raise RuntimeError(f"Unexpected trajectory shape: {traj_np.shape}, expected [B,P,T,D] or [P,T,D]")
+
+    # Pad heading dimension if needed
     if traj_np.shape[-1] == 2:
-        traj_np = np.pad(traj_np, ((0, 0), (0, 0), (0, 1)), mode='constant', constant_values=0)
+        traj_np = np.pad(traj_np, ((0, 0), (0, 0), (0, 1)), mode="constant", constant_values=0)
 
     if scores is not None:
         scores_np = scores.detach().cpu().numpy()
-        # Normalize scores to [P] (proposals)
         if scores_np.ndim == 2:
-            scores_np = scores_np[0]  # [P]
+            scores_np = scores_np[0]  # [B, P] -> [P]
     else:
-        # fallback: use zeros or argsort by norm
         scores_np = np.zeros(len(traj_np), dtype=np.float32)
 
-    # choose topk
-    topk_idx = np.argsort(scores_np)[-topk:][::-1]
-    selected_idx = int(topk_idx[0])
-    selected_traj = traj_np[selected_idx, :output_num_poses, :]
+    return traj_np, scores_np
 
+
+def build_drivor_candidate_rows(
+    proposals: np.ndarray,
+    scores: np.ndarray,
+    output_num_poses: int,
+    vlm_cfg: VLMSelectorConfig,
+    current_info: Dict[str, object],
+    previous_selected_plan: Optional[np.ndarray],
+    previous_selected_pose: Optional[np.ndarray],
+    previous_selected_score: Optional[float],
+    previous_selected_timestamp: Optional[float],
+    previous_selected_source: Optional[str],
+) -> Tuple[List[Dict[str, object]], bool]:
+    """
+    Build candidate rows from top-k proposals, carry_prev, and optional default fallbacks.
+    Mirrors RAP's build_vlm_candidate_rows but adapted for DrivoR model outputs.
+    
+    All returned plans are in HUGSIM format [x_right, y_forward] and truncated to shared_horizon.
+    
+    Returns:
+        candidate_rows: List of dicts with keys: source, proposal_index, proposal_score, 
+                       proposal_score_norm, local_plan, execution_plan, q_score
+        allow_carry_previous: bool indicating if carry_prev was allowed and generated
+    """
+    # Check if we can carry previous plan
+    allow_carry_previous = not (
+        previous_selected_source is not None
+        and str(previous_selected_source).startswith("default_fallback_")
+    )
+
+    # Build carry_prev candidate if eligible
+    carry_candidate = build_carry_plan_candidate(
+        previous_plan=previous_selected_plan if allow_carry_previous else None,
+        previous_pose=previous_selected_pose if allow_carry_previous else None,
+        previous_selected_score=previous_selected_score if allow_carry_previous else None,
+        previous_timestamp=previous_selected_timestamp if allow_carry_previous else None,
+        current_info=current_info,
+        vlm_cfg=vlm_cfg,
+    )
+
+    # Build top-k candidates from current model output
+    sorted_indices = np.argsort(scores)[::-1]
+    # [PLACEHOLDER] vlm_cfg.candidate_limit may need to be added to VLMSelectorConfig if not present
+    # For now, fallback to a sensible default if missing
+    candidate_limit = getattr(vlm_cfg, "candidate_limit", 8)
+    current_candidate_limit = max(1, int(candidate_limit) - 1)
+    current_candidate_limit = min(current_candidate_limit, int(len(sorted_indices)))
+    candidate_indices = sorted_indices[:current_candidate_limit]
+
+    candidate_rows: List[Dict[str, object]] = []
+
+    # Insert carry_prev if valid
+    if carry_candidate is not None:
+        candidate_rows.append(carry_candidate)
+
+    # Add top-k current proposals (converted to HUGSIM coords)
+    for idx in candidate_indices:
+        full_plan = drivor_to_hugsim_plan(proposals[idx, :output_num_poses])
+        candidate_rows.append(
+            {
+                "source": "current_drivor",
+                "proposal_index": int(idx),
+                "proposal_score": float(scores[idx]),
+                "local_plan": full_plan,
+                "execution_plan": full_plan.copy(),
+            }
+        )
+
+    # Optionally add default fallback candidates
+    if getattr(vlm_cfg, "include_default_candidates", False):
+        for default_idx, default_plan in enumerate(get_default_trajectories(output_num_poses)):
+            candidate_rows.append(
+                {
+                    "source": f"default_fallback_{default_idx}",
+                    "proposal_index": None,
+                    "proposal_score": 0.0,
+                    "local_plan": default_plan,
+                    "execution_plan": default_plan.copy(),
+                }
+            )
+
+    # Compute shared horizon (min of carry_prev length or output_num_poses)
+    carry_row = next((row for row in candidate_rows if row.get("source") == "carry_prev"), None)
+    shared_horizon = len(carry_row["local_plan"]) if carry_row is not None else output_num_poses
+    shared_horizon = max(1, int(shared_horizon))
+
+    # Truncate all local_plan to shared_horizon; preserve full execution_plan
+    for row in candidate_rows:
+        execution_plan = np.asarray(row.get("execution_plan", row["local_plan"]), dtype=np.float32)
+        row["execution_plan"] = execution_plan
+        row["local_plan"] = truncate_plan(execution_plan, shared_horizon)
+
+    return candidate_rows, allow_carry_previous
+
+
+def build_plan_payload(
+    proposals: np.ndarray,
+    scores: np.ndarray,
+    output_num_poses: int,
+    selected_idx: Optional[int] = None,
+    selected_source: str = "drivor_argmax",
+    selection_debug: Optional[Dict[str, object]] = None,
+    selected_plan_override: Optional[np.ndarray] = None,
+    selected_score_override: Optional[float] = None,
+    candidate_pool_rows: Optional[Sequence[Dict[str, object]]] = None,
+    topk: int = TOPK,
+) -> Dict[str, object]:
+    """
+    Build complete plan payload with candidate pool, defaults, and VLM metadata.
+    Mirrors RAP's build_plan_payload but adapted for DrivoR models.
+    
+    Handles both direct proposal selection and VLM-selected plan override.
+    """
+    # Determine topk and extract top indices
+    topk = max(1, min(int(topk), int(len(scores))))
+    top_indices = np.argsort(scores)[-topk:][::-1]
+
+    # Determine selected_idx
+    if selected_idx is None and selected_plan_override is None:
+        selected_idx = int(top_indices[0])
+    else:
+        selected_idx = None if selected_idx is None else int(selected_idx)
+
+    # Determine selected plan and score
+    if selected_plan_override is not None:
+        selected_plan = np.asarray(selected_plan_override, dtype=np.float32)
+        selected_score = float(selected_score_override) if selected_score_override is not None else None
+    else:
+        assert selected_idx is not None
+        selected_traj = proposals[selected_idx, :output_num_poses]
+        selected_plan = drivor_to_hugsim_plan(selected_traj)
+        selected_score = float(scores[selected_idx])
+
+    # Build candidate pool (either from provided rows or derived from top-k)
+    if candidate_pool_rows is not None:
+        candidate_pool_plans = [
+            np.asarray(row["local_plan"], dtype=np.float32).tolist()
+            for row in candidate_pool_rows
+        ]
+        candidate_pool_execution_plans = [
+            np.asarray(row.get("execution_plan", row["local_plan"]), dtype=np.float32).tolist()
+            for row in candidate_pool_rows
+        ]
+        candidate_pool_scores = [float(row.get("proposal_score", 0.0)) for row in candidate_pool_rows]
+        candidate_pool_q_scores = [
+            None if row.get("q_score") is None else float(row["q_score"])
+            for row in candidate_pool_rows
+        ]
+        candidate_pool_sources = [str(row.get("source", "current_drivor")) for row in candidate_pool_rows]
+        candidate_pool_proposal_indices = [
+            None if row.get("proposal_index") is None else int(row["proposal_index"])
+            for row in candidate_pool_rows
+        ]
+    else:
+        # Fallback: derive candidate pool from top-k proposals
+        candidate_pool_plans = [
+            drivor_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
+            for idx in top_indices
+        ]
+        candidate_pool_scores = [float(scores[idx]) for idx in top_indices]
+        candidate_pool_execution_plans = list(candidate_pool_plans)
+        candidate_pool_q_scores = [None for _ in top_indices]
+        candidate_pool_sources = ["current_drivor" for _ in top_indices]
+        candidate_pool_proposal_indices = [int(idx) for idx in top_indices]
+
+    # Build default overlay plans if requested
+    default_overlay_plans = None
+    default_overlay_sources = None
+    if bool(selection_debug and selection_debug.get("display_default_trajectories")):
+        default_overlay_plans = [traj.tolist() for traj in get_default_trajectories(output_num_poses)]
+        default_overlay_sources = [f"default_fallback_{idx}" for idx in range(len(default_overlay_plans))]
+
+    # Assemble final payload
     payload = {
         "selected_idx": selected_idx,
-        "selected_score": float(scores_np[selected_idx]),
-        "selected_plan": navsim_to_hugsim_plan(selected_traj),
-        "topk_indices": [int(i) for i in topk_idx.tolist()],
-        "topk_scores": [float(scores_np[i]) for i in topk_idx.tolist()],
-        "topk_plans": [navsim_to_hugsim_plan(traj_np[i, :output_num_poses, :]) for i in topk_idx.tolist()],
+        "selected_score": selected_score,
+        "selected_source": selected_source,
+        "selected_plan": selected_plan,
+        "topk_indices": [int(idx) for idx in top_indices],
+        "topk_scores": [float(scores[idx]) for idx in top_indices],
+        "topk_plans": [
+            drivor_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
+            for idx in top_indices
+        ],
+        "candidate_pool_plans": candidate_pool_plans,
+        "candidate_pool_execution_plans": candidate_pool_execution_plans,
+        "candidate_pool_scores": candidate_pool_scores,
+        "candidate_pool_q_scores": candidate_pool_q_scores,
+        "candidate_pool_sources": candidate_pool_sources,
+        "candidate_pool_proposal_indices": candidate_pool_proposal_indices,
+        "default_overlay_plans": default_overlay_plans,
+        "default_overlay_sources": default_overlay_sources,
     }
+
+    # Merge selection_debug metadata into payload
+    if selection_debug:
+        payload.update(selection_debug)
+
     return payload
 
+
+def build_plain_drivor_plan_result(
+    proposals: np.ndarray,
+    scores: np.ndarray,
+    output_num_poses: int,
+) -> Dict[str, object]:
+    """
+    Plain argmax fallback for DrivoR when VLM is disabled.
+    Returns the selected_plan, selected_score, selected_score_raw, selected_row, and a plan_payload.
+    """
+    best_idx = int(np.argmax(scores))
+    selected_traj = proposals[best_idx, :output_num_poses]
+    selected_plan = drivor_to_hugsim_plan(selected_traj)
+    selected_score = float(scores[best_idx])
+    selected_score_raw = float(selected_score)
+    plan_payload = build_plan_payload(
+        proposals=proposals,
+        scores=scores,
+        output_num_poses=output_num_poses,
+        selected_idx=best_idx,
+        selected_source="drivor_argmax",
+        selection_debug={
+            "vlm_invoked": False,
+            "display_default_trajectories": False,
+            "include_default_candidates": False,
+        },
+        selected_plan_override=selected_plan,
+        selected_score_override=selected_score,
+        candidate_pool_rows=None,
+        topk=TOPK,
+    )
+    return {
+        "selected_plan": selected_plan,
+        "selected_score": selected_score,
+        "selected_score_raw": selected_score_raw,
+        "selected_row": {"source": "current_drivor", "proposal_index": best_idx},
+        "plan_payload": plan_payload,
+    }
+
+
+# ============================================================================
+# OLD FUNCTIONS (commented out for reference and comparison)
+# ============================================================================
+
+# def build_plan_payload_from_model_output_OLD(
+#         predictions: Dict, 
+#         output_num_poses: int = 8, 
+#         topk: int = TOPK
+# ) -> Dict:
+#     """
+#     OLD VERSION: Identify proposals & scores in model output (attempt several common keys).
+#     DrivoR may output trajectories in multiple formats:
+#       - 'trajectory' : tensor [B, P, T, 3] or [P, T, 3] or [B, P, T]
+#       - 'score' or 'scores' : tensor [B, P] or [P]
+#     We handle batch size 1 and flatten as needed.
+#     """
+#     # find trajectory tensor
+#     traj = None
+#     scores = None
+#     for key in ["trajectory", "proposals", "proposals_traj", "trajectories"]:
+#         if key in predictions:
+#             traj = predictions[key]
+#             break
+#     for key in ["score", "scores", "prob", "logits"]:
+#         if key in predictions:
+#             scores = predictions[key]
+#             break
+#
+#     if traj is None:
+#         # try to find any tensor that could be trajectory
+#         for v in predictions.values():
+#             if isinstance(v, torch.Tensor) and v.ndim >= 3 and v.shape[-1] in [2, 3]:
+#                 traj = v
+#                 break
+#
+#     if traj is None:
+#         raise RuntimeError(f"Model output does not contain a recognizable trajectory tensor. Available keys: {list(predictions.keys())}")
+#
+#     traj_np = traj.detach().cpu().numpy()
+#     
+#     # Normalize to [P, T, 3] (proposals, timesteps, 3D coords)
+#     # Handle batch dimension if present
+#     if traj_np.ndim == 4:
+#         # [B, P, T, D] -> take batch 0
+#         traj_np = traj_np[0]  # [P, T, D]
+#     elif traj_np.ndim == 3:
+#         # Already [P, T, D] - good
+#         pass
+#     else:
+#         raise RuntimeError(f"Unexpected trajectory tensor shape: {traj_np.shape}, expected [B,P,T,D] or [P,T,D]")
+#     
+#     # Ensure last dim is 3 (x, y, heading); if it's 2, pad with zeros
+#     if traj_np.shape[-1] == 2:
+#         traj_np = np.pad(traj_np, ((0, 0), (0, 0), (0, 1)), mode='constant', constant_values=0)
+#
+#     if scores is not None:
+#         scores_np = scores.detach().cpu().numpy()
+#         # Normalize scores to [P] (proposals)
+#         if scores_np.ndim == 2:
+#             scores_np = scores_np[0]  # [P]
+#     else:
+#         # fallback: use zeros or argsort by norm
+#         scores_np = np.zeros(len(traj_np), dtype=np.float32)
+#
+#     # choose topk
+#     topk_idx = np.argsort(scores_np)[-topk:][::-1]
+#     selected_idx = int(topk_idx[0])
+#     selected_traj = traj_np[selected_idx, :output_num_poses, :]
+#
+#     payload = {
+#         "selected_idx": selected_idx,
+#         "selected_score": float(scores_np[selected_idx]),
+#         "selected_plan": drivor_to_hugsim_plan(selected_traj),
+#         "topk_indices": [int(i) for i in topk_idx.tolist()],
+#         "topk_scores": [float(scores_np[i]) for i in topk_idx.tolist()],
+#         "topk_plans": [drivor_to_hugsim_plan(traj_np[i, :output_num_poses, :]) for i in topk_idx.tolist()],
+#     }
+#     return payload
 
 def main() -> int:
     args = parse_args()
@@ -570,119 +1147,259 @@ def main() -> int:
     obs_pipe = output_dir / "obs_pipe"
     plan_pipe = output_dir / "plan_pipe"
 
-    info_history: deque = deque(maxlen=EGO_HISTORY_FRAMES)
+    info_history: deque[Dict[str, object]] = deque(maxlen=EGO_HISTORY_FRAMES)
 
-    while True:
-        try:
-            message = read_obs(obs_pipe)
-            if message == "Done":
-                LOG.info("Received shutdown signal")
-                break
+    # VLM selector setup
+    vlm_cfg = resolve_vlm_config()
+    vlm_selector = VLMPlanSelector(vlm_cfg, output_dir)
+    frame_index = 0
+    previous_selected_plan: Optional[np.ndarray] = None
+    previous_selected_pose: Optional[np.ndarray] = None
+    previous_selected_score: Optional[float] = None
+    previous_selected_timestamp: Optional[float] = None
+    previous_selected_source: Optional[str] = None
 
-            obs, info = message
-            # info_history append and pad
-            info_history.append(dict(info))
-            while len(info_history) < EGO_HISTORY_FRAMES:
-                info_history.appendleft(dict(info_history[0]))
+    try:
+        while True:
+            try:
+                message = read_obs(obs_pipe)
+                if message == "Done":
+                    LOG.info("Received shutdown signal")
+                    break
 
-            # Build AgentInput from HUGSIM data
-            agent_input = build_agent_input_from_hugsim(obs, list(info_history), num_history=EGO_HISTORY_FRAMES)
+                obs, info = message
+                # info_history append and pad
+                info_history.append(dict(info))
+                while len(info_history) < EGO_HISTORY_FRAMES:
+                    info_history.appendleft(dict(info_history[0]))
 
-            # Use DrivoR's feature builders (native) - get_feature_builders returns builder instances
-            builders = agent.get_feature_builders()
-            # DrivoRFeatureBuilder expects AgentInput; compute features
-            features = {}
-            for b in builders:
-                # compute_features returns a dict of torch tensors (no batch dim)
-                f = b.compute_features(agent_input)
-                features.update(f)
+                # Build AgentInput from HUGSIM data
+                agent_input = build_agent_input_from_hugsim(obs, list(info_history), num_history=EGO_HISTORY_FRAMES)
 
-            # Add batch dimension and move to device
-            features_batched = {}
-            for k, v in features.items():
-                if isinstance(v, torch.Tensor):
-                    features_batched[k] = v.unsqueeze(0).to(device)
-                else:
-                    # if numpy arrays, convert and add batch dim
-                    try:
-                        t = torch.from_numpy(np.array(v))
-                        features_batched[k] = t.unsqueeze(0).to(device)
-                    except Exception:
-                        # leave as-is if not tensor-like
-                        features_batched[k] = v
+                # Use DrivoR's feature builders (native) - get_feature_builders returns builder instances
+                builders = agent.get_feature_builders()
+                # DrivoRFeatureBuilder expects AgentInput; compute features
+                features = {}
+                for b in builders:
+                    # compute_features returns a dict of torch tensors (no batch dim)
+                    f = b.compute_features(agent_input)
+                    features.update(f)
 
-            # Run model forward (DrivoRAgent.forward delegates to DrivoRModel)
-            with torch.no_grad():
-                # Debug: log shapes and dtypes of features before forwarding to the model
-                try:
-                    for k, v in features_batched.items():
+                # Add batch dimension and move to device
+                features_batched = {}
+                for k, v in features.items():
+                    if isinstance(v, torch.Tensor):
+                        features_batched[k] = v.unsqueeze(0).to(device)
+                    else:
+                        # if numpy arrays, convert and add batch dim
                         try:
-                            if isinstance(v, torch.Tensor):
-                                LOG.info("Feature '%s': tensor shape=%s dtype=%s", k, tuple(v.shape), v.dtype)
-                            else:
-                                LOG.info("Feature '%s': type=%s", k, type(v))
+                            t = torch.from_numpy(np.array(v))
+                            features_batched[k] = t.unsqueeze(0).to(device)
                         except Exception:
-                            LOG.exception("Failed to describe feature %s", k)
-                except Exception:
-                    LOG.exception("Failed to iterate features_batched for debug")
+                            # leave as-is if not tensor-like
+                            features_batched[k] = v
 
-                try:
-                    pred = agent.forward(features_batched)
-                except Exception:
-                    LOG.exception("agent.forward failed; dumping feature diagnostics and calling internal model")
+                # Run model forward (DrivoRAgent.forward delegates to DrivoRModel)
+                with torch.no_grad():
+                    # Debug: log shapes and dtypes of features before forwarding to the model
                     try:
                         for k, v in features_batched.items():
-                            if isinstance(v, torch.Tensor):
-                                LOG.error("DIAG feature '%s' shape=%s dtype=%s", k, tuple(v.shape), v.dtype)
-                            else:
-                                LOG.error("DIAG feature '%s' type=%s", k, type(v))
+                            try:
+                                if isinstance(v, torch.Tensor):
+                                    LOG.info("Feature '%s': tensor shape=%s dtype=%s", k, tuple(v.shape), v.dtype)
+                                else:
+                                    LOG.info("Feature '%s': type=%s", k, type(v))
+                            except Exception:
+                                LOG.exception("Failed to describe feature %s", k)
                     except Exception:
-                        LOG.exception("Failed diag dump of features_batched")
-                    # fallback: call internal model directly
-                    pred = agent._drivor_model(features_batched)
+                        LOG.exception("Failed to iterate features_batched for debug")
 
-            # Build plan payload (select best proposal)
-            try:
-                # Debug: log prediction dict structure before parsing
+                    try:
+                        pred = agent.forward(features_batched)
+                    except Exception:
+                        LOG.exception("agent.forward failed; dumping feature diagnostics and calling internal model")
+                        try:
+                            for k, v in features_batched.items():
+                                if isinstance(v, torch.Tensor):
+                                    LOG.error("DIAG feature '%s' shape=%s dtype=%s", k, tuple(v.shape), v.dtype)
+                                else:
+                                    LOG.error("DIAG feature '%s' type=%s", k, type(v))
+                        except Exception:
+                            LOG.exception("Failed diag dump of features_batched")
+                        # fallback: call internal model directly
+                        pred = agent._drivor_model(features_batched)
+
+                # Extract proposals and scores from model predictions
                 try:
-                    LOG.info("Model output keys: %s", list(pred.keys()) if isinstance(pred, dict) else type(pred))
-                    for k, v in (pred.items() if isinstance(pred, dict) else []):
-                        if isinstance(v, torch.Tensor):
-                            LOG.info("  pred['%s']: shape=%s dtype=%s", k, tuple(v.shape), v.dtype)
-                        else:
-                            LOG.info("  pred['%s']: type=%s", k, type(v))
-                except Exception:
-                    LOG.exception("Failed to log pred structure")
-                
-                plan_payload = build_plan_payload_from_model_output(pred, output_num_poses=agent._config.get("num_poses", 8) if hasattr(agent, "_config") and isinstance(agent._config, dict) else 8)
-            except Exception as e:
-                LOG.exception("Failed to interpret model output: %s", e)
-                # try to salvage by examining common keys
-                try:
-                    if "trajectory" in pred:
-                        traj = pred["trajectory"].detach().cpu().numpy()
-                        if traj.ndim == 4:
-                            traj_np = traj[0, 0, :, :2]  # first proposal
-                            plan = navsim_to_hugsim_plan(traj_np)
-                            plan_payload = {"selected_idx": 0, "selected_score": 0.0, "selected_plan": plan}
-                        else:
-                            raise RuntimeError("unexpected shape")
-                    else:
-                        raise RuntimeError("no trajectory key and fallback failed")
-                except Exception:
-                    LOG.exception("Fallback failed - writing None plan")
+                    output_num_poses = (
+                        int(agent._config.get("num_poses", 8))
+                        if hasattr(agent, "_config") and isinstance(agent._config, dict)
+                        else 8
+                    )
+                    proposals, scores = extract_proposals_and_scores_from_predictions(pred, output_num_poses=output_num_poses)
+                except Exception as e:
+                    LOG.exception("Failed to extract proposals/scores from model output: %s", e)
                     write_plan(plan_pipe, None)
                     continue
 
-            write_plan(plan_pipe, plan_payload)
-        except Exception:
-            LOG.error("Adapter loop failed")
-            LOG.error(traceback.format_exc())
-            try:
-                write_plan(plan_pipe, None)
+                # Build candidate rows (includes carry_prev, top-k, and optional defaults)
+                try:
+                    candidate_rows, allow_carry_prev = build_drivor_candidate_rows(
+                        proposals=proposals,
+                        scores=scores,
+                        output_num_poses=output_num_poses,
+                        vlm_cfg=vlm_cfg,
+                        current_info=info,
+                        previous_selected_plan=previous_selected_plan,
+                        previous_selected_pose=previous_selected_pose,
+                        previous_selected_score=previous_selected_score,
+                        previous_selected_timestamp=previous_selected_timestamp,
+                        previous_selected_source=previous_selected_source,
+                    )
+                except Exception as e:
+                    LOG.exception("Failed to build candidate rows: %s", e)
+                    write_plan(plan_pipe, None)
+                    continue
+
+                # Determine default selection for VLM fallback
+                # Find the index of the model's best candidate (argmax by score)
+                try:
+                    best_idx = int(np.argmax(scores))
+                    default_selected_index = None
+                    for idx, row in enumerate(candidate_rows):
+                        if row.get("proposal_index") is not None and int(row.get("proposal_index")) == best_idx:
+                            default_selected_index = idx
+                            break
+                    if default_selected_index is None:
+                        default_selected_index = 0  # Fallback to first candidate
+                    default_selected_source = "drivor_argmax"
+                except Exception as e:
+                    LOG.exception("Failed to determine default selection: %s", e)
+                    default_selected_index = 0
+                    default_selected_source = "drivor_argmax"
+
+                # Call VLM selector (or use default if disabled)
+                try:
+                    # If VLM disabled, use plain argmax fallback similar to RAP's plain result
+                    if not getattr(vlm_cfg, "enabled", False):
+                        plain_result = build_plain_drivor_plan_result(proposals, scores, output_num_poses)
+                        selected_plan = np.asarray(plain_result["selected_plan"], dtype=np.float32)
+                        selected_score = float(plain_result["selected_score"])
+                        selected_score_raw = float(plain_result.get("selected_score_raw", selected_score))
+                        selected_idx = int(plain_result["selected_row"]["proposal_index"]) if plain_result["selected_row"].get("proposal_index") is not None else None
+                        selected_source = "drivor_argmax"
+                        selection_debug = {
+                            "vlm_invoked": False,
+                            "fallback_selected_idx": int(default_selected_index),
+                            "fallback_selected_source": default_selected_source,
+                            "display_default_trajectories": bool(getattr(vlm_cfg, "display_default_trajectories", False)),
+                            "include_default_candidates": bool(getattr(vlm_cfg, "include_default_candidates", False)),
+                        }
+                        
+                    else:
+                        front_image = obs.get("rgb", {}).get("CAM_FRONT") if isinstance(obs, dict) else None
+                        selection_result = vlm_selector.maybe_select(
+                            frame_index=frame_index,
+                            front_image=front_image,
+                            info=info,
+                            candidate_rows=candidate_rows,
+                            default_selected_index=default_selected_index,
+                            default_selected_source=default_selected_source,
+                        )
+                        frame_index += 1
+
+                        selected_row = selection_result["selected_candidate_row"]
+                        selected_plan = np.asarray(
+                            selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32
+                        )
+                        selected_idx = selected_row.get("proposal_index")
+                        selected_score = float(selected_row.get("proposal_score", 0.0))
+                        # origin_selected_score_raw if present preserves raw value for carry logic
+                        selected_score_raw = (
+                            float(selected_row.get("origin_selected_score_raw"))
+                            if selected_row.get("origin_selected_score_raw") is not None
+                            else float(selected_score)
+                        )
+                        selected_source = str(selection_result.get("selected_source", "drivor_vlm"))
+
+                        # Build VLM selection debug metadata (non-Q fields only)
+                        selection_debug = {
+                            "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
+                            "vlm_confidence": selection_result.get("vlm_confidence"),
+                            "vlm_reasoning": selection_result.get("vlm_reasoning"),
+                            "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
+                            "vlm_error": selection_result.get("vlm_error"),
+                            "fallback_selected_idx": int(default_selected_index),
+                            "fallback_selected_source": default_selected_source,
+                            "display_default_trajectories": bool(getattr(vlm_cfg, "display_default_trajectories", False)),
+                            "include_default_candidates": bool(getattr(vlm_cfg, "include_default_candidates", False)),
+                            "carry_previous_allowed": bool(allow_carry_prev),
+                            "previous_selected_source": previous_selected_source,
+                            "selected_score_raw": float(selected_score_raw),
+                        }
+                        # Build final payload below (outside this block)
+                except Exception as e:
+                    LOG.exception("VLM selection failed: %s", e)
+                    # Fallback to model selection
+                    best_idx = int(np.argmax(scores))
+                    selected_traj = proposals[best_idx, :output_num_poses]
+                    selected_plan = drivor_to_hugsim_plan(selected_traj)
+                    selected_idx = best_idx
+                    selected_score = float(scores[best_idx])
+                    selected_score_raw = float(selected_score)
+                    selected_source = "drivor_argmax_fallback"
+                    selection_debug = {
+                        "vlm_error": str(e),
+                        "fallback_selected_idx": int(default_selected_index),
+                        "fallback_selected_source": default_selected_source,
+                    }
+
+                # Build final payload with VLM-selected plan and candidate pool metadata
+                try:
+                    plan_payload = build_plan_payload(
+                        proposals=proposals,
+                        scores=scores,
+                        output_num_poses=output_num_poses,
+                        selected_idx=selected_idx,
+                        selected_source=selected_source,
+                        selection_debug=selection_debug,
+                        selected_plan_override=selected_plan,
+                        selected_score_override=selected_score,
+                        candidate_pool_rows=candidate_rows,
+                        topk=TOPK,
+                    )
+                except Exception as e:
+                    LOG.exception("Failed to build plan payload: %s", e)
+                    write_plan(plan_pipe, None)
+                    continue
+
+                # Write final plan to HUGSIM
+                write_plan(plan_pipe, plan_payload)
+
+                # Save previous selection for carry-prev support
+                try:
+                    previous_selected_plan = np.asarray(plan_payload["selected_plan"], dtype=np.float32).copy()
+                    previous_selected_pose = info_to_pose(info)
+                    # Preserve raw selected score (from VLM or fallback) similar to RAP
+                    previous_selected_score = float(selected_score_raw) if 'selected_score_raw' in locals() else float(plan_payload.get("selected_score", 0.0))
+                    previous_selected_timestamp = float(info.get("timestamp", 0.0))
+                    previous_selected_source = selected_source
+                except Exception:
+                    # keep previous selections as-is on failure
+                    LOG.exception("Failed to save previous_selected state")
             except Exception:
-                LOG.error("Failed to notify HUGSIM about adapter failure")
-            return 1
+                LOG.error("Adapter loop failed")
+                LOG.error(traceback.format_exc())
+                try:
+                    write_plan(plan_pipe, None)
+                except Exception:
+                    LOG.error("Failed to notify HUGSIM about adapter failure")
+                return 1
+    finally:
+        try:
+            vlm_selector.finalize()
+        except Exception:
+            LOG.exception("Error finalizing VLM selector")
 
     return 0
 

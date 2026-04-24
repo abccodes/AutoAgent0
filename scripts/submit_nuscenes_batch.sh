@@ -15,16 +15,16 @@ BASE_PATH_ENV="${BASE_PATH:-}"
 JOB_LABEL="${SUBMIT_JOB_LABEL:-}"
 
 case "${PLANNER_NAME}" in
-  rap)
-    GPUS=1
-    ;;
-  rap_vlm)
-    GPUS=2
-    ;;
-  *)
-    echo "unsupported planner: ${PLANNER_NAME}" >&2
-    exit 2
-    ;;
+    rap|drivor)
+        GPUS=1
+        ;;
+    rap_vlm|drivor_vlm)
+        GPUS=2
+        ;;
+    *)
+        echo "unsupported planner: ${PLANNER_NAME}" >&2
+        exit 2
+        ;;
 esac
 
 if [[ -z "${JOB_LABEL}" ]]; then
@@ -40,6 +40,10 @@ JOB_NAME="hugsim-${JOB_LABEL}"
 
 if [[ -z "${BASE_PATH_ENV}" && "${PLANNER_PATH_ENV}" == *"rap_vlm_default_trajectory_config.yaml" ]]; then
     BASE_PATH_ENV="configs/sim/nuscenes_base_local_rap_vlm_default_trajectory_config.yaml"
+fi
+
+if [[ -z "${BASE_PATH_ENV}" && "${PLANNER_PATH_ENV}" == *"drivor_vlm"* ]]; then
+    BASE_PATH_ENV="configs/sim/nuscenes_base_local_drivor_vlm.yaml"
 fi
 
 mapfile -t SCENARIOS < <(find "${SCENARIO_DIR}" -maxdepth 1 -type f -name '*.yaml' | sort)

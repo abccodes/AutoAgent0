@@ -657,14 +657,33 @@ if __name__ == "__main__":
         extra_env['RAP_VLM_DEVICE'] = vlm_device
         
     elif args.ad == "drivor":
+        drivor_python_bin = cfg.planner.drivor.get('python_bin', 'python')
+        drivor_device = os.environ.get('DRIVOR_DEVICE_OVERRIDE') or cfg.planner.drivor.get('device', 'cuda')
+        vlm_device = (
+            os.environ.get('PLANNER_VLM_DEVICE_OVERRIDE')
+            or os.environ.get('DRIVOR_VLM_DEVICE_OVERRIDE')
+            or cfg.planner.drivor.vlm.get('device', 'auto') if cfg.planner.drivor.get('vlm') else 'auto'
+        )
         extra_env = {
             'DRIVOR_REPO_ROOT': cfg.planner.drivor.get('repo_root', ''),
             'DRIVOR_CHECKPOINT': cfg.planner.drivor.get('checkpoint', ''),
             'DRIVOR_DINO': cfg.planner.drivor.get('dino', ''),
-            'DRIVOR_PYTHON_BIN': cfg.planner.drivor.get('python_bin', 'python'),
-            'DRIVOR_DEVICE': cfg.planner.drivor.get('device', 'cuda'),
+            'DRIVOR_PYTHON_BIN': drivor_python_bin,
+            'DRIVOR_DEVICE': drivor_device,
             'DRIVOR_CONFIG': cfg.planner.drivor.get('config', '')
         }
+        
+        # Add VLM support if configured
+        if cfg.planner.drivor.get('vlm') and cfg.planner.drivor.vlm.get('enabled', False):
+            extra_env.update(
+                build_prefixed_vlm_env(
+                    cfg.planner.drivor.vlm,
+                    planner_python_bin=drivor_python_bin,
+                    prefixes=("PLANNER_VLM_", "DRIVOR_VLM_"),
+                )
+            )
+            extra_env['PLANNER_VLM_DEVICE'] = vlm_device
+            extra_env['DRIVOR_VLM_DEVICE'] = vlm_device
 
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
     try:
