@@ -1,24 +1,33 @@
-drivor:
-  launch_path: ./planners/drivor/launch.sh
-  repo_root: /bigdata/aidan/DrivoR
-  checkpoint: /bigdata/aidan/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
-  dino: /bigdata/aidan/DrivoR/weights/vit_small_patch14_reg4_dinov2.lvd142m
-  python_bin: /bigdata/aidan/.home/envs/drivor/bin/python3.8
-  config: /bigdata/aidan/DrivoR/navsim/planning/script/config/common/agent/drivoR.yaml
-
+rap:
+  output_suffix: rap_vlm
+  launch_path: ./planners/rap/launch.sh
+  repo_root: /bigdata/aidan/RAP
+  checkpoint: /bigdata/aidan/models/RAP_ckpts/RAP_DINO_navsimv2.ckpt
+  python_bin: /bigdata/aidan/.home/envs/rap/bin/python
   device: cuda
   image_scale: 0.4
+  use_scene_rig_lidar2img: true
+  hf_hub_offline: true
+  transformers_offline: true
+  hf_home: /bigdata/aidan/models/hf
+  hf_hub_cache: /bigdata/aidan/models/hf/hub
+  transformers_cache: /bigdata/aidan/models/hf/hub
+  nuplan_devkit_dir: /bigdata/jason/drivor_evaluation/DrivoR/nuplan-devkit
+  backbone_path: /bigdata/aidan/models/hf/dinov3-vith16plus-pretrain-
 
   vlm:
     enabled: true
-    backend: subprocess_qwen3_vl
+    intervention_enabled: false
+    camera_mode: front_only
+    scoring_camera_mode: front_only
+    backend: local_transformers_subprocess
     model_id: Qwen/Qwen3-VL-8B-Instruct
     output_model_slug: qwen3-vl-8b-instruct
     device: auto
     python_bin: /bigdata/aidan/.home/envs/vlm/bin/python
     max_new_tokens: 300
     candidate_limit: 10
-    timeout_sec: 10.0
+    timeout_sec: 30.0
     save_debug_artifacts: true
     debug_dir_name: vlm_debug
     carry_previous_enabled: true

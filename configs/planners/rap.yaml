@@ -2,6 +2,7 @@ rap:
   launch_path: ./planners/rap/launch.sh
   repo_root: /bigdata/aidan/RAP
   checkpoint: /bigdata/aidan/models/RAP_ckpts/RAP_DINO_navsimv2.ckpt
+  output_model_slug: rap_dino_navsimv2
   python_bin: /bigdata/aidan/.home/envs/rap/bin/python
   device: cuda
   image_scale: 0.4

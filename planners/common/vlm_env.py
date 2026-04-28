@@ -7,6 +7,9 @@ from typing import Any, Dict, Iterable, Tuple
 VLM_ENV_DEFAULTS: Dict[str, Any] = {
     "ENABLED": False,
     "INTERVENTION_ENABLED": False,
+    "CAMERA_MODE": "multiview",
+    "INTERVENTION_CAMERA_MODE": "",
+    "SCORING_CAMERA_MODE": "",
     "BACKEND": "local_transformers",
     "MODEL_ID": "Qwen/Qwen3-VL-8B-Instruct",
     "DEVICE": "auto",
@@ -42,6 +45,9 @@ VLM_ENV_DEFAULTS: Dict[str, Any] = {
 VLM_ENV_FIELD_NAMES: Dict[str, str] = {
     "ENABLED": "enabled",
     "INTERVENTION_ENABLED": "intervention_enabled",
+    "CAMERA_MODE": "camera_mode",
+    "INTERVENTION_CAMERA_MODE": "intervention_camera_mode",
+    "SCORING_CAMERA_MODE": "scoring_camera_mode",
     "BACKEND": "backend",
     "MODEL_ID": "model_id",
     "DEVICE": "device",

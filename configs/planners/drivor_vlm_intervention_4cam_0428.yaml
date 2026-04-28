@@ -1,4 +1,5 @@
 drivor:
+  output_suffix: drivor_intervention_vlm_4_cam
   launch_path: ./planners/drivor/launch.sh
   repo_root: /bigdata/aidan/DrivoR
   checkpoint: /bigdata/aidan/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
@@ -11,14 +12,20 @@ drivor:
 
   vlm:
     enabled: true
+    intervention_enabled: true
+    camera_mode: front_only
+    intervention_camera_mode: multiview
+    scoring_camera_mode: front_only
     backend: subprocess_qwen3_vl
     model_id: Qwen/Qwen3-VL-8B-Instruct
     output_model_slug: qwen3-vl-8b-instruct
     device: auto
     python_bin: /bigdata/aidan/.home/envs/vlm/bin/python
     max_new_tokens: 300
+    intervention_max_new_tokens: 120
     candidate_limit: 10
     timeout_sec: 10.0
+    intervention_timeout_sec: 10.0
     save_debug_artifacts: true
     debug_dir_name: vlm_debug
     carry_previous_enabled: true

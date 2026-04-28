@@ -34,6 +34,9 @@ VLM_CAMERA_ORDER = (
 class VLMSelectorConfig:
     enabled: bool = False
     intervention_enabled: bool = False
+    camera_mode: str = "multiview"
+    intervention_camera_mode: str = ""
+    scoring_camera_mode: str = ""
     backend: str = "local_transformers"
     model_id: str = "Qwen/Qwen3-VL-8B-Instruct"
     device: str = "auto"
@@ -301,12 +304,15 @@ def render_candidate_overlays(
         image = camera_images.get(cam_name)
         if image is None:
             continue
-        overlays[cam_name] = render_candidate_overlay(
-            image,
-            info,
-            candidate_rows,
-            cam_name=cam_name,
-        )
+        if cam_name == "CAM_FRONT":
+            overlays[cam_name] = render_candidate_overlay(
+                image,
+                info,
+                candidate_rows,
+                cam_name=cam_name,
+            )
+        else:
+            overlays[cam_name] = np.asarray(image, dtype=np.uint8).copy()
     return overlays
 
 
@@ -398,13 +404,45 @@ def format_candidate_text(candidate_rows: Sequence[Dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def resolve_vlm_camera_order(camera_mode: str) -> Tuple[str, ...]:
+    mode = str(camera_mode or "multiview").strip().lower()
+    if mode in {"front", "front_only", "single_front"}:
+        return ("CAM_FRONT",)
+    return tuple(VLM_CAMERA_ORDER)
+
+
+def describe_vlm_camera_inputs(camera_order: Sequence[str]) -> Tuple[str, str]:
+    camera_order = tuple(camera_order)
+    if camera_order == ("CAM_FRONT",):
+        return (
+            "A front-facing driving image.",
+            "The image has the trajectory overlay.",
+        )
+    return (
+        "Four driving images in this exact order: front, left, right, back.",
+        "Only the front image has the trajectory overlay; left, right, and back are unannotated context images.",
+    )
+
+
+def resolve_stage_camera_order(cfg: VLMSelectorConfig, stage: str) -> Tuple[str, ...]:
+    if stage == "intervention":
+        camera_mode = cfg.intervention_camera_mode or cfg.camera_mode
+    elif stage == "scoring":
+        camera_mode = cfg.scoring_camera_mode or cfg.camera_mode
+    else:
+        camera_mode = cfg.camera_mode
+    return resolve_vlm_camera_order(camera_mode)
+
+
 def build_scoring_prompt(
     candidate_rows: Sequence[Dict[str, object]],
     route_instruction: str,
     current_ego_speed_mps: Optional[float] = None,
     current_ego_accel_mps2: Optional[float] = None,
+    camera_order: Sequence[str] = ("CAM_FRONT",),
 ) -> str:
     candidate_text = format_candidate_text(candidate_rows)
+    camera_line_1, camera_line_2 = describe_vlm_camera_inputs(camera_order)
     has_default_candidates = any(
         str(row.get("source", "")).startswith("default_fallback_")
         for row in candidate_rows
@@ -429,10 +467,10 @@ def build_scoring_prompt(
 You are an autonomous-driving trajectory scorer.
 
 You are given:
-1. Four driving images in this exact order: front, left, right, back.
-2. Each image shows the same multiple color-coded candidate trajectories overlaid from that camera view.
+1. {camera_line_1}
+2. {camera_line_2}
 3. Structured candidate trajectory metadata.
-4. A route-level driving instruction.
+4. A high-level driving directive that must be taken seriously when scoring the candidates.
 
 Your job:
 - Score EVERY candidate trajectory with a scalar Q-like value.
@@ -467,7 +505,7 @@ Your job:
     - Use only what is visible in the image and candidate metadata.
     - If all candidates are imperfect, prefer the least risky one.
 
-Route instruction (right,left,or straight):
+High-level driving directive (right,left,or straight):
 {route_instruction}
 
 Candidate trajectories:
@@ -488,22 +526,39 @@ Return ONLY valid JSON in this exact schema:
 def build_intervention_prompt(
     baseline_candidate_row: Dict[str, object],
     route_instruction: str,
+    camera_order: Sequence[str] = ("CAM_FRONT",),
 ) -> str:
     candidate_text = format_candidate_text([baseline_candidate_row])
+    camera_line_1, camera_line_2 = describe_vlm_camera_inputs(camera_order)
+    multiview_guidance = ""
+    if tuple(camera_order) != ("CAM_FRONT",):
+        multiview_guidance = """
+- Use the front image as the primary source for judging the shown trajectory's path geometry, lane alignment, and route consistency.
+- Use the left, right, and back images only as supporting context for surrounding vehicles, nearby obstacles, lane occupancy, and safety conflicts.
+- Do not treat side or rear clutter alone as a reason to intervene unless it indicates a real conflict relevant to the next maneuver.
+- Because only the front image contains the overlaid trajectory, judge where the path goes from the front view and use the other views only to decide whether surrounding context makes intervention necessary.
+""".strip()
     return f"""
 You are an autonomous-driving safety monitor deciding whether an intervention is needed.
 
 You are given:
-1. Four driving images in this exact order: front, left, right, back.
-2. Each image has exactly one overlaid trajectory: the baseline RAP-selected trajectory.
+1. {camera_line_1}
+2. {camera_line_2}
 3. Structured metadata for that same baseline RAP-selected trajectory.
 4. A route-level driving instruction.
 
 Your job:
 - Decide whether the VLM needs to intervene instead of trusting this single baseline RAP-selected trajectory in this frame.
-- Set "should_intervene" to true only when the shown baseline trajectory appears risky, ambiguous, unsafe, instruction-inconsistent, or likely to benefit from visual correction.
-- Use "should_intervene" = false when the shown baseline trajectory looks routine, lane-aligned, instruction-consistent, and there is no strong visual reason to override baseline RAP.
-- Intervene when there is a meaningful risk of obstacle collision, unsafe lane departure, wrong-way behavior, sidewalk/off-road encroachment, route mismatch, or other obvious visual issue with the shown baseline trajectory.
+- Set "should_intervene" to true when the shown baseline trajectory appears risky, ambiguous, instruction-inconsistent, poorly centered, too close to obstacles or lane boundaries, or likely to benefit from short-horizon visual correction.
+- Use "should_intervene" = false only when the shown baseline trajectory looks clearly safe, clearly lane-aligned, instruction-consistent, and comfortably clear of nearby conflicts.
+- Intervene when there is a meaningful risk of obstacle collision, unsafe lane departure, wrong-way behavior, sidewalk/off-road encroachment, route mismatch, low-margin clearance, or other visible issue with the shown baseline trajectory.
+- If you are uncertain whether the trajectory safely stays in-lane, clears nearby obstacles, or follows the intended route, prefer "should_intervene" = true.
+- Because the planner replans frequently, it is acceptable to intervene for borderline or low-margin cases, not only catastrophic ones.
+- In multiview mode, use extra camera views to judge surrounding safety context, not to reinterpret the path geometry shown on the front image.
+{multiview_guidance}
+- If intervention is needed, also provide a single high-level corrective action for the next short-horizon maneuver.
+- The corrective action must be exactly one of: "left", "right", or "straight".
+- Choose the corrective action that best describes the immediate correction the scorer should prioritize.
 - Keep the response compact.
 - The reasoning should explicitly justify why intervention is or is not needed in this frame.
 
@@ -516,6 +571,7 @@ Baseline RAP-selected trajectory:
 Return ONLY valid JSON in this exact schema:
 {{
   "should_intervene": <true or false>,
+  "corrective_action": "<left or right or straight>",
   "confidence": <float between 0 and 1>,
   "reasoning": "<short explanation for why intervention is or is not needed>"
 }}
@@ -555,6 +611,38 @@ def command_to_route_instruction(command: object) -> str:
         return mapping.get(int(command), "Drive safely and choose the most reasonable trajectory.")
     except Exception:
         return "Drive safely and choose the most reasonable trajectory."
+
+
+def normalize_corrective_action(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    direct = {
+        "left": "left",
+        "right": "right",
+        "straight": "straight",
+        "forward": "straight",
+        "go straight": "straight",
+        "keep straight": "straight",
+        "continue straight": "straight",
+        "turn left": "left",
+        "go left": "left",
+        "veer left": "left",
+        "turn right": "right",
+        "go right": "right",
+        "veer right": "right",
+    }
+    if text in direct:
+        return direct[text]
+    if "straight" in text or "forward" in text:
+        return "straight"
+    if "left" in text:
+        return "left"
+    if "right" in text:
+        return "right"
+    return None
 
 
 class Qwen3TrajectorySelector:
@@ -779,24 +867,30 @@ def _coerce_candidate_scores(raw_scores: object, num_candidates: int) -> Tuple[O
     return [float(score) for score in scores], None
 
 
-def _coerce_intervention_decision(parsed: object) -> Tuple[Optional[bool], Optional[float], Optional[str], Optional[str]]:
+def _coerce_intervention_decision(
+    parsed: object,
+) -> Tuple[Optional[bool], Optional[str], Optional[float], Optional[str], Optional[str]]:
     if not isinstance(parsed, dict):
-        return None, None, None, "intervention_output_invalid"
+        return None, None, None, None, "intervention_output_invalid"
 
     raw_flag = parsed.get("should_intervene")
     if not isinstance(raw_flag, bool):
-        return None, None, None, "intervention_flag_missing"
+        return None, None, None, None, "intervention_flag_missing"
+
+    corrective_action = normalize_corrective_action(parsed.get("corrective_action"))
+    if raw_flag and corrective_action is None:
+        return None, None, None, None, "intervention_corrective_action_missing"
 
     raw_confidence = parsed.get("confidence", 0.0)
     try:
         confidence = float(raw_confidence)
     except Exception:
-        return None, None, None, "intervention_confidence_invalid"
+        return None, None, None, None, "intervention_confidence_invalid"
 
     reasoning = parsed.get("reasoning")
     if reasoning is not None and not isinstance(reasoning, str):
         reasoning = str(reasoning)
-    return bool(raw_flag), confidence, reasoning, None
+    return bool(raw_flag), corrective_action, confidence, reasoning, None
 
 
 def _select_from_vlm_scores(
@@ -934,6 +1028,8 @@ class VLMPlanSelector:
         default_selected_source: str,
     ) -> Dict[str, object]:
         route_instruction = command_to_route_instruction(info.get("command"))
+        scoring_camera_order = resolve_stage_camera_order(self.cfg, "scoring")
+        intervention_camera_order = resolve_stage_camera_order(self.cfg, "intervention")
         timestamp = float(info.get("timestamp", 0.0))
         dt_sec = 0.25
         current_ego_speed_mps = None
@@ -951,6 +1047,7 @@ class VLMPlanSelector:
         scoring_invoked = False
         intervention_invoked = False
         intervention_should_intervene = None
+        intervention_corrective_action = None
         intervention_confidence = None
         intervention_reasoning = None
         intervention_elapsed_sec = 0.0
@@ -971,6 +1068,7 @@ class VLMPlanSelector:
                 "selected_proposal_index": selected_row.get("proposal_index"),
                 "intervention_invoked": False,
                 "intervention_should_intervene": None,
+                "intervention_corrective_action": None,
                 "intervention_confidence": None,
                 "intervention_elapsed_sec": 0.0,
                 "vlm_elapsed_sec": 0.0,
@@ -995,6 +1093,7 @@ class VLMPlanSelector:
                 "scoring_invoked": False,
                 "intervention_invoked": False,
                 "intervention_should_intervene": None,
+                "intervention_corrective_action": None,
                 "intervention_confidence": None,
                 "intervention_reasoning": None,
                 "intervention_elapsed_sec": 0.0,
@@ -1017,9 +1116,10 @@ class VLMPlanSelector:
         def _write_overlay_bundle(
             suffix: str,
             overlays: Dict[str, np.ndarray],
+            camera_order: Sequence[str],
         ) -> List[Path]:
             image_paths: List[Path] = []
-            for cam_name in VLM_CAMERA_ORDER:
+            for cam_name in camera_order:
                 overlay = overlays.get(cam_name)
                 if overlay is None:
                     continue
@@ -1032,8 +1132,13 @@ class VLMPlanSelector:
                 image_paths.append(image_path)
             return image_paths
 
-        score_overlays = render_candidate_overlays(camera_images, info, candidate_rows)
-        score_image_paths = _write_overlay_bundle("candidates", score_overlays)
+        score_overlays = render_candidate_overlays(
+            camera_images,
+            info,
+            candidate_rows,
+            camera_order=scoring_camera_order,
+        )
+        score_image_paths = _write_overlay_bundle("candidates", score_overlays, scoring_camera_order)
 
         intervention_result = None
         if self.cfg.intervention_enabled:
@@ -1042,9 +1147,14 @@ class VLMPlanSelector:
                 camera_images,
                 info,
                 [candidate_rows[default_selected_index]],
+                camera_order=intervention_camera_order,
             )
-            gate_image_paths = _write_overlay_bundle("gate", gate_overlays)
-            intervention_prompt = build_intervention_prompt(candidate_rows[default_selected_index], route_instruction)
+            gate_image_paths = _write_overlay_bundle("gate", gate_overlays, intervention_camera_order)
+            intervention_prompt = build_intervention_prompt(
+                candidate_rows[default_selected_index],
+                route_instruction,
+                camera_order=intervention_camera_order,
+            )
             try:
                 intervention_result = selector.infer_prompt(
                     image_paths=gate_image_paths,
@@ -1062,7 +1172,7 @@ class VLMPlanSelector:
                 }
 
             intervention_elapsed_sec = float(intervention_result.get("elapsed_sec", 0.0))
-            intervention_should_intervene, intervention_confidence, intervention_reasoning, intervention_parse_error = (
+            intervention_should_intervene, intervention_corrective_action, intervention_confidence, intervention_reasoning, intervention_parse_error = (
                 _coerce_intervention_decision(intervention_result.get("parsed_output"))
             )
             if intervention_elapsed_sec > self.cfg.intervention_timeout_sec:
@@ -1097,6 +1207,7 @@ class VLMPlanSelector:
                     "selected_proposal_index": selected_row.get("proposal_index"),
                     "intervention_invoked": True,
                     "intervention_should_intervene": intervention_should_intervene,
+                    "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_elapsed_sec": intervention_elapsed_sec,
                     "vlm_elapsed_sec": 0.0,
@@ -1125,6 +1236,7 @@ class VLMPlanSelector:
                     "selected_path_reasoning": selected_path_reasoning,
                     "intervention_invoked": True,
                     "intervention_should_intervene": intervention_should_intervene,
+                    "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_reasoning": intervention_reasoning,
                     "intervention_elapsed_sec": intervention_elapsed_sec,
@@ -1175,6 +1287,7 @@ class VLMPlanSelector:
                     "scoring_invoked": False,
                     "intervention_invoked": True,
                     "intervention_should_intervene": intervention_should_intervene,
+                    "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_reasoning": intervention_reasoning,
                     "intervention_elapsed_sec": intervention_elapsed_sec,
@@ -1205,6 +1318,7 @@ class VLMPlanSelector:
                     "selected_proposal_index": selected_row.get("proposal_index"),
                     "intervention_invoked": True,
                     "intervention_should_intervene": False,
+                    "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_elapsed_sec": intervention_elapsed_sec,
                     "vlm_elapsed_sec": 0.0,
@@ -1233,6 +1347,7 @@ class VLMPlanSelector:
                     "selected_path_reasoning": selected_path_reasoning,
                     "intervention_invoked": True,
                     "intervention_should_intervene": False,
+                    "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_reasoning": intervention_reasoning,
                     "intervention_elapsed_sec": intervention_elapsed_sec,
@@ -1283,24 +1398,30 @@ class VLMPlanSelector:
                     "scoring_invoked": False,
                     "intervention_invoked": True,
                     "intervention_should_intervene": False,
+                    "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_reasoning": intervention_reasoning,
                     "intervention_elapsed_sec": intervention_elapsed_sec,
                 }
+
+        scoring_route_instruction = route_instruction
+        if self.cfg.intervention_enabled and intervention_should_intervene is True:
+            scoring_route_instruction = intervention_corrective_action or route_instruction
 
         try:
             LOG.info(
                 "Running VLM selection for frame=%d candidates=%d route='%s'",
                 frame_index,
                 len(candidate_rows),
-                route_instruction,
+                scoring_route_instruction,
             )
             scoring_invoked = True
             scoring_prompt = build_scoring_prompt(
                 candidate_rows,
-                route_instruction,
+                scoring_route_instruction,
                 current_ego_speed_mps=current_ego_speed_mps,
                 current_ego_accel_mps2=current_ego_accel_mps2,
+                camera_order=scoring_camera_order,
             )
             result = selector.infer_prompt(
                 image_paths=score_image_paths,
@@ -1406,6 +1527,7 @@ class VLMPlanSelector:
             "frame_index": frame_index,
             "timestamp": timestamp,
             "route_instruction": route_instruction,
+            "scoring_route_instruction": scoring_route_instruction,
             "candidate_count": len(candidate_rows),
             "carry_previous_valid": carry_previous_valid,
             "carry_previous_remaining_path_m": next(
@@ -1418,6 +1540,7 @@ class VLMPlanSelector:
             "selected_proposal_index": selected_row.get("proposal_index"),
             "intervention_invoked": intervention_invoked,
             "intervention_should_intervene": intervention_should_intervene,
+            "intervention_corrective_action": intervention_corrective_action,
             "intervention_confidence": intervention_confidence,
             "intervention_elapsed_sec": intervention_elapsed_sec,
             "vlm_elapsed_sec": elapsed_sec,
@@ -1440,6 +1563,7 @@ class VLMPlanSelector:
         debug_payload = {
             "frame_index": frame_index,
             "route_instruction": route_instruction,
+            "scoring_route_instruction": scoring_route_instruction,
             "default_selected_index": int(default_selected_index),
             "default_selected_source": default_selected_source,
             "candidate_rows": candidate_rows,
@@ -1451,6 +1575,7 @@ class VLMPlanSelector:
             "selected_path_reasoning": selected_path_reasoning,
             "intervention_invoked": intervention_invoked,
             "intervention_should_intervene": intervention_should_intervene,
+            "intervention_corrective_action": intervention_corrective_action,
             "intervention_confidence": intervention_confidence,
             "intervention_reasoning": intervention_reasoning,
             "intervention_elapsed_sec": intervention_elapsed_sec,

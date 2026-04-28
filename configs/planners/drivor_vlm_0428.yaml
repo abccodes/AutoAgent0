@@ -1,4 +1,5 @@
 drivor:
+  output_suffix: drivor_vlm
   launch_path: ./planners/drivor/launch.sh
   repo_root: /bigdata/aidan/DrivoR
   checkpoint: /bigdata/aidan/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
@@ -11,6 +12,9 @@ drivor:
 
   vlm:
     enabled: true
+    intervention_enabled: false
+    camera_mode: front_only
+    scoring_camera_mode: front_only
     backend: subprocess_qwen3_vl
     model_id: Qwen/Qwen3-VL-8B-Instruct
     output_model_slug: qwen3-vl-8b-instruct

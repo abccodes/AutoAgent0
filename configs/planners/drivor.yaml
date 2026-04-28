@@ -1,10 +1,10 @@
 drivor:
   launch_path: ./planners/drivor/launch.sh
-  repo_root: /data/guest_rui/ztrs_workspace/DrivoR
-  checkpoint: /data/guest_rui/ztrs_workspace/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
-  dino: /data/guest_rui/ztrs_workspace/DrivoR/weights/vit_small_patch14_reg4_dinov2.lvd142m
-  python_bin: /data2/guest_rui/miniconda3/envs/drivor_py38/bin/python3.8
-  config: /data/guest_rui/ztrs_workspace/DrivoR/navsim/planning/script/config/common/agent/drivoR.yaml
+  repo_root: /bigdata/aidan/DrivoR
+  checkpoint: /bigdata/aidan/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
+  dino: /bigdata/aidan/DrivoR/weights/vit_small_patch14_reg4_dinov2.lvd142m
+  python_bin: /bigdata/aidan/.home/envs/drivor/bin/python3.8
+  config: /bigdata/aidan/DrivoR/navsim/planning/script/config/common/agent/drivoR.yaml
 
   device: cuda
   image_scale: 0.4
