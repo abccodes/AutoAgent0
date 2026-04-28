@@ -1297,10 +1297,10 @@ def main() -> int:
                         }
                         
                     else:
-                        front_image = obs.get("rgb", {}).get("CAM_FRONT") if isinstance(obs, dict) else None
+                        camera_images = obs.get("rgb", {}) if isinstance(obs, dict) else {}
                         selection_result = vlm_selector.maybe_select(
                             frame_index=frame_index,
-                            front_image=front_image,
+                            camera_images=camera_images,
                             info=info,
                             candidate_rows=candidate_rows,
                             default_selected_index=default_selected_index,

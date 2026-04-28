@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 4 ]]; then
-    echo "usage: $0 <planner:{rap|rap_vlm}> [scenario_yaml] [sim_cuda|inherit] [ad_cuda|inherit]" >&2
+    echo "usage: $0 <planner:{rap|rap_vlm|drivor|drivor_vlm}> [scenario_yaml] [sim_cuda|inherit] [ad_cuda|inherit]" >&2
     exit 2
 fi
 
@@ -19,6 +19,19 @@ CAMERA_PATH="${CAMERA_PATH:-configs/sim/nuscenes_camera.yaml}"
 KINEMATIC_PATH="${KINEMATIC_PATH:-configs/sim/kinematic.yaml}"
 PLANNER_PATH="${PLANNER_PATH:-configs/planners/${PLANNER_NAME}.yaml}"
 HUGSIM_PYTHON_BIN="${HUGSIM_PYTHON_BIN:-/bigdata/jason/drivor_evaluation/HUGSIM/.pixi/envs/default/bin/python}"
+
+case "${PLANNER_NAME}" in
+    drivor|drivor_vlm)
+        AD_NAME="drivor"
+        ;;
+    rap|rap_vlm)
+        AD_NAME="rap"
+        ;;
+    *)
+        echo "unsupported planner: ${PLANNER_NAME}" >&2
+        exit 2
+        ;;
+esac
 
 if [[ ! -f "${SCENARIO_PATH}" ]]; then
     echo "missing scenario config: ${SCENARIO_PATH}" >&2
@@ -49,6 +62,7 @@ if [[ -d "${TORCH_LIB_DIR}" ]]; then
 fi
 
 echo "planner=${PLANNER_NAME}"
+echo "ad=${AD_NAME}"
 echo "scenario=${SCENARIO_PATH}"
 echo "base=${BASE_PATH}"
 echo "planner_config=${PLANNER_PATH}"
@@ -62,7 +76,7 @@ if [[ "${SIM_CUDA}" == "inherit" ]]; then
         --camera_path "${CAMERA_PATH}" \
         --kinematic_path "${KINEMATIC_PATH}" \
         --planner_path "${PLANNER_PATH}" \
-        --ad rap \
+        --ad "${AD_NAME}" \
         --ad_cuda "${AD_CUDA}"
 else
     CUDA_VISIBLE_DEVICES="${SIM_CUDA}" \
@@ -72,6 +86,6 @@ else
         --camera_path "${CAMERA_PATH}" \
         --kinematic_path "${KINEMATIC_PATH}" \
         --planner_path "${PLANNER_PATH}" \
-        --ad rap \
+        --ad "${AD_NAME}" \
         --ad_cuda "${AD_CUDA}"
 fi

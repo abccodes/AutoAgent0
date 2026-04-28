@@ -57,22 +57,23 @@ def _slugify_model_name(value, default='model'):
 
 
 def _resolve_output_model_slug(ad_name, planner_config):
-    if ad_name != 'rap':
+    planner_key = 'rap' if ad_name == 'rap' else 'drivor' if ad_name == 'drivor' else ''
+    if not planner_key:
         return ''
 
-    rap_cfg = planner_config.get('rap', {})
-    vlm_cfg = rap_cfg.get('vlm', {})
+    planner_cfg = planner_config.get(planner_key, {})
+    vlm_cfg = planner_cfg.get('vlm', {})
     if vlm_cfg.get('enabled', False):
         explicit_slug = vlm_cfg.get('output_model_slug', '')
         if explicit_slug:
             return _slugify_model_name(explicit_slug)
         return _slugify_model_name(vlm_cfg.get('model_id', 'vlm'))
 
-    explicit_slug = rap_cfg.get('output_model_slug', '')
+    explicit_slug = planner_cfg.get('output_model_slug', '')
     if explicit_slug:
         return _slugify_model_name(explicit_slug)
-    checkpoint = rap_cfg.get('checkpoint', '')
-    return _slugify_model_name(checkpoint, default='rap')
+    checkpoint = planner_cfg.get('checkpoint', '')
+    return _slugify_model_name(checkpoint, default=planner_key)
 
 
 def _prefix_output_dir_with_model(output_dir, model_slug):
@@ -646,6 +647,8 @@ if __name__ == "__main__":
     planner_output_suffix = args.ad
     if args.ad == 'rap' and planner_config.get('rap', {}).get('vlm', {}).get('enabled', False):
         planner_output_suffix = planner_config.get('rap', {}).get('output_suffix', 'rap_vlm')
+    if args.ad == 'drivor' and planner_config.get('drivor', {}).get('vlm', {}).get('enabled', False):
+        planner_output_suffix = planner_config.get('drivor', {}).get('output_suffix', 'drivor_vlm')
     output_model_slug = _resolve_output_model_slug(args.ad, planner_config)
     cfg.base.output_dir = _prefix_output_dir_with_model(cfg.base.output_dir, output_model_slug)
     cfg.base.output_dir = cfg.base.output_dir + planner_output_suffix

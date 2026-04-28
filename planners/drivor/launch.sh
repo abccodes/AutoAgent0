@@ -25,6 +25,13 @@ fi
 
 export PYTHONPATH="${HUGSIM_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
+# Ensure the DrivoR env's torch CUDA libs resolve before system/HUGSIM copies.
+DRIVOR_ENV_ROOT="$(cd "$(dirname "${DRIVOR_PYTHON_BIN}")/.." && pwd)"
+DRIVOR_TORCH_LIB_DIR="${DRIVOR_ENV_ROOT}/lib/python3.8/site-packages/torch/lib"
+if [[ -d "${DRIVOR_TORCH_LIB_DIR}" ]]; then
+  export LD_LIBRARY_PATH="${DRIVOR_TORCH_LIB_DIR}:${DRIVOR_ENV_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
 # Prevent the DrivoR env from accidentally loading HUGSIM pixi torch libs.
 if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
   CLEANED_LD_LIBRARY_PATH="$(python3 - <<'PY'
@@ -40,5 +47,7 @@ PY
     unset LD_LIBRARY_PATH
   fi
 fi
+
+cd "${DRIVOR_REPO_ROOT}"
 
 exec "${DRIVOR_PYTHON_BIN}" "${SCRIPT_DIR}/client.py" --output "${OUTPUT_DIR}"

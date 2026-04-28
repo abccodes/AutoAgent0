@@ -1,0 +1,70 @@
+#!/bin/bash
+#SBATCH --job-name=hugsim-single
+#SBATCH --output=/bigdata/aidan/outputs/slurm/%x-%j.out
+#SBATCH --partition=gpu02
+#SBATCH --gres=gpu:1
+#SBATCH --ntasks-per-node=1
+#SBATCH --time=02:00:00
+
+set -euo pipefail
+
+REPO_ROOT="${REPO_ROOT:-/bigdata/aidan/HUGSIM}"
+PLANNER_NAME="${PLANNER_NAME:-rap}"
+SCENARIO_PATH="${SCENARIO_PATH:-configs/benchmark/nuscenes/scene-0383-easy-00.yaml}"
+BASE_PATH="${BASE_PATH:-configs/sim/nuscenes_base_local.yaml}"
+SIM_CUDA="${SIM_CUDA:-inherit}"
+AD_CUDA="${AD_CUDA:-inherit}"
+SETUP_VLM_ENV="${SETUP_VLM_ENV:-0}"
+RAP_DEVICE_OVERRIDE="${RAP_DEVICE_OVERRIDE:-}"
+DRIVOR_DEVICE_OVERRIDE="${DRIVOR_DEVICE_OVERRIDE:-}"
+PLANNER_VLM_DEVICE_OVERRIDE="${PLANNER_VLM_DEVICE_OVERRIDE:-}"
+
+mkdir -p /bigdata/aidan/outputs/slurm
+mkdir -p /bigdata/aidan/.cache /bigdata/aidan/.cache/matplotlib /bigdata/aidan/.home
+
+export HOME="/bigdata/aidan/.home"
+export XDG_CACHE_HOME="/bigdata/aidan/.cache"
+export MPLCONFIGDIR="/bigdata/aidan/.cache/matplotlib"
+export PYTHONUNBUFFERED=1
+
+cd "${REPO_ROOT}"
+
+echo "job_id=${SLURM_JOB_ID:-none}"
+echo "node=${SLURMD_NODENAME:-unknown}"
+echo "planner=${PLANNER_NAME}"
+echo "scenario=${SCENARIO_PATH}"
+echo "base=${BASE_PATH}"
+echo "sim_cuda=${SIM_CUDA}"
+echo "ad_cuda=${AD_CUDA}"
+echo "cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
+echo "home=${HOME}"
+echo "xdg_cache_home=${XDG_CACHE_HOME}"
+echo "mplconfigdir=${MPLCONFIGDIR}"
+
+if [[ "${CUDA_VISIBLE_DEVICES:-}" == *,* ]]; then
+    case "${PLANNER_NAME}" in
+        rap_vlm)
+            RAP_DEVICE_OVERRIDE="${RAP_DEVICE_OVERRIDE:-cuda:0}"
+            PLANNER_VLM_DEVICE_OVERRIDE="${PLANNER_VLM_DEVICE_OVERRIDE:-cuda:1}"
+            ;;
+        drivor_vlm)
+            DRIVOR_DEVICE_OVERRIDE="${DRIVOR_DEVICE_OVERRIDE:-cuda:0}"
+            PLANNER_VLM_DEVICE_OVERRIDE="${PLANNER_VLM_DEVICE_OVERRIDE:-cuda:1}"
+            ;;
+    esac
+fi
+
+echo "rap_device_override=${RAP_DEVICE_OVERRIDE:-unset}"
+echo "drivor_device_override=${DRIVOR_DEVICE_OVERRIDE:-unset}"
+echo "planner_vlm_device_override=${PLANNER_VLM_DEVICE_OVERRIDE:-unset}"
+
+if [[ "${SETUP_VLM_ENV}" == "1" && "${PLANNER_NAME}" == "rap_vlm" ]]; then
+    bash scripts/setup_vlm_env.sh
+fi
+
+export RAP_DEVICE_OVERRIDE
+export DRIVOR_DEVICE_OVERRIDE
+export PLANNER_VLM_DEVICE_OVERRIDE
+
+BASE_PATH="${BASE_PATH}" \
+bash scripts/run_single_nuscenes_scene.sh "${PLANNER_NAME}" "${SCENARIO_PATH}" "${SIM_CUDA}" "${AD_CUDA}"
