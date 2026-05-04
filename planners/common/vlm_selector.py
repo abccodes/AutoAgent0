@@ -477,49 +477,45 @@ def build_scoring_prompt(
     return f"""
 You are an autonomous-driving trajectory scorer performing the final action-selection stage.
 
-You are given:
-1. {camera_line_1}
-2. {camera_line_2}
-3. Structured candidate trajectory metadata.
-4. A high-level driving directive that must be taken seriously when scoring the candidates.
-5. Optionally, advisory short-horizon corrective context from a separate reflective intervention stage.
+Inputs:
+- Visual context: {camera_line_1}
+- Camera interpretation: {camera_line_2}
+- Route objective: "{route_instruction}"
+- Candidate trajectories: structured metadata for {len(candidate_rows)} candidates
+- Optional advisory corrective context from a separate self-reflective intervention stage
 
-Your job:
-- Score EVERY candidate trajectory with a scalar Q-like value.
-- Identify the single best candidate based on the highest generated Q-value.
-- There are exactly {len(candidate_rows)} candidates in this frame.
-- You MUST return one score for every candidate index: {candidate_index_list}.
-- Do not omit any candidate index.
-- Do not shorten the score dictionary to a partial example.
-- Keep score scale internally consistent within this frame.
-- Keep the response compact.
-- Include a short reasoning string that specifically argues why the selected candidate is the best overall choice in this frame.
-- The reasoning must justify the selected candidate relative to the alternatives using safety, route-following, lane alignment, obstacle avoidance, and motion smoothness.
-- The reasoning should describe why the selected candidate is best, not just restate its index.
+Task:
+- Evaluate every candidate.
+- Choose the single best candidate for the next short-horizon action.
+- Return one scalar score for every candidate index: {candidate_index_list}.
+- Keep the response compact and return only valid JSON.
+
+Reasoning style:
+- Use concise chain-of-causation reasoning rather than scene narration.
+- For the selected candidate, explain:
+  1. the relevant scene evidence,
+  2. the likely consequence of taking that candidate next,
+  3. why that consequence is safer or more route-consistent than the alternatives.
+- Reason about the next short horizon, not the full mission.
+
+Scoring principles:
+- Higher scores are better.
+- Prefer candidates that stay drivable, lane-aligned, smooth, and realistic.
+- Avoid nearby vehicles, obstacles, sidewalk/off-road behavior, wrong-way behavior, and unsafe lane departures.
+- Maintain safe forward progress when possible.
+- Follow the route instruction directly when safe:
+  - if the instruction is straight, prefer continuing in the current lane/direction instead of drifting left or right,
+  - if the instruction is left or right, prefer candidates that clearly begin that turn direction when safe,
+  - do not deviate from the instructed direction unless safety, obstacles, or road geometry clearly require it.
+- Respect lane rules and avoid unnecessary lane changes.
+- If all candidates are imperfect, prefer the least risky one.
 {default_candidate_guidance}
 {corrective_action_guidance}
-- Judge based on the following constraints:
-  - higher scores are better,
-  - staying in the drivable region,
-  - maintaining lane alignment and smoothness,
-  - avoiding nearby vehicles/obstacles,
-  - avoiding sidewalk/off-road/wrong-way behavior,
-  - smooth and realistic motion,
-  - maintaining safe forward progress when possible,
-  - following the route instruction directly and literally when safe,
-    - if the instruction is straight, prefer trajectories that continue in the current lane/direction rather than drifting left or right,
-    - if the instruction is left or right, prefer trajectories that clearly begin that turn direction when it is safe and drivable,
-    - do not deviate from the instructed direction unless obstacles, lane geometry, or safety clearly require it,
-  - obeying lane rules,
-    - avoid unnecessary lane changes,
-    - respect lane boundaries and markings such as solid vs dotted lines when they are visible,
-    - only change lanes or cross lane boundaries when required for safety, obstacle avoidance, passing a blocked vehicle in the current lane, or because the road geometry clearly demands it,
-  - penalize trajectories unsafe trajectories.
-    - Use only what is visible in the image and candidate metadata.
-    - If all candidates are imperfect, prefer the least risky one.
 
-High-level driving directive (right,left,or straight):
-{route_instruction}
+Important:
+- The route objective remains the primary instruction.
+- Advisory corrective context is secondary and should help resolve immediate risk, not replace the route objective.
+- If route objective and advisory corrective context differ, reconcile them using the images and candidate metadata instead of blindly following either one.
 
 Candidate trajectories:
 {candidate_text}
@@ -528,7 +524,7 @@ Return ONLY valid JSON in this exact schema:
 {{
   "best_candidate_index": <int>,
   "confidence": <float between 0 and 1>,
-  "reasoning": "<short explanation for why this selected candidate is best>",
+  "reasoning": "<short causal explanation for why this selected candidate is best>",
   "candidate_scores": {{
 {score_schema_lines}
   }},
@@ -552,46 +548,48 @@ def build_intervention_prompt(
 - Because only the front image contains the overlaid trajectory, judge where the path goes from the front view and use the other views only to decide whether surrounding context makes intervention necessary.
 """.strip()
     return f"""
-You are an autonomous-driving self-reflective safety monitor deciding whether the current planned action should be revised before execution.
+You are an autonomous-driving self-reflective intervention module deciding whether the current baseline action should be revised before execution.
 
-You are given:
-1. {camera_line_1}
-2. {camera_line_2}
-3. Structured metadata for that same baseline RAP-selected trajectory.
-4. A route-level driving instruction.
+Inputs:
+- Visual context: {camera_line_1}
+- Camera interpretation: {camera_line_2}
+- Route objective: "{route_instruction}"
+- Baseline planned action: the shown baseline trajectory metadata below
 
-Your job:
-- Treat the shown baseline trajectory as a proposed action that may or may not need revision.
-- First reason counterfactually about likely short-horizon consequences if this exact baseline trajectory is executed.
-- Then decide whether the action should be revised before execution.
-- Set "should_intervene" to true when the shown baseline trajectory appears risky, ambiguous, instruction-inconsistent, poorly centered, too close to obstacles or lane boundaries, or likely to benefit from short-horizon correction.
-- Use "should_intervene" = false only when the shown baseline trajectory looks clearly safe, clearly lane-aligned, instruction-consistent, and comfortably clear of nearby conflicts.
-- Intervene when there is a meaningful risk of obstacle collision, unsafe lane departure, wrong-way behavior, sidewalk/off-road encroachment, route mismatch, low-margin clearance, or other visible issue with the shown baseline trajectory.
-- If you are uncertain whether the trajectory safely stays in-lane, clears nearby obstacles, or follows the intended route, prefer "should_intervene" = true.
+Task:
+- Treat the baseline trajectory as a proposed action.
+- Perform counterfactual reasoning about what is likely to happen over the next short horizon if this exact baseline action is executed.
+- Then decide whether revision is needed before execution.
+
+Decision policy:
+- Set "should_intervene" to true when the baseline action appears risky, ambiguous, instruction-inconsistent, poorly centered, too close to obstacles or lane boundaries, or likely to benefit from short-horizon correction.
+- Use "should_intervene" = false only when the baseline action looks clearly safe, lane-aligned, route-consistent, and comfortably clear of nearby conflicts.
+- If you are uncertain whether the baseline action safely stays in-lane, clears nearby obstacles, or follows the intended route, prefer "should_intervene" = true.
 - Because the planner replans frequently, it is acceptable to intervene for borderline or low-margin cases, not only catastrophic ones.
 - In multiview mode, use extra camera views to judge surrounding safety context, not to reinterpret the path geometry shown on the front image.
 {multiview_guidance}
-- If intervention is needed, also provide a single high-level corrective action for the next short-horizon maneuver.
+
+Corrective action:
+- If intervention is needed, provide one short-horizon corrective action.
 - The corrective action must be exactly one of: "left", "right", or "straight".
-- Choose the corrective action that best describes the immediate correction a downstream scorer should consider.
-- Keep the response compact.
-- The reasoning should explicitly describe:
-  - what is likely to happen if the baseline action is executed,
-  - why that outcome is acceptable or not,
-  - and why the corrective action is the best short-horizon revision when intervention is needed.
+- The corrective action is an advisory revision intent for the next maneuver, not a guaranteed final decision.
 
-Route instruction (right,left,or straight):
-{route_instruction}
+Reasoning style:
+- Use concise counterfactual reasoning rather than loose description.
+- Your reasoning should explicitly cover:
+  1. the key scene evidence,
+  2. the likely short-horizon consequence if the baseline action continues,
+  3. whether that consequence is acceptable,
+  4. why the corrective action is the best immediate revision when intervention is needed.
 
-Baseline RAP-selected trajectory:
+Baseline trajectory:
 {candidate_text}
 
 Return ONLY valid JSON in this exact schema:
 {{
   "should_intervene": <true or false>,
   "corrective_action": "<left or right or straight>",
-  "confidence": <float between 0 and 1>,
-  "reasoning": "<short explanation for why intervention is or is not needed>"
+  "reasoning": "<short causal explanation for why intervention is or is not needed>"
 }}
 """.strip()
 
@@ -978,11 +976,13 @@ def _coerce_intervention_decision(
     if raw_flag and corrective_action is None:
         return None, None, None, None, "intervention_corrective_action_missing"
 
-    raw_confidence = parsed.get("confidence", 0.0)
-    try:
-        confidence = float(raw_confidence)
-    except Exception:
-        return None, None, None, None, "intervention_confidence_invalid"
+    confidence = None
+    if "confidence" in parsed and parsed.get("confidence") is not None:
+        raw_confidence = parsed.get("confidence")
+        try:
+            confidence = float(raw_confidence)
+        except Exception:
+            return None, None, None, None, "intervention_confidence_invalid"
 
     reasoning = parsed.get("reasoning")
     if reasoning is not None and not isinstance(reasoning, str):
@@ -1079,18 +1079,27 @@ class VLMPlanSelector:
             with self.timeline_path.open("a", encoding="utf-8") as wf:
                 wf.write(json.dumps(record) + "\n")
 
+    def _normalized_backend(self) -> str:
+        backend = str(self.cfg.backend or "").strip()
+        if backend in {"subprocess_qwen3_vl", "qwen3_vl_subprocess"}:
+            return "local_transformers_subprocess"
+        if backend in {"qwen3_vl", "local_qwen3_vl"}:
+            return "local_transformers"
+        return backend
+
     def _ensure_selector(self) -> Optional[object]:
         if self._selector is not None:
             return self._selector
         if self._disabled_reason is not None:
             return None
-        if self.cfg.backend == "local_transformers":
+        backend = self._normalized_backend()
+        if backend == "local_transformers":
             selector_factory = lambda: Qwen3TrajectorySelector(
                 model_id=self.cfg.model_id,
                 device=self.cfg.device,
                 max_new_tokens=self.cfg.max_new_tokens,
             )
-        elif self.cfg.backend == "local_transformers_subprocess":
+        elif backend == "local_transformers_subprocess":
             selector_factory = lambda: SubprocessQwen3TrajectorySelector(
                 python_bin=self.cfg.python_bin,
                 worker_script=Path(__file__).with_name("vlm_worker.py"),
@@ -1108,8 +1117,9 @@ class VLMPlanSelector:
         try:
             self._selector = selector_factory()
             LOG.info(
-                "Initialized VLM selector backend=%s model=%s device=%s",
+                "Initialized VLM selector backend=%s normalized_backend=%s model=%s device=%s",
                 self.cfg.backend,
+                backend,
                 self.cfg.model_id,
                 getattr(self._selector, "device", self.cfg.device),
             )
@@ -1129,8 +1139,9 @@ class VLMPlanSelector:
         if not callable(preload_fn):
             return
         LOG.info(
-            "Preloading VLM selector backend=%s model=%s timeout=%.3fs",
+            "Preloading VLM selector backend=%s normalized_backend=%s model=%s timeout=%.3fs",
             self.cfg.backend,
+            self._normalized_backend(),
             self.cfg.model_id,
             float(self.cfg.timeout_sec),
         )

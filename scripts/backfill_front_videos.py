@@ -2,12 +2,25 @@
 import argparse
 import os
 import pickle
+import sys
 
 import cv2
+import numpy as np
 from moviepy import ImageSequenceClip
+
+sys.path.append(os.getcwd())
+
+from planners.common.candidate_visuals import get_candidate_visual_style
+from sim.utils.sim_utils import (
+    get_camera_c2w,
+    local_plan_to_front_world,
+    project_world_points_to_image,
+    rt2pose,
+)
 
 
 FRONT_CAM_NAME = "CAM_FRONT"
+PLAN_VIS_FORWARD_OFFSET_M = 4.5
 
 
 def format_overlay_value(value):
@@ -37,15 +50,70 @@ def wrap_text_to_width(text, font, font_scale, thickness, max_width):
 def append_wrapped_text(lines, label, text, font, font_scale, thickness, max_width):
     if text is None:
         return
-    wrapped = wrap_text_to_width(str(text), font, font_scale, thickness, max_width)
+    label_prefix = f"{label}: "
+    label_width = cv2.getTextSize(label_prefix, font, font_scale, thickness)[0][0]
+    first_line_width = max(40, int(max_width) - int(label_width))
+    wrapped = wrap_text_to_width(str(text), font, font_scale, thickness, first_line_width)
     if not wrapped:
         return
-    lines.append(f"{label}: {wrapped[0]}")
+    lines.append(f"{label_prefix}{wrapped[0]}")
     for continuation in wrapped[1:]:
-        lines.append(f"  {continuation}")
+        continuation_prefix = "  "
+        continuation_width = cv2.getTextSize(continuation_prefix, font, font_scale, thickness)[0][0]
+        continuation_max_width = max(40, int(max_width) - int(continuation_width))
+        continuation_wrapped = wrap_text_to_width(
+            continuation,
+            font,
+            font_scale,
+            thickness,
+            continuation_max_width,
+        )
+        for chunk in continuation_wrapped:
+            lines.append(f"{continuation_prefix}{chunk}")
 
 
-def build_front_overlay_lines(frame_idx, frame_debug, run_label):
+def normalize_overlay_source(selected_source):
+    if selected_source is None:
+        return None
+    source = str(selected_source)
+    if "carry_prev" in source:
+        return "carry_prev"
+    if source.startswith("default_fallback_"):
+        return source
+    return "current"
+
+
+def resolve_selected_traj_text(frame_debug):
+    candidate_sources = frame_debug.get("overlay_candidate_sources")
+    if not candidate_sources:
+        candidate_sources = frame_debug.get("candidate_pool_sources")
+    candidate_indices = frame_debug.get("candidate_pool_proposal_indices") or []
+    selected_source = frame_debug.get("selected_source")
+    selected_idx = frame_debug.get("selected_idx")
+    selected_kind = normalize_overlay_source(selected_source)
+    if not candidate_sources:
+        return None
+
+    current_rank = 0
+    for rank, source in enumerate(candidate_sources):
+        source_str = str(source)
+        proposal_index = candidate_indices[rank] if rank < len(candidate_indices) else None
+        is_match = False
+        if selected_kind == "carry_prev":
+            is_match = source_str == "carry_prev"
+        elif selected_kind and selected_kind.startswith("default_fallback_"):
+            is_match = source_str == selected_kind
+        else:
+            is_match = source_str != "carry_prev" and proposal_index == selected_idx
+        if source_str != "carry_prev":
+            current_rank += 1
+        if not is_match:
+            continue
+        return f"#{rank}"
+    return None
+
+
+def build_front_overlay_lines(frame_idx, frame_debug, run_label, max_text_width):
     lines = [
         f"run: {run_label}",
         f"frame: {frame_idx}",
@@ -57,11 +125,12 @@ def build_front_overlay_lines(frame_idx, frame_debug, run_label):
     scoring_route = latency_record.get("scoring_route_instruction")
     if scoring_route is not None:
         lines.append(f"scoring route: {scoring_route}")
+    selected_traj = resolve_selected_traj_text(frame_debug)
+    if selected_traj is not None:
+        lines.append(f"selected traj: {selected_traj}")
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.52
+    font_scale = 0.39
     thickness = 1
-    max_width = 900
-
     uses_vlm = ("vlm" in run_label) or (frame_debug.get("vlm_reasoning") is not None)
     uses_intervention = "intervention" in run_label
 
@@ -81,7 +150,7 @@ def build_front_overlay_lines(frame_idx, frame_debug, run_label):
             font,
             font_scale,
             thickness,
-            max_width,
+            max_text_width,
         )
         append_wrapped_text(
             lines,
@@ -90,7 +159,7 @@ def build_front_overlay_lines(frame_idx, frame_debug, run_label):
             font,
             font_scale,
             thickness,
-            max_width,
+            max_text_width,
         )
     elif uses_vlm:
         adaptive_decision = frame_debug.get("adaptive_replan_decision")
@@ -111,7 +180,7 @@ def build_front_overlay_lines(frame_idx, frame_debug, run_label):
             font,
             font_scale,
             thickness,
-            max_width,
+            max_text_width,
         )
 
     return lines
@@ -123,10 +192,10 @@ def draw_front_overlay_text(frame, lines):
 
     canvas = frame.copy()
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.52
+    font_scale = 0.39
     thickness = 1
-    line_gap = 8
-    padding = 12
+    line_gap = 6
+    padding = 10
     origin_x = 18
     origin_y = 18
 
@@ -168,6 +237,12 @@ def load_rollout_frames(scene_dir):
     return data[0]["frames"]
 
 
+def load_infos(scene_dir):
+    infos_path = os.path.join(scene_dir, "infos.pkl")
+    with open(infos_path, "rb") as handle:
+        return pickle.load(handle)
+
+
 def load_overlay_front_frames(scene_dir):
     overlay_dir = os.path.join(scene_dir, "overlay_front")
     names = sorted(name for name in os.listdir(overlay_dir) if name.endswith(".jpg"))
@@ -181,6 +256,67 @@ def load_overlay_front_frames(scene_dir):
     return frames
 
 
+def draw_candidate_label(image, points_world, intrinsic, front_c2w, label, color):
+    if points_world is None or len(points_world) == 0:
+        return
+    pixels, valid_mask = project_world_points_to_image(points_world, intrinsic, front_c2w)
+    h, w = image.shape[:2]
+    for px, py, valid in reversed(list(zip(pixels[:, 0], pixels[:, 1], valid_mask))):
+        if not valid:
+            continue
+        if 0 <= px < w and 0 <= py < h:
+            cv2.putText(
+                image,
+                str(label),
+                (int(px) + 4, int(py) - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+            return
+
+
+def redraw_candidate_labels(frame_rgb, frame_debug, info):
+    candidate_plans = frame_debug.get("overlay_candidate_plans")
+    origin_pose = frame_debug.get("overlay_plan_origin_pose")
+    if not candidate_plans or origin_pose is None or info is None:
+        return frame_rgb
+
+    overlay = frame_rgb.copy()
+    ego_pose = rt2pose(info["ego_rot"], info["ego_pos"])
+    cam_params = info["cam_params"]
+    intrinsic = cam_params[FRONT_CAM_NAME]["intrinsic"]
+    front_c2w = get_camera_c2w(cam_params, ego_pose, FRONT_CAM_NAME)
+    origin_pose_np = np.asarray(origin_pose, dtype=np.float32)
+    candidate_sources = frame_debug.get("overlay_candidate_sources") or []
+
+    current_rank = 0
+    for rank, candidate_plan in enumerate(candidate_plans):
+        source = candidate_sources[rank] if rank < len(candidate_sources) else "current_rap"
+        style = get_candidate_visual_style(source or "current_rap", current_rank)
+        if source != "carry_prev":
+            current_rank += 1
+        plan_origin_front_c2w = get_camera_c2w(cam_params, origin_pose_np, FRONT_CAM_NAME)
+        plan_world_line = local_plan_to_front_world(
+            candidate_plan,
+            plan_origin_front_c2w,
+            cam_params[FRONT_CAM_NAME]["v2c"],
+            include_origin=True,
+            forward_offset=PLAN_VIS_FORWARD_OFFSET_M,
+        )
+        draw_candidate_label(
+            overlay,
+            plan_world_line,
+            intrinsic,
+            front_c2w,
+            rank,
+            style.color_bgr,
+        )
+    return overlay
+
+
 def render_front_video(scene_dir, run_label, overwrite=False):
     output_path = os.path.join(scene_dir, "front.mp4")
     if os.path.exists(output_path) and not overwrite:
@@ -188,10 +324,12 @@ def render_front_video(scene_dir, run_label, overwrite=False):
 
     data_path = os.path.join(scene_dir, "data.pkl")
     overlay_dir = os.path.join(scene_dir, "overlay_front")
-    if not os.path.exists(data_path) or not os.path.isdir(overlay_dir):
+    infos_path = os.path.join(scene_dir, "infos.pkl")
+    if not os.path.exists(data_path) or not os.path.exists(infos_path) or not os.path.isdir(overlay_dir):
         return "skip_missing_inputs"
 
     rollout_frames = load_rollout_frames(scene_dir)
+    infos = load_infos(scene_dir)
     front_frames = load_overlay_front_frames(scene_dir)
     if not front_frames:
         return "skip_no_frames"
@@ -201,7 +339,10 @@ def render_front_video(scene_dir, run_label, overwrite=False):
         frame_debug = {}
         if frame_idx < len(rollout_frames):
             frame_debug = rollout_frames[frame_idx].get("planner_debug", {}) or {}
-        lines = build_front_overlay_lines(frame_idx, frame_debug, run_label)
+        info = infos[frame_idx] if frame_idx < len(infos) else None
+        frame = redraw_candidate_labels(frame, frame_debug, info)
+        max_text_width = max(160, int(frame.shape[1]) - 18 - 10 - 18 - 10)
+        lines = build_front_overlay_lines(frame_idx, frame_debug, run_label, max_text_width)
         rendered.append(draw_front_overlay_text(frame, lines))
 
     clip = ImageSequenceClip(rendered, fps=4)

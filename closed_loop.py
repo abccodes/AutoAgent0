@@ -163,15 +163,70 @@ def _wrap_text_to_width(text, font, font_scale, thickness, max_width):
 def _append_wrapped_text(lines, label, text, font, font_scale, thickness, max_width):
     if text is None:
         return
-    wrapped = _wrap_text_to_width(str(text), font, font_scale, thickness, max_width)
+    label_prefix = f"{label}: "
+    label_width = cv2.getTextSize(label_prefix, font, font_scale, thickness)[0][0]
+    first_line_width = max(40, int(max_width) - int(label_width))
+    wrapped = _wrap_text_to_width(str(text), font, font_scale, thickness, first_line_width)
     if not wrapped:
         return
-    lines.append(f"{label}: {wrapped[0]}")
+    lines.append(f"{label_prefix}{wrapped[0]}")
     for continuation in wrapped[1:]:
-        lines.append(f"  {continuation}")
+        continuation_prefix = "  "
+        continuation_width = cv2.getTextSize(continuation_prefix, font, font_scale, thickness)[0][0]
+        continuation_max_width = max(40, int(max_width) - int(continuation_width))
+        continuation_wrapped = _wrap_text_to_width(
+            continuation,
+            font,
+            font_scale,
+            thickness,
+            continuation_max_width,
+        )
+        for chunk in continuation_wrapped:
+            lines.append(f"{continuation_prefix}{chunk}")
 
 
-def _build_front_overlay_lines(frame_idx, frame_debug, run_label):
+def _normalize_overlay_source(selected_source):
+    if selected_source is None:
+        return None
+    source = str(selected_source)
+    if "carry_prev" in source:
+        return "carry_prev"
+    if source.startswith("default_fallback_"):
+        return source
+    return "current"
+
+
+def _resolve_selected_traj_text(frame_debug):
+    candidate_sources = frame_debug.get("overlay_candidate_sources")
+    if not candidate_sources:
+        candidate_sources = frame_debug.get("candidate_pool_sources")
+    candidate_indices = frame_debug.get("candidate_pool_proposal_indices") or []
+    selected_source = frame_debug.get("selected_source")
+    selected_idx = frame_debug.get("selected_idx")
+    selected_kind = _normalize_overlay_source(selected_source)
+    if not candidate_sources:
+        return None
+
+    current_rank = 0
+    for rank, source in enumerate(candidate_sources):
+        source_str = str(source)
+        proposal_index = candidate_indices[rank] if rank < len(candidate_indices) else None
+        is_match = False
+        if selected_kind == "carry_prev":
+            is_match = source_str == "carry_prev"
+        elif selected_kind and selected_kind.startswith("default_fallback_"):
+            is_match = source_str == selected_kind
+        else:
+            is_match = source_str != "carry_prev" and proposal_index == selected_idx
+        if source_str != "carry_prev":
+            current_rank += 1
+        if not is_match:
+            continue
+        return f"#{rank}"
+    return None
+
+
+def _build_front_overlay_lines(frame_idx, frame_debug, run_label, max_text_width):
     lines = [
         f"run: {run_label}",
         f"frame: {frame_idx}",
@@ -183,11 +238,12 @@ def _build_front_overlay_lines(frame_idx, frame_debug, run_label):
     scoring_route = latency_record.get("scoring_route_instruction")
     if scoring_route is not None:
         lines.append(f"scoring route: {scoring_route}")
+    selected_traj = _resolve_selected_traj_text(frame_debug)
+    if selected_traj is not None:
+        lines.append(f"selected traj: {selected_traj}")
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.52
+    font_scale = 0.39
     thickness = 1
-    max_width = 900
-
     uses_vlm = ("vlm" in run_label) or (frame_debug.get("vlm_reasoning") is not None)
     uses_intervention = "intervention" in run_label
 
@@ -207,7 +263,7 @@ def _build_front_overlay_lines(frame_idx, frame_debug, run_label):
             font,
             font_scale,
             thickness,
-            max_width,
+            max_text_width,
         )
         _append_wrapped_text(
             lines,
@@ -216,7 +272,7 @@ def _build_front_overlay_lines(frame_idx, frame_debug, run_label):
             font,
             font_scale,
             thickness,
-            max_width,
+            max_text_width,
         )
     elif uses_vlm:
         adaptive_decision = frame_debug.get("adaptive_replan_decision")
@@ -237,7 +293,7 @@ def _build_front_overlay_lines(frame_idx, frame_debug, run_label):
             font,
             font_scale,
             thickness,
-            max_width,
+            max_text_width,
         )
 
     return lines
@@ -249,10 +305,10 @@ def _draw_front_overlay_text(frame, lines):
 
     canvas = frame.copy()
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.52
+    font_scale = 0.39
     thickness = 1
-    line_gap = 8
-    padding = 12
+    line_gap = 6
+    padding = 10
     origin_x = 18
     origin_y = 18
 
@@ -297,7 +353,8 @@ def to_front_video(observations, rollout_frames, output_path, run_label):
         frame_debug = {}
         if frame_idx < len(rollout_frames):
             frame_debug = rollout_frames[frame_idx].get("planner_debug", {}) or {}
-        lines = _build_front_overlay_lines(frame_idx, frame_debug, run_label)
+        max_text_width = max(160, int(front.shape[1]) - 18 - 10 - 18 - 10)
+        lines = _build_front_overlay_lines(frame_idx, frame_debug, run_label, max_text_width)
         frames.append(_draw_front_overlay_text(front, lines))
 
     clip = ImageSequenceClip(frames, fps=4)
@@ -398,6 +455,29 @@ def _draw_first_visible_segment_marker(image, pixels, valid_mask, color, radius=
         return
 
 
+def _draw_candidate_label(image, points_world, intrinsic, front_c2w, label, color):
+    if points_world is None or len(points_world) == 0:
+        return
+
+    pixels, valid_mask = project_world_points_to_image(points_world, intrinsic, front_c2w)
+    h, w = image.shape[:2]
+    for px, py, valid in reversed(list(zip(pixels[:, 0], pixels[:, 1], valid_mask))):
+        if not valid:
+            continue
+        if 0 <= px < w and 0 <= py < h:
+            cv2.putText(
+                image,
+                str(label),
+                (int(px) + 4, int(py) - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+            return
+
+
 def _count_in_frame(pixels, valid_mask, image_shape):
     h, w = image_shape[:2]
     if len(pixels) == 0:
@@ -461,7 +541,7 @@ def _render_front_overlay(front_image, current_obs, current_info, env, plan_traj
     draw_projected_polyline(overlay, ref_pixels, ref_valid, color=REFERENCE_COLOR, thickness=4)
     _draw_projected_points(overlay, ref_pixels, ref_valid, color=REFERENCE_COLOR, radius=4)
 
-    def draw_candidate(candidate_plan, color, thickness):
+    def draw_candidate(candidate_plan, color, thickness, label=None):
         if candidate_plan is None or len(candidate_plan) == 0 or plan_origin_pose is None:
             return
         plan_local = np.asarray(candidate_plan, dtype=np.float32)
@@ -487,6 +567,15 @@ def _render_front_overlay(front_image, current_obs, current_info, env, plan_traj
             color=color,
             thickness=thickness,
         )
+        if label is not None:
+            _draw_candidate_label(
+                overlay,
+                plan_world_dense,
+                intrinsic,
+                front_c2w,
+                label,
+                color,
+            )
 
     candidate_plans = current_info.get('overlay_candidate_plans')
     candidate_sources = current_info.get('overlay_candidate_sources')
@@ -498,9 +587,9 @@ def _render_front_overlay(front_image, current_obs, current_info, env, plan_traj
             base_color = style.color_bgr
             if source != 'carry_prev':
                 current_rank += 1
-            draw_candidate(candidate_plan, base_color, 4 if rank == 0 else 2)
+            draw_candidate(candidate_plan, base_color, 4 if rank == 0 else 2, label=rank)
     elif plan_traj is not None and len(plan_traj) > 0:
-        draw_candidate(plan_traj, PLAN_COLOR, 4)
+        draw_candidate(plan_traj, PLAN_COLOR, 4, label=0)
 
     return overlay
 
@@ -756,6 +845,16 @@ def create_gym_env(cfg, output, run_label):
                     'vlm_failed': current_vlm_failed,
                     'overlay_plan_held': bool(overlay_plan_held),
                     'overlay_plan_stale_frames': int(last_valid_overlay_plan_stale_frames),
+                    'overlay_candidate_plans': None if current_candidate_pool_plans is None else [
+                        np.asarray(plan, dtype=np.float32).tolist()
+                        for plan in current_candidate_pool_plans
+                    ],
+                    'overlay_candidate_sources': None if current_candidate_pool_sources is None else [
+                        str(source) for source in current_candidate_pool_sources
+                    ],
+                    'overlay_plan_origin_pose': None if overlay_plan_origin_pose is None else (
+                        np.asarray(overlay_plan_origin_pose, dtype=np.float32).tolist()
+                    ),
                 },
                 'collision': current_info.get('collision', False),
                 'rc': current_rc

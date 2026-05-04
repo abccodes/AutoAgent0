@@ -16,7 +16,7 @@ drivor:
     camera_mode: front_only
     intervention_camera_mode: front_only
     scoring_camera_mode: front_only
-    backend: subprocess_qwen3_vl
+    backend: local_transformers_subprocess
     model_id: Qwen/Qwen3-VL-8B-Instruct
     output_model_slug: qwen3-vl-8b-instruct
     device: auto
@@ -24,8 +24,8 @@ drivor:
     max_new_tokens: 300
     intervention_max_new_tokens: 120
     candidate_limit: 5
-    timeout_sec: 10.0
-    intervention_timeout_sec: 10.0
+    timeout_sec: 180.0
+    intervention_timeout_sec: 180.0
     save_debug_artifacts: true
     debug_dir_name: vlm_debug
     carry_previous_enabled: true

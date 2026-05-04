@@ -100,7 +100,7 @@ MAP_HUGSIM_TO_DRIVOR = {
 # history frames used to build AgentInput (DrivoR config often expects 4)
 EGO_HISTORY_FRAMES = 4
 
-TOPK = 8
+TOPK = 10
 
 PLAN_DT_SEC = 0.5
 
@@ -706,14 +706,14 @@ def extract_proposals_and_scores_from_predictions(
         proposals: np.ndarray of shape [P, T, 3] (proposals, timesteps, xyz with padded heading)
         scores: np.ndarray of shape [P] (proposal scores)
     """
-    # Find trajectory tensor (try multiple keys)
+    # Prefer the full proposal set over the already-selected single trajectory.
     traj = None
     scores = None
-    for key in ["trajectory", "proposals", "proposals_traj", "trajectories"]:
+    for key in ["proposals", "proposals_traj", "trajectories", "trajectory"]:
         if key in predictions:
             traj = predictions[key]
             break
-    for key in ["score", "scores", "prob", "logits"]:
+    for key in ["pdm_score", "score", "scores", "prob", "logits"]:
         if key in predictions:
             scores = predictions[key]
             break
@@ -747,6 +747,9 @@ def extract_proposals_and_scores_from_predictions(
             scores_np = scores_np[0]  # [B, P] -> [P]
     else:
         scores_np = np.zeros(len(traj_np), dtype=np.float32)
+
+    if scores_np.ndim != 1:
+        scores_np = np.asarray(scores_np).reshape(-1)
 
     return traj_np, scores_np
 
@@ -795,7 +798,8 @@ def build_drivor_candidate_rows(
     # [PLACEHOLDER] vlm_cfg.candidate_limit may need to be added to VLMSelectorConfig if not present
     # For now, fallback to a sensible default if missing
     candidate_limit = getattr(vlm_cfg, "candidate_limit", 8)
-    current_candidate_limit = max(1, int(candidate_limit) - 1)
+    carry_slot_count = 1 if carry_candidate is not None else 0
+    current_candidate_limit = max(1, int(candidate_limit) - carry_slot_count)
     current_candidate_limit = min(current_candidate_limit, int(len(sorted_indices)))
     candidate_indices = sorted_indices[:current_candidate_limit]
 
