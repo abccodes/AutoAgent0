@@ -61,6 +61,18 @@ if [[ -d "${TORCH_LIB_DIR}" ]]; then
     export LD_LIBRARY_PATH="${TORCH_LIB_DIR}:${HUGSIM_ENV_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
 
+# Some CUDA wheel dependencies ship shared libraries outside torch/lib.
+# Include those packaged NVIDIA library directories so tinycudann can resolve
+# libnvrtc and related CUDA runtime libs on nodes without system CUDA paths.
+for extra_lib_dir in \
+    "${HUGSIM_ENV_ROOT}"/lib/python*/site-packages/nvidia/*/lib \
+    /bigdata/aidan/.home/envs/vlm/lib/python*/site-packages/nvidia/*/lib
+do
+    if [[ -d "${extra_lib_dir}" ]]; then
+        export LD_LIBRARY_PATH="${extra_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    fi
+done
+
 echo "planner=${PLANNER_NAME}"
 echo "ad=${AD_NAME}"
 echo "scenario=${SCENARIO_PATH}"
@@ -68,6 +80,7 @@ echo "base=${BASE_PATH}"
 echo "planner_config=${PLANNER_PATH}"
 echo "hugsim_python=${HUGSIM_PYTHON_BIN}"
 echo "sim_cuda=${SIM_CUDA} ad_cuda=${AD_CUDA}"
+echo "ld_library_path=${LD_LIBRARY_PATH:-unset}"
 
 if [[ "${SIM_CUDA}" == "inherit" ]]; then
     "${HUGSIM_PYTHON_BIN}" closed_loop.py \

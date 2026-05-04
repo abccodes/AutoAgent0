@@ -27,7 +27,7 @@ rap:
     python_bin: /bigdata/aidan/.home/envs/vlm/bin/python
     max_new_tokens: 300
     candidate_limit: 5
-    timeout_sec: 30.0
+    timeout_sec: 300.0
     save_debug_artifacts: true
     debug_dir_name: vlm_debug
     carry_previous_enabled: true

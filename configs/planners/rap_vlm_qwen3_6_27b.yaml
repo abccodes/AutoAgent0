@@ -1,5 +1,4 @@
 rap:
-  output_suffix: rap_intervention_vlm_4_cam
   launch_path: ./planners/rap/launch.sh
   repo_root: /bigdata/aidan/RAP
   checkpoint: /bigdata/aidan/models/RAP_ckpts/RAP_DINO_navsimv2.ckpt
@@ -7,8 +6,8 @@ rap:
   device: cuda
   image_scale: 0.4
   use_scene_rig_lidar2img: true
-  hf_hub_offline: true
-  transformers_offline: true
+  hf_hub_offline: false
+  transformers_offline: false
   hf_home: /bigdata/aidan/models/hf
   hf_hub_cache: /bigdata/aidan/models/hf/hub
   transformers_cache: /bigdata/aidan/models/hf/hub
@@ -17,20 +16,18 @@ rap:
 
   vlm:
     enabled: true
-    intervention_enabled: true
-    camera_mode: front_only
-    intervention_camera_mode: multiview
-    scoring_camera_mode: front_only
     backend: local_transformers_subprocess
-    model_id: Qwen/Qwen3-VL-8B-Instruct
-    output_model_slug: qwen3-vl-8b-instruct
+    model_id: Qwen/Qwen3.6-27B
+    output_model_slug: qwen3-6-27b
     device: auto
     python_bin: /bigdata/aidan/.home/envs/vlm/bin/python
     max_new_tokens: 300
-    intervention_max_new_tokens: 120
+    temperature: 0.7
+    top_p: 0.8
+    top_k: 20
+    enable_thinking: false
     candidate_limit: 10
     timeout_sec: 300.0
-    intervention_timeout_sec: 300.0
     save_debug_artifacts: true
     debug_dir_name: vlm_debug
     carry_previous_enabled: true

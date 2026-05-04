@@ -793,6 +793,7 @@ def main() -> int:
     plan_pipe = cfg.output_dir / "plan_pipe"
     info_history: deque[Dict[str, object]] = deque(maxlen=EGO_HISTORY_FRAMES)
     vlm_selector = VLMPlanSelector(cfg.vlm, cfg.output_dir)
+    vlm_selector.preload()
     frame_index = 0
     previous_selected_plan: Optional[np.ndarray] = None
     previous_selected_pose: Optional[np.ndarray] = None

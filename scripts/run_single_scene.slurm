@@ -41,24 +41,40 @@ echo "home=${HOME}"
 echo "xdg_cache_home=${XDG_CACHE_HOME}"
 echo "mplconfigdir=${MPLCONFIGDIR}"
 
-if [[ "${CUDA_VISIBLE_DEVICES:-}" == *,* ]]; then
-    case "${PLANNER_NAME}" in
-        rap_vlm)
+case "${PLANNER_NAME}" in
+    rap_vlm)
+        if [[ "${CUDA_VISIBLE_DEVICES:-}" == *,* ]]; then
             RAP_DEVICE_OVERRIDE="${RAP_DEVICE_OVERRIDE:-cuda:0}"
             PLANNER_VLM_DEVICE_OVERRIDE="${PLANNER_VLM_DEVICE_OVERRIDE:-cuda:1}"
-            ;;
-        drivor_vlm)
+        else
+            RAP_DEVICE_OVERRIDE="${RAP_DEVICE_OVERRIDE:-cuda:0}"
+            if [[ "${MODEL_ID:-}" == *"Qwen/Qwen3.6-"* ]]; then
+                PLANNER_VLM_DEVICE_OVERRIDE="${PLANNER_VLM_DEVICE_OVERRIDE:-auto}"
+            else
+                PLANNER_VLM_DEVICE_OVERRIDE="${PLANNER_VLM_DEVICE_OVERRIDE:-cuda:0}"
+            fi
+        fi
+        ;;
+    drivor_vlm)
+        if [[ "${CUDA_VISIBLE_DEVICES:-}" == *,* ]]; then
             DRIVOR_DEVICE_OVERRIDE="${DRIVOR_DEVICE_OVERRIDE:-cuda:0}"
             PLANNER_VLM_DEVICE_OVERRIDE="${PLANNER_VLM_DEVICE_OVERRIDE:-cuda:1}"
-            ;;
-    esac
-fi
+        else
+            DRIVOR_DEVICE_OVERRIDE="${DRIVOR_DEVICE_OVERRIDE:-cuda:0}"
+            PLANNER_VLM_DEVICE_OVERRIDE="${PLANNER_VLM_DEVICE_OVERRIDE:-cuda:0}"
+        fi
+        ;;
+esac
 
 echo "rap_device_override=${RAP_DEVICE_OVERRIDE:-unset}"
 echo "drivor_device_override=${DRIVOR_DEVICE_OVERRIDE:-unset}"
 echo "planner_vlm_device_override=${PLANNER_VLM_DEVICE_OVERRIDE:-unset}"
 
 if [[ "${SETUP_VLM_ENV}" == "1" && "${PLANNER_NAME}" == "rap_vlm" ]]; then
+    if [[ "${MODEL_ID:-}" == *"Qwen/Qwen3.6-"* ]]; then
+        export VLM_ENV_DIR="${VLM_ENV_DIR:-/tmp/hugsim-vlm-env-${SLURM_JOB_ID:-manual}}"
+        echo "vlm_env_dir=${VLM_ENV_DIR}"
+    fi
     bash scripts/setup_vlm_env.sh
 fi
 

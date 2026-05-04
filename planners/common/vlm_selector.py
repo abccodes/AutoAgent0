@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import re
+import select
 import subprocess
 import time
 from dataclasses import dataclass
@@ -50,6 +51,7 @@ class VLMSelectorConfig:
     intervention_max_new_tokens: int = 120
     timeout_sec: float = 10.0
     intervention_timeout_sec: float = 10.0
+    preload_on_init: bool = True
     save_debug_artifacts: bool = True
     debug_dir_name: str = "vlm_debug"
     carry_previous_enabled: bool = True
@@ -437,6 +439,7 @@ def resolve_stage_camera_order(cfg: VLMSelectorConfig, stage: str) -> Tuple[str,
 def build_scoring_prompt(
     candidate_rows: Sequence[Dict[str, object]],
     route_instruction: str,
+    intervention_corrective_action: Optional[str] = None,
     current_ego_speed_mps: Optional[float] = None,
     current_ego_accel_mps2: Optional[float] = None,
     camera_order: Sequence[str] = ("CAM_FRONT",),
@@ -463,14 +466,23 @@ def build_scoring_prompt(
 - Favor candidates that preserve reasonable forward progress and momentum when it is safe to do so.
 - Do not prefer unnecessary slowing or hesitation if a safe straight or lane-return trajectory can keep the vehicle moving correctly for the next 0.5 seconds.
 """.strip()
+    corrective_action_guidance = ""
+    if intervention_corrective_action is not None:
+        corrective_action_guidance = f"""
+- A separate intervention gate suggested this short-horizon corrective action: "{intervention_corrective_action}".
+- Treat that corrective action as advisory context about the immediate correction, not as a replacement for the route instruction.
+- You should still score candidates against the original route instruction and the visible scene.
+- The corrective action and the route instruction may differ; use the images and candidate metadata to decide what is best in this frame.
+""".strip()
     return f"""
-You are an autonomous-driving trajectory scorer.
+You are an autonomous-driving trajectory scorer performing the final action-selection stage.
 
 You are given:
 1. {camera_line_1}
 2. {camera_line_2}
 3. Structured candidate trajectory metadata.
 4. A high-level driving directive that must be taken seriously when scoring the candidates.
+5. Optionally, advisory short-horizon corrective context from a separate reflective intervention stage.
 
 Your job:
 - Score EVERY candidate trajectory with a scalar Q-like value.
@@ -485,6 +497,7 @@ Your job:
 - The reasoning must justify the selected candidate relative to the alternatives using safety, route-following, lane alignment, obstacle avoidance, and motion smoothness.
 - The reasoning should describe why the selected candidate is best, not just restate its index.
 {default_candidate_guidance}
+{corrective_action_guidance}
 - Judge based on the following constraints:
   - higher scores are better,
   - staying in the drivable region,
@@ -539,7 +552,7 @@ def build_intervention_prompt(
 - Because only the front image contains the overlaid trajectory, judge where the path goes from the front view and use the other views only to decide whether surrounding context makes intervention necessary.
 """.strip()
     return f"""
-You are an autonomous-driving safety monitor deciding whether an intervention is needed.
+You are an autonomous-driving self-reflective safety monitor deciding whether the current planned action should be revised before execution.
 
 You are given:
 1. {camera_line_1}
@@ -548,8 +561,10 @@ You are given:
 4. A route-level driving instruction.
 
 Your job:
-- Decide whether the VLM needs to intervene instead of trusting this single baseline RAP-selected trajectory in this frame.
-- Set "should_intervene" to true when the shown baseline trajectory appears risky, ambiguous, instruction-inconsistent, poorly centered, too close to obstacles or lane boundaries, or likely to benefit from short-horizon visual correction.
+- Treat the shown baseline trajectory as a proposed action that may or may not need revision.
+- First reason counterfactually about likely short-horizon consequences if this exact baseline trajectory is executed.
+- Then decide whether the action should be revised before execution.
+- Set "should_intervene" to true when the shown baseline trajectory appears risky, ambiguous, instruction-inconsistent, poorly centered, too close to obstacles or lane boundaries, or likely to benefit from short-horizon correction.
 - Use "should_intervene" = false only when the shown baseline trajectory looks clearly safe, clearly lane-aligned, instruction-consistent, and comfortably clear of nearby conflicts.
 - Intervene when there is a meaningful risk of obstacle collision, unsafe lane departure, wrong-way behavior, sidewalk/off-road encroachment, route mismatch, low-margin clearance, or other visible issue with the shown baseline trajectory.
 - If you are uncertain whether the trajectory safely stays in-lane, clears nearby obstacles, or follows the intended route, prefer "should_intervene" = true.
@@ -558,9 +573,12 @@ Your job:
 {multiview_guidance}
 - If intervention is needed, also provide a single high-level corrective action for the next short-horizon maneuver.
 - The corrective action must be exactly one of: "left", "right", or "straight".
-- Choose the corrective action that best describes the immediate correction the scorer should prioritize.
+- Choose the corrective action that best describes the immediate correction a downstream scorer should consider.
 - Keep the response compact.
-- The reasoning should explicitly justify why intervention is or is not needed in this frame.
+- The reasoning should explicitly describe:
+  - what is likely to happen if the baseline action is executed,
+  - why that outcome is acceptable or not,
+  - and why the corrective action is the best short-horizon revision when intervention is needed.
 
 Route instruction (right,left,or straight):
 {route_instruction}
@@ -731,7 +749,18 @@ class Qwen3TrajectorySelector:
 
 
 class SubprocessQwen3TrajectorySelector:
-    def __init__(self, python_bin: str, worker_script: Path, model_id: str, device: str, max_new_tokens: int) -> None:
+    def __init__(
+        self,
+        python_bin: str,
+        worker_script: Path,
+        model_id: str,
+        device: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        enable_thinking: bool,
+    ) -> None:
         if not python_bin:
             raise ValueError("VLM python_bin is not set")
         self.python_bin = python_bin
@@ -739,14 +768,23 @@ class SubprocessQwen3TrajectorySelector:
         self.model_id = model_id
         self.device = device
         self.max_new_tokens = max_new_tokens
+        self.temperature = float(temperature)
+        self.top_p = float(top_p)
+        self.top_k = int(top_k)
+        self.enable_thinking = bool(enable_thinking)
         self._proc: Optional[subprocess.Popen[str]] = None
+        self._stderr_file = None
+        self._ready = False
 
     def _ensure_proc(self) -> subprocess.Popen[str]:
         if self._proc is not None and self._proc.poll() is None:
             return self._proc
+        worker_log_path = self.worker_script.with_name("vlm_worker.stderr.log")
+        self._stderr_file = worker_log_path.open("a", encoding="utf-8")
         self._proc = subprocess.Popen(
             [
                 self.python_bin,
+                "-B",
                 str(self.worker_script),
                 "--model-id",
                 self.model_id,
@@ -754,15 +792,60 @@ class SubprocessQwen3TrajectorySelector:
                 self.device,
                 "--max-new-tokens",
                 str(self.max_new_tokens),
+                "--temperature",
+                str(self.temperature),
+                "--top-p",
+                str(self.top_p),
+                "--top-k",
+                str(self.top_k),
+                "--enable-thinking",
+                "true" if self.enable_thinking else "false",
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=self._stderr_file,
             text=True,
             bufsize=1,
             env=os.environ.copy(),
         )
+        self._ready = False
         return self._proc
+
+    def _readline_with_timeout(self, proc: subprocess.Popen[str], timeout_sec: Optional[float]) -> str:
+        if proc.stdout is None:
+            raise RuntimeError("VLM worker stdout is unavailable")
+        deadline = None if timeout_sec is None else time.monotonic() + max(float(timeout_sec), 0.0)
+        stdout_fd = proc.stdout.fileno()
+        while True:
+            if deadline is None:
+                ready, _, _ = select.select([stdout_fd], [], [])
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    raise TimeoutError(f"VLM worker subprocess timeout after {float(timeout_sec):.3f}s")
+                ready, _, _ = select.select([stdout_fd], [], [], remaining)
+                if not ready:
+                    continue
+            if ready:
+                return proc.stdout.readline()
+
+    def preload(self, timeout_sec: Optional[float] = None) -> None:
+        if self._ready and self._proc is not None and self._proc.poll() is None:
+            return
+        proc = self._ensure_proc()
+        line = self._readline_with_timeout(proc, timeout_sec)
+        if not line:
+            self.close()
+            raise RuntimeError("VLM worker exited before signaling readiness")
+        response = json.loads(line)
+        if response.get("status") == "ready":
+            self._ready = True
+            return
+        if response.get("error"):
+            self.close()
+            raise RuntimeError(str(response["error"]))
+        self.close()
+        raise RuntimeError(f"Unexpected VLM worker preload response: {response!r}")
 
     def infer_prompt(
         self,
@@ -770,7 +853,9 @@ class SubprocessQwen3TrajectorySelector:
         prompt: str,
         *,
         max_new_tokens: Optional[int] = None,
+        timeout_sec: Optional[float] = None,
     ) -> Dict[str, object]:
+        self.preload(timeout_sec=timeout_sec)
         proc = self._ensure_proc()
         if proc.stdin is None or proc.stdout is None:
             raise RuntimeError("VLM worker stdio is unavailable")
@@ -779,13 +864,19 @@ class SubprocessQwen3TrajectorySelector:
         payload = {"image_paths": [str(image_path) for image_path in image_paths], "prompt": prompt}
         if max_new_tokens is not None:
             payload["max_new_tokens"] = int(max_new_tokens)
+        payload["temperature"] = self.temperature
+        payload["top_p"] = self.top_p
+        payload["top_k"] = self.top_k
         proc.stdin.write(json.dumps(payload) + "\n")
         proc.stdin.flush()
-        line = proc.stdout.readline()
+        line = ""
+        try:
+            line = self._readline_with_timeout(proc, timeout_sec)
+        except TimeoutError:
+            self.close()
+            raise
         if not line:
             stderr = ""
-            if proc.stderr is not None:
-                stderr = proc.stderr.read()
             raise RuntimeError(f"VLM worker exited unexpectedly: {stderr.strip()}")
         response = json.loads(line)
         if response.get("error"):
@@ -809,6 +900,12 @@ class SubprocessQwen3TrajectorySelector:
         if self._proc.poll() is None:
             self._proc.terminate()
         self._proc = None
+        if self._stderr_file is not None:
+            try:
+                self._stderr_file.close()
+            except Exception:
+                pass
+            self._stderr_file = None
 
 
 def build_candidate_rows(
@@ -1000,6 +1097,10 @@ class VLMPlanSelector:
                 model_id=self.cfg.model_id,
                 device=self.cfg.device,
                 max_new_tokens=self.cfg.max_new_tokens,
+                temperature=self.cfg.temperature,
+                top_p=self.cfg.top_p,
+                top_k=self.cfg.top_k,
+                enable_thinking=self.cfg.enable_thinking,
             )
         else:
             self._disabled_reason = f"unsupported_backend:{self.cfg.backend}"
@@ -1017,6 +1118,24 @@ class VLMPlanSelector:
             self._disabled_reason = str(exc)
             LOG.exception("Failed to initialize VLM selector, disabling VLM fallback path")
             return None
+
+    def preload(self) -> None:
+        if not self.cfg.enabled or self._disabled_reason is not None:
+            return
+        selector = self._ensure_selector()
+        if selector is None or not self.cfg.preload_on_init:
+            return
+        preload_fn = getattr(selector, "preload", None)
+        if not callable(preload_fn):
+            return
+        LOG.info(
+            "Preloading VLM selector backend=%s model=%s timeout=%.3fs",
+            self.cfg.backend,
+            self.cfg.model_id,
+            float(self.cfg.timeout_sec),
+        )
+        preload_fn(timeout_sec=self.cfg.timeout_sec)
+        LOG.info("VLM selector preload complete model=%s", self.cfg.model_id)
 
     def maybe_select(
         self,
@@ -1160,6 +1279,7 @@ class VLMPlanSelector:
                     image_paths=gate_image_paths,
                     prompt=intervention_prompt,
                     max_new_tokens=self.cfg.intervention_max_new_tokens,
+                    timeout_sec=self.cfg.intervention_timeout_sec,
                 )
             except Exception as exc:
                 LOG.exception("VLM intervention gate failed, falling back to RAP argmax")
@@ -1293,132 +1413,25 @@ class VLMPlanSelector:
                     "intervention_elapsed_sec": intervention_elapsed_sec,
                 }
 
-            if intervention_should_intervene is False:
-                selected_row = dict(candidate_rows[default_selected_index])
-                selected_source = "gate_no_intervention_use_rap"
-                adaptive_replan_decision = "gate_no_intervention_use_rap"
-                selected_path_reasoning = (
-                    intervention_reasoning.strip()
-                    if isinstance(intervention_reasoning, str) and intervention_reasoning.strip()
-                    else "Intervention gate judged baseline RAP sufficient for this frame."
-                )
-                timeline_record = {
-                    "frame_index": frame_index,
-                    "timestamp": timestamp,
-                    "route_instruction": route_instruction,
-                    "candidate_count": len(candidate_rows),
-                    "carry_previous_valid": carry_previous_valid,
-                    "carry_previous_remaining_path_m": next(
-                        (path_length(np.asarray(row["local_plan"], dtype=np.float32)) for row in candidate_rows if row.get("source") == "carry_prev"),
-                        0.0,
-                    ),
-                    "selected_source": selected_source,
-                    "selected_candidate_index": default_selected_index,
-                    "selected_candidate_source": selected_row.get("source"),
-                    "selected_proposal_index": selected_row.get("proposal_index"),
-                    "intervention_invoked": True,
-                    "intervention_should_intervene": False,
-                    "intervention_corrective_action": intervention_corrective_action,
-                    "intervention_confidence": intervention_confidence,
-                    "intervention_elapsed_sec": intervention_elapsed_sec,
-                    "vlm_elapsed_sec": 0.0,
-                    "scoring_invoked": False,
-                    "vlm_q_valid": False,
-                    "vlm_timed_out": False,
-                    "latency_equivalent_steps": 0.0,
-                    "latency_equivalent_steps_ceil": 0,
-                    "adaptive_replan_decision": adaptive_replan_decision,
-                    "error": None,
-                    "q_invoked_vlm": False,
-                    "vlm_failed": False,
-                }
-                self._record_timeline(timeline_record)
-                debug_payload = {
-                    "frame_index": frame_index,
-                    "route_instruction": route_instruction,
-                    "default_selected_index": int(default_selected_index),
-                    "default_selected_source": default_selected_source,
-                    "candidate_rows": candidate_rows,
-                    "intervention_result": intervention_result,
-                    "scoring_result": None,
-                    "scoring_invoked": False,
-                    "selected_index": int(default_selected_index),
-                    "selected_source": selected_source,
-                    "selected_path_reasoning": selected_path_reasoning,
-                    "intervention_invoked": True,
-                    "intervention_should_intervene": False,
-                    "intervention_corrective_action": intervention_corrective_action,
-                    "intervention_confidence": intervention_confidence,
-                    "intervention_reasoning": intervention_reasoning,
-                    "intervention_elapsed_sec": intervention_elapsed_sec,
-                    "intervention_error": None,
-                    "vlm_candidate_index": None,
-                    "vlm_confidence": None,
-                    "vlm_q_valid": False,
-                    "vlm_timed_out": False,
-                    "vlm_q_candidate_scores": None,
-                    "vlm_q_best_candidate_index": None,
-                    "vlm_q_score_gap_to_carry": None,
-                    "vlm_q_score_gap_top2": None,
-                    "vlm_q_best_current_score": None,
-                    "vlm_q_carry_score": None,
-                    "adaptive_replan_decision": adaptive_replan_decision,
-                    "carry_previous_valid": carry_previous_valid,
-                    "latency_timeline_record": timeline_record,
-                    "error": None,
-                    "vlm_failed": False,
-                }
-                if self.cfg.save_debug_artifacts:
-                    result_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
-                if not self.cfg.save_debug_artifacts:
-                    for temp_path in temp_paths:
-                        temp_path.unlink(missing_ok=True)
-                return {
-                    "selected_candidate_row": selected_row,
-                    "selected_source": selected_source,
-                    "selected_path_reasoning": selected_path_reasoning,
-                    "vlm_candidate_index": None,
-                    "vlm_confidence": None,
-                    "vlm_reasoning": None,
-                    "vlm_elapsed_sec": 0.0,
-                    "vlm_error": None,
-                    "vlm_candidate_count": len(candidate_rows),
-                    "vlm_q_valid": False,
-                    "vlm_timed_out": False,
-                    "vlm_q_candidate_scores": None,
-                    "vlm_q_best_candidate_index": None,
-                    "vlm_q_score_gap_to_carry": None,
-                    "vlm_q_score_gap_top2": None,
-                    "vlm_q_best_current_score": None,
-                    "vlm_q_carry_score": None,
-                    "adaptive_replan_decision": adaptive_replan_decision,
-                    "carry_previous_valid": carry_previous_valid,
-                    "latency_timeline_record": timeline_record,
-                    "vlm_failed": False,
-                    "scoring_invoked": False,
-                    "intervention_invoked": True,
-                    "intervention_should_intervene": False,
-                    "intervention_corrective_action": intervention_corrective_action,
-                    "intervention_confidence": intervention_confidence,
-                    "intervention_reasoning": intervention_reasoning,
-                    "intervention_elapsed_sec": intervention_elapsed_sec,
-                }
-
         scoring_route_instruction = route_instruction
-        if self.cfg.intervention_enabled and intervention_should_intervene is True:
-            scoring_route_instruction = intervention_corrective_action or route_instruction
 
         try:
             LOG.info(
-                "Running VLM selection for frame=%d candidates=%d route='%s'",
+                "Running VLM selection for frame=%d candidates=%d route='%s' corrective_action='%s'",
                 frame_index,
                 len(candidate_rows),
                 scoring_route_instruction,
+                intervention_corrective_action,
             )
             scoring_invoked = True
             scoring_prompt = build_scoring_prompt(
                 candidate_rows,
                 scoring_route_instruction,
+                intervention_corrective_action=(
+                    intervention_corrective_action
+                    if self.cfg.intervention_enabled and intervention_should_intervene is True
+                    else None
+                ),
                 current_ego_speed_mps=current_ego_speed_mps,
                 current_ego_accel_mps2=current_ego_accel_mps2,
                 camera_order=scoring_camera_order,
@@ -1427,8 +1440,17 @@ class VLMPlanSelector:
                 image_paths=score_image_paths,
                 prompt=scoring_prompt,
                 max_new_tokens=self.cfg.max_new_tokens,
+                timeout_sec=self.cfg.timeout_sec,
             )
         except Exception as exc:
+            self._disabled_reason = f"selector_runtime_error:{exc}"
+            close_fn = getattr(selector, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+            self._selector = None
             LOG.exception("VLM selector inference failed, falling back to RAP argmax")
             result = {
                 "raw_output": "",

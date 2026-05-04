@@ -22,6 +22,7 @@ import os
 import pickle
 import struct
 import sys
+import time
 import traceback
 from collections import deque
 from dataclasses import dataclass
@@ -659,12 +660,33 @@ def read_obs(obs_pipe: Path):
             payload.extend(chunk)
     return pickle.loads(payload)
 
+
+def read_obs_file(pipe):
+    header = pipe.read(8)
+    if len(header) != 8:
+        raise EOFError("Incomplete pipe header from open obs pipe handle")
+    payload_size = struct.unpack("<Q", header)[0]
+    payload = bytearray()
+    while len(payload) < payload_size:
+        chunk = pipe.read(payload_size - len(payload))
+        if not chunk:
+            raise EOFError("Incomplete pipe payload from open obs pipe handle")
+        payload.extend(chunk)
+    return pickle.loads(payload)
+
 #writes DrivoR plan back to HUGSIM
 def write_plan(plan_pipe: Path, plan) -> None:
     payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
     with open(plan_pipe, "wb") as pipe:
         pipe.write(struct.pack("<Q", len(payload)))
         pipe.write(payload)
+
+
+def write_plan_file(pipe, plan) -> None:
+    payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
+    pipe.write(struct.pack("<Q", len(payload)))
+    pipe.write(payload)
+    pipe.flush()
 
 # ============================================================================
 # NEW FUNCTIONS: RAP-compatible candidate generation and payload building
@@ -1139,19 +1161,55 @@ def main() -> int:
     # Set device
     # The agent's internal ModelLoader would normally pick device; here ensure model on device
     try:
-        agent._drivor_model.to(device)
+        current_model_device = "unknown"
+        try:
+            first_param = next(agent._drivor_model.parameters())
+            current_model_device = str(first_param.device)
+        except StopIteration:
+            current_model_device = "no-parameters"
+        except Exception:
+            LOG.exception("Failed to inspect DrivoR model device before inference")
+
+        LOG.info("DrivoR model device before optional move: current=%s target=%s", current_model_device, device)
+        target_device = str(device)
+        if current_model_device.startswith(target_device) or (
+            target_device.startswith("cuda") and current_model_device.startswith("cuda")
+        ):
+            LOG.info("Skipping redundant DrivoR model.to(%s)", device)
+        else:
+            LOG.info("Moving DrivoR model to device %s", device)
+            agent._drivor_model.to(device)
         agent._drivor_model.eval()
+        try:
+            first_param = next(agent._drivor_model.parameters())
+            LOG.info("DrivoR model ready for inference on device %s", first_param.device)
+        except Exception:
+            LOG.info("DrivoR model ready for inference")
     except Exception:
         LOG.warning("Could not move model to device; continuing")
 
     obs_pipe = output_dir / "obs_pipe"
     plan_pipe = output_dir / "plan_pipe"
+    LOG.info("Waiting for scene FIFOs to appear: obs=%s plan=%s", obs_pipe, plan_pipe)
+    while not obs_pipe.exists() or not plan_pipe.exists():
+        time.sleep(0.1)
+    obs_pipe_reader = os.fdopen(os.open(obs_pipe, os.O_RDWR), "rb", buffering=0)
+    plan_pipe_writer = os.fdopen(os.open(plan_pipe, os.O_RDWR), "wb", buffering=0)
+    LOG.info("Opened persistent scene FIFOs for obs and plan exchange")
 
     info_history: deque[Dict[str, object]] = deque(maxlen=EGO_HISTORY_FRAMES)
 
     # VLM selector setup
     vlm_cfg = resolve_vlm_config()
     vlm_selector = VLMPlanSelector(vlm_cfg, output_dir)
+    vlm_selector.preload()
+    LOG.info(
+        "VLM selector configured enabled=%s intervention_enabled=%s backend=%s device=%s",
+        getattr(vlm_cfg, "enabled", False),
+        getattr(vlm_cfg, "intervention_enabled", False),
+        getattr(vlm_cfg, "backend", "unknown"),
+        getattr(vlm_cfg, "device", "unknown"),
+    )
     frame_index = 0
     previous_selected_plan: Optional[np.ndarray] = None
     previous_selected_pose: Optional[np.ndarray] = None
@@ -1160,9 +1218,12 @@ def main() -> int:
     previous_selected_source: Optional[str] = None
 
     try:
+        LOG.info("Entering adapter read loop; waiting for observations on %s", obs_pipe)
         while True:
             try:
-                message = read_obs(obs_pipe)
+                LOG.info("Waiting for next observation payload on %s", obs_pipe)
+                message = read_obs_file(obs_pipe_reader)
+                LOG.info("Received observation payload from %s", obs_pipe)
                 if message == "Done":
                     LOG.info("Received shutdown signal")
                     break
@@ -1239,7 +1300,7 @@ def main() -> int:
                     proposals, scores = extract_proposals_and_scores_from_predictions(pred, output_num_poses=output_num_poses)
                 except Exception as e:
                     LOG.exception("Failed to extract proposals/scores from model output: %s", e)
-                    write_plan(plan_pipe, None)
+                    write_plan_file(plan_pipe_writer, None)
                     continue
 
                 # Build candidate rows (includes carry_prev, top-k, and optional defaults)
@@ -1258,7 +1319,7 @@ def main() -> int:
                     )
                 except Exception as e:
                     LOG.exception("Failed to build candidate rows: %s", e)
-                    write_plan(plan_pipe, None)
+                    write_plan_file(plan_pipe_writer, None)
                     continue
 
                 # Determine default selection for VLM fallback
@@ -1329,6 +1390,18 @@ def main() -> int:
                             "vlm_reasoning": selection_result.get("vlm_reasoning"),
                             "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
                             "vlm_error": selection_result.get("vlm_error"),
+                            "scoring_invoked": selection_result.get("scoring_invoked"),
+                            "intervention_invoked": selection_result.get("intervention_invoked"),
+                            "intervention_should_intervene": selection_result.get("intervention_should_intervene"),
+                            "intervention_corrective_action": selection_result.get("intervention_corrective_action"),
+                            "intervention_confidence": selection_result.get("intervention_confidence"),
+                            "intervention_reasoning": selection_result.get("intervention_reasoning"),
+                            "intervention_elapsed_sec": selection_result.get("intervention_elapsed_sec"),
+                            "intervention_error": selection_result.get("intervention_error"),
+                            "adaptive_replan_decision": selection_result.get("adaptive_replan_decision"),
+                            "carry_previous_valid": selection_result.get("carry_previous_valid"),
+                            "latency_timeline_record": selection_result.get("latency_timeline_record"),
+                            "vlm_failed": selection_result.get("vlm_failed"),
                             "fallback_selected_idx": int(default_selected_index),
                             "fallback_selected_source": default_selected_source,
                             "display_default_trajectories": bool(getattr(vlm_cfg, "display_default_trajectories", False)),
@@ -1370,11 +1443,11 @@ def main() -> int:
                     )
                 except Exception as e:
                     LOG.exception("Failed to build plan payload: %s", e)
-                    write_plan(plan_pipe, None)
+                    write_plan_file(plan_pipe_writer, None)
                     continue
 
                 # Write final plan to HUGSIM
-                write_plan(plan_pipe, plan_payload)
+                write_plan_file(plan_pipe_writer, plan_payload)
 
                 # Save previous selection for carry-prev support
                 try:
@@ -1391,11 +1464,19 @@ def main() -> int:
                 LOG.error("Adapter loop failed")
                 LOG.error(traceback.format_exc())
                 try:
-                    write_plan(plan_pipe, None)
+                    write_plan_file(plan_pipe_writer, None)
                 except Exception:
                     LOG.error("Failed to notify HUGSIM about adapter failure")
                 return 1
     finally:
+        try:
+            obs_pipe_reader.close()
+        except Exception:
+            pass
+        try:
+            plan_pipe_writer.close()
+        except Exception:
+            pass
         try:
             vlm_selector.finalize()
         except Exception:

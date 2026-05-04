@@ -133,6 +133,177 @@ def to_video(observations, rollout_frames, output_path):
     clip.write_videofile(output_path)
 
 
+def _format_overlay_value(value):
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    return str(value)
+
+
+def _wrap_text_to_width(text, font, font_scale, thickness, max_width):
+    text = (text or "").strip()
+    if not text:
+        return []
+    words = text.split()
+    lines = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        candidate_width = cv2.getTextSize(candidate, font, font_scale, thickness)[0][0]
+        if candidate_width <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
+def _append_wrapped_text(lines, label, text, font, font_scale, thickness, max_width):
+    if text is None:
+        return
+    wrapped = _wrap_text_to_width(str(text), font, font_scale, thickness, max_width)
+    if not wrapped:
+        return
+    lines.append(f"{label}: {wrapped[0]}")
+    for continuation in wrapped[1:]:
+        lines.append(f"  {continuation}")
+
+
+def _build_front_overlay_lines(frame_idx, frame_debug, run_label):
+    lines = [
+        f"run: {run_label}",
+        f"frame: {frame_idx}",
+    ]
+    latency_record = frame_debug.get("latency_timeline_record") or {}
+    route_instruction = latency_record.get("route_instruction")
+    if route_instruction is not None:
+        lines.append(f"route: {route_instruction}")
+    scoring_route = latency_record.get("scoring_route_instruction")
+    if scoring_route is not None:
+        lines.append(f"scoring route: {scoring_route}")
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.52
+    thickness = 1
+    max_width = 900
+
+    uses_vlm = ("vlm" in run_label) or (frame_debug.get("vlm_reasoning") is not None)
+    uses_intervention = "intervention" in run_label
+
+    if uses_intervention:
+        should_intervene = latency_record.get("intervention_should_intervene")
+        lines.append(f"intervened: {_format_overlay_value(should_intervene)}")
+        confidence = latency_record.get("intervention_confidence")
+        if confidence is not None:
+            lines.append(f"intervention confidence: {_format_overlay_value(confidence)}")
+        corrective_action = latency_record.get("intervention_corrective_action")
+        if should_intervene:
+            lines.append(f"corrective action: {_format_overlay_value(corrective_action)}")
+        _append_wrapped_text(
+            lines,
+            "intervention reasoning",
+            frame_debug.get("intervention_reasoning"),
+            font,
+            font_scale,
+            thickness,
+            max_width,
+        )
+        _append_wrapped_text(
+            lines,
+            "scorer reasoning",
+            frame_debug.get("vlm_reasoning"),
+            font,
+            font_scale,
+            thickness,
+            max_width,
+        )
+    elif uses_vlm:
+        adaptive_decision = frame_debug.get("adaptive_replan_decision")
+        if adaptive_decision is not None:
+            lines.append(f"adaptive decision: {adaptive_decision}")
+        q_selected_source = frame_debug.get("q_selected_source")
+        q_selected_idx = frame_debug.get("q_selected_idx")
+        if q_selected_source is not None or q_selected_idx is not None:
+            lines.append(
+                "q selection: "
+                f"{_format_overlay_value(q_selected_source)}"
+                f" / {_format_overlay_value(q_selected_idx)}"
+            )
+        _append_wrapped_text(
+            lines,
+            "vlm reasoning",
+            frame_debug.get("vlm_reasoning"),
+            font,
+            font_scale,
+            thickness,
+            max_width,
+        )
+
+    return lines
+
+
+def _draw_front_overlay_text(frame, lines):
+    if not lines:
+        return frame
+
+    canvas = frame.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.52
+    thickness = 1
+    line_gap = 8
+    padding = 12
+    origin_x = 18
+    origin_y = 18
+
+    line_sizes = [cv2.getTextSize(line, font, font_scale, thickness)[0] for line in lines]
+    max_width = max((size[0] for size in line_sizes), default=0)
+    line_height = max((size[1] for size in line_sizes), default=0)
+    total_height = len(lines) * line_height + max(0, len(lines) - 1) * line_gap
+
+    box_x0 = origin_x - padding
+    box_y0 = origin_y - padding
+    box_x1 = min(canvas.shape[1] - 1, origin_x + max_width + padding)
+    box_y1 = min(canvas.shape[0] - 1, origin_y + total_height + padding)
+
+    overlay = canvas.copy()
+    cv2.rectangle(overlay, (box_x0, box_y0), (box_x1, box_y1), (0, 0, 0), thickness=-1)
+    cv2.addWeighted(overlay, 0.55, canvas, 0.45, 0, canvas)
+
+    text_y = origin_y + line_height
+    for line in lines:
+        cv2.putText(
+            canvas,
+            line,
+            (origin_x, text_y),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+            lineType=cv2.LINE_AA,
+        )
+        text_y += line_height + line_gap
+
+    return canvas
+
+
+def to_front_video(observations, rollout_frames, output_path, run_label):
+    if not observations:
+        return
+
+    frames = []
+    for frame_idx, obs in enumerate(observations):
+        front = obs[FRONT_CAM_NAME].copy()
+        frame_debug = {}
+        if frame_idx < len(rollout_frames):
+            frame_debug = rollout_frames[frame_idx].get("planner_debug", {}) or {}
+        lines = _build_front_overlay_lines(frame_idx, frame_debug, run_label)
+        frames.append(_draw_front_overlay_text(front, lines))
+
+    clip = ImageSequenceClip(frames, fps=4)
+    clip.write_videofile(output_path)
+
+
 def write_pipe_message(pipe_path, payload_obj):
     payload = pickle.dumps(payload_obj, protocol=pickle.HIGHEST_PROTOCOL)
     with open(pipe_path, "wb") as pipe:
@@ -152,6 +323,27 @@ def read_pipe_message(pipe_path):
             if not chunk:
                 raise EOFError(f"Incomplete pipe payload from {pipe_path}")
             payload.extend(chunk)
+    return pickle.loads(payload)
+
+
+def write_pipe_message_file(pipe, payload_obj):
+    payload = pickle.dumps(payload_obj, protocol=pickle.HIGHEST_PROTOCOL)
+    pipe.write(struct.pack("<Q", len(payload)))
+    pipe.write(payload)
+    pipe.flush()
+
+
+def read_pipe_message_file(pipe):
+    header = pipe.read(8)
+    if len(header) != 8:
+        raise EOFError("Incomplete pipe header from open pipe handle")
+    payload_size = struct.unpack("<Q", header)[0]
+    payload = bytearray()
+    while len(payload) < payload_size:
+        chunk = pipe.read(payload_size - len(payload))
+        if not chunk:
+            raise EOFError("Incomplete pipe payload from open pipe handle")
+        payload.extend(chunk)
     return pickle.loads(payload)
 
 
@@ -323,7 +515,7 @@ def _select_overlay_plan(plan_traj, plan_path_length, last_valid_plan, stale_fra
     return None, stale_frames, False
 
 
-def create_gym_env(cfg, output):
+def create_gym_env(cfg, output, run_label):
 
     env = gymnasium.make('hugsim_env/HUGSim-v0', cfg=cfg, output=output)
 
@@ -339,9 +531,15 @@ def create_gym_env(cfg, output):
         if os.path.exists(pipe_path):
             os.remove(pipe_path)
         os.mkfifo(pipe_path)
+    # Keep both FIFOs open in RDWR mode to avoid blocking open-order deadlocks
+    # between closed_loop and the planner adapter. Actual message traffic still
+    # uses fresh per-message open/read/write calls below.
+    obs_pipe_keepalive_fd = os.open(obs_pipe, os.O_RDWR | os.O_NONBLOCK)
+    plan_pipe_keepalive_fd = os.open(plan_pipe, os.O_RDWR | os.O_NONBLOCK)
+    obs_pipe_writer = os.fdopen(os.open(obs_pipe, os.O_RDWR), "wb", buffering=0)
+    plan_pipe_reader = os.fdopen(os.open(plan_pipe, os.O_RDWR), "rb", buffering=0)
     print('Ready for simulation')
 
-    obs, info = None, None
     last_valid_overlay_plan = None
     last_valid_overlay_pose = None
     last_valid_overlay_plan_stale_frames = 0
@@ -358,6 +556,7 @@ def create_gym_env(cfg, output):
     current_vlm_selected_idx = None
     current_vlm_confidence = None
     current_vlm_reasoning = None
+    current_intervention_reasoning = None
     current_vlm_elapsed_sec = None
     current_vlm_error = None
     current_vlm_q_valid = None
@@ -418,8 +617,8 @@ def create_gym_env(cfg, output):
                 logger.info("Sending obs to adapter: rgb keys=%s; details=%s", list(rgb.keys()), "; ".join(rgb_details))
             except Exception:
                 logging.getLogger("closed_loop").exception("Failed to prepare current_obs before sending")
-            write_pipe_message(obs_pipe, (current_obs, current_info))
-            plan_payload = read_pipe_message(plan_pipe)
+            write_pipe_message_file(obs_pipe_writer, (current_obs, current_info))
+            plan_payload = read_pipe_message_file(plan_pipe_reader)
             current_topk_plans = None
             current_topk_scores = None
             current_candidate_pool_plans = None
@@ -431,6 +630,7 @@ def create_gym_env(cfg, output):
             current_vlm_selected_idx = None
             current_vlm_confidence = None
             current_vlm_reasoning = None
+            current_intervention_reasoning = None
             current_vlm_elapsed_sec = None
             current_vlm_error = None
             current_vlm_q_valid = None
@@ -460,6 +660,7 @@ def create_gym_env(cfg, output):
                 current_vlm_selected_idx = plan_payload.get('vlm_selected_idx')
                 current_vlm_confidence = plan_payload.get('vlm_confidence')
                 current_vlm_reasoning = plan_payload.get('vlm_reasoning')
+                current_intervention_reasoning = plan_payload.get('intervention_reasoning')
                 current_vlm_elapsed_sec = plan_payload.get('vlm_elapsed_sec')
                 current_vlm_error = plan_payload.get('vlm_error')
                 current_vlm_q_valid = plan_payload.get('vlm_q_valid')
@@ -536,6 +737,7 @@ def create_gym_env(cfg, output):
                     'vlm_selected_idx': current_vlm_selected_idx,
                     'vlm_confidence': current_vlm_confidence,
                     'vlm_reasoning': current_vlm_reasoning,
+                    'intervention_reasoning': current_intervention_reasoning,
                     'vlm_elapsed_sec': current_vlm_elapsed_sec,
                     'vlm_error': current_vlm_error,
                     'vlm_q_valid': current_vlm_q_valid,
@@ -593,7 +795,11 @@ def create_gym_env(cfg, output):
             done = True
             break
 
-    write_pipe_message(obs_pipe, 'Done')
+    write_pipe_message_file(obs_pipe_writer, 'Done')
+    obs_pipe_writer.close()
+    plan_pipe_reader.close()
+    os.close(obs_pipe_keepalive_fd)
+    os.close(plan_pipe_keepalive_fd)
 
     with open(os.path.join(output, 'data.pkl'), 'wb') as wf:
         pickle.dump([save_data], wf)
@@ -606,6 +812,15 @@ def create_gym_env(cfg, output):
         )
     except Exception as exc:
         print(f"Skipping video export due to error: {exc}")
+    try:
+        to_front_video(
+            observations_save,
+            save_data['frames'],
+            os.path.join(output, 'front.mp4'),
+            run_label,
+        )
+    except Exception as exc:
+        print(f"Skipping front video export due to error: {exc}")
     with open(os.path.join(output, 'infos.pkl'), 'wb') as wf:
         pickle.dump(infos_save, wf)
     
@@ -737,7 +952,7 @@ if __name__ == "__main__":
 
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
     try:
-        create_gym_env(cfg, output)
+        create_gym_env(cfg, output, planner_output_suffix)
         check_alive(process)
     except Exception as e:
         import traceback

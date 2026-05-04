@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Iterable, Tuple
 
-
 VLM_ENV_DEFAULTS: Dict[str, Any] = {
     "ENABLED": False,
     "INTERVENTION_ENABLED": False,

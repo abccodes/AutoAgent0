@@ -31,14 +31,17 @@ export PYTHONPATH="${HUGSIM_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Prevent the RAP env from accidentally loading HUGSIM pixi torch libs.
 if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
-    CLEANED_LD_LIBRARY_PATH="$(python3 - <<'PY'
-import os
-
-entries = os.environ.get("LD_LIBRARY_PATH", "").split(":")
-filtered = [entry for entry in entries if "/HUGSIM/.pixi/" not in entry]
-print(":".join(filtered))
-PY
-)"
+    OLD_IFS="${IFS}"
+    IFS=':'
+    CLEANED_ENTRIES=()
+    for entry in ${LD_LIBRARY_PATH}; do
+        if [[ "${entry}" != *"/HUGSIM/.pixi/"* ]]; then
+            CLEANED_ENTRIES+=("${entry}")
+        fi
+    done
+    IFS="${OLD_IFS}"
+    CLEANED_LD_LIBRARY_PATH="$(printf '%s:' "${CLEANED_ENTRIES[@]}")"
+    CLEANED_LD_LIBRARY_PATH="${CLEANED_LD_LIBRARY_PATH%:}"
     if [[ -n "${CLEANED_LD_LIBRARY_PATH}" ]]; then
         export LD_LIBRARY_PATH="${CLEANED_LD_LIBRARY_PATH}"
     else
