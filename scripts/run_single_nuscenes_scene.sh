@@ -55,6 +55,9 @@ fi
 
 mkdir -p /bigdata/aidan/outputs/benchmark/out
 
+export PYTHONPATH="${PWD}:${PWD}/sim${PYTHONPATH:+:${PYTHONPATH}}"
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+
 HUGSIM_ENV_ROOT="$(cd "$(dirname "${HUGSIM_PYTHON_BIN}")/.." && pwd)"
 TORCH_LIB_DIR="${HUGSIM_ENV_ROOT}/lib/python3.11/site-packages/torch/lib"
 if [[ -d "${TORCH_LIB_DIR}" ]]; then
@@ -81,6 +84,24 @@ echo "planner_config=${PLANNER_PATH}"
 echo "hugsim_python=${HUGSIM_PYTHON_BIN}"
 echo "sim_cuda=${SIM_CUDA} ad_cuda=${AD_CUDA}"
 echo "ld_library_path=${LD_LIBRARY_PATH:-unset}"
+
+if ! "${HUGSIM_PYTHON_BIN}" -c "from simple_knn._C import distCUDA2" >/dev/null 2>&1; then
+    echo "simple_knn missing in ${HUGSIM_PYTHON_BIN}; bootstrapping local CUDA extension"
+    SIMPLE_KNN_LOCK_DIR="${TMPDIR:-/tmp}/hugsim-simple-knn-install.lock"
+    until mkdir "${SIMPLE_KNN_LOCK_DIR}" 2>/dev/null; do
+        echo "waiting for simple_knn install lock: ${SIMPLE_KNN_LOCK_DIR}"
+        sleep 5
+    done
+
+    if ! "${HUGSIM_PYTHON_BIN}" -c "from simple_knn._C import distCUDA2" >/dev/null 2>&1; then
+        if ! "${HUGSIM_PYTHON_BIN}" -m pip --version >/dev/null 2>&1; then
+            echo "pip missing in ${HUGSIM_PYTHON_BIN}; bootstrapping pip with ensurepip"
+            "${HUGSIM_PYTHON_BIN}" -m ensurepip --upgrade
+        fi
+        "${HUGSIM_PYTHON_BIN}" -m pip install --no-build-isolation ./submodules/simple-knn
+    fi
+    rmdir "${SIMPLE_KNN_LOCK_DIR}" >/dev/null 2>&1 || true
+fi
 
 if [[ "${SIM_CUDA}" == "inherit" ]]; then
     "${HUGSIM_PYTHON_BIN}" closed_loop.py \

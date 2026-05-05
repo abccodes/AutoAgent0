@@ -72,8 +72,10 @@ echo "planner_vlm_device_override=${PLANNER_VLM_DEVICE_OVERRIDE:-unset}"
 
 if [[ "${SETUP_VLM_ENV}" == "1" && "${PLANNER_NAME}" == "rap_vlm" ]]; then
     if [[ "${MODEL_ID:-}" == *"Qwen/Qwen3.6-"* ]]; then
-        export VLM_ENV_DIR="${VLM_ENV_DIR:-/tmp/hugsim-vlm-env-${SLURM_JOB_ID:-manual}}"
+        export VLM_ENV_DIR="${VLM_ENV_DIR:-/bigdata/aidan/.home/envs/vlm_qwen36}"
+        export VLM_ENV_REUSE_KEY="${VLM_ENV_REUSE_KEY:-qwen3.6-cu121-torch251}"
         echo "vlm_env_dir=${VLM_ENV_DIR}"
+        echo "vlm_env_reuse_key=${VLM_ENV_REUSE_KEY}"
     fi
     bash scripts/setup_vlm_env.sh
 fi

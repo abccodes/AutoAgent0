@@ -150,8 +150,8 @@ for scenario in "${SCENARIOS[@]}"; do
         resolve_args+=(--planner_path "${PLANNER_PATH_ENV}")
     fi
     output_path="$("${HUGSIM_PYTHON_BIN}" "${resolve_args[@]}")"
-    if [[ -d "${output_path}" ]] && find "${output_path}" -mindepth 1 -print -quit | grep -q .; then
-        echo "skipping existing ${scenario} output=${output_path}"
+    if [[ -f "${output_path}/eval.json" ]]; then
+        echo "skipping completed ${scenario} output=${output_path}"
         skipped=$((skipped + 1))
         continue
     fi
