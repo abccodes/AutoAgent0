@@ -251,6 +251,9 @@ def _build_front_overlay_lines(frame_idx, frame_debug, run_label, max_text_width
     if uses_intervention:
         should_intervene = latency_record.get("intervention_should_intervene")
         lines.append(f"intervened: {_format_overlay_value(should_intervene)}")
+        severity = latency_record.get("intervention_severity")
+        if severity is not None:
+            lines.append(f"intervention severity: {_format_overlay_value(severity)}")
         confidence = latency_record.get("intervention_confidence")
         if confidence is not None:
             lines.append(f"intervention confidence: {_format_overlay_value(confidence)}")

@@ -562,10 +562,12 @@ Task:
 - Then decide whether revision is needed before execution.
 
 Decision policy:
+- Use counterfactual reasoning to judge whether revising the baseline is necessary before the next replan, not merely whether some alternative might be cleaner.
 - Set "should_intervene" to true when the baseline action appears risky, ambiguous, instruction-inconsistent, poorly centered, too close to obstacles or lane boundaries, or likely to benefit from short-horizon correction.
-- Use "should_intervene" = false only when the baseline action looks clearly safe, lane-aligned, route-consistent, and comfortably clear of nearby conflicts.
-- If you are uncertain whether the baseline action safely stays in-lane, clears nearby obstacles, or follows the intended route, prefer "should_intervene" = true.
-- Because the planner replans frequently, it is acceptable to intervene for borderline or low-margin cases, not only catastrophic ones.
+- Use "should_intervene" = false when the baseline action looks safe enough to continue until the next replan, even if a different action might be slightly cleaner or more comfortable.
+- Use "should_intervene" = false only for trajectories that are genuinely acceptable for the next short horizon: lane-aligned enough, route-consistent enough, and not trending toward a meaningful safety or progress problem.
+- If the baseline shows noticeable drift toward a lane boundary, side clutter, a curb, vegetation, or an off-route heading, do not dismiss it as harmless merely because collision is not yet immediate. Treat persistent or meaningful margin loss as intervention-worthy.
+- Borderline or low-margin cases may still be marked as intervention-worthy, but they should usually receive low severity only when the issue is minor enough that no corrective override is needed yet.
 - In multiview mode, use extra camera views to judge surrounding safety context, not to reinterpret the path geometry shown on the front image.
 {multiview_guidance}
 
@@ -581,6 +583,15 @@ Reasoning style:
   2. the likely short-horizon consequence if the baseline action continues,
   3. whether that consequence is acceptable,
   4. why the corrective action is the best immediate revision when intervention is needed.
+- Assign severity using this scale:
+  - "low": no override needed now. Use this when the baseline is acceptable for the next short horizon or when any concern is only a minor refinement.
+  - "medium": a meaningful short-horizon safety, route-consistency, lane-centering, or progress concern that should revise the baseline now, even if failure is not yet imminent.
+  - "high": a concrete near-term failure mode that should revise the baseline immediately, such as likely lane departure, likely obstacle conflict, likely route miss at an intersection, or clearly unsafe clearance before the next replan.
+- Use "high" whenever the consequence is concrete and near-term; do not collapse all positive interventions into "medium".
+- If "should_intervene" is false, severity should almost always be "low".
+- If "should_intervene" is true, use:
+  - "medium" for meaningful but non-imminent corrections,
+  - "high" for imminent or clearly unacceptable trajectories.
 
 Baseline trajectory:
 {candidate_text}
@@ -588,6 +599,7 @@ Baseline trajectory:
 Return ONLY valid JSON in this exact schema:
 {{
   "should_intervene": <true or false>,
+  "severity": "<low or medium or high>",
   "corrective_action": "<left or right or straight>",
   "reasoning": "<short causal explanation for why intervention is or is not needed>"
 }}
@@ -773,6 +785,7 @@ class SubprocessQwen3TrajectorySelector:
         self._proc: Optional[subprocess.Popen[str]] = None
         self._stderr_file = None
         self._ready = False
+        self._stdout_buffer = ""
 
     def _ensure_proc(self) -> subprocess.Popen[str]:
         if self._proc is not None and self._proc.poll() is None:
@@ -807,11 +820,15 @@ class SubprocessQwen3TrajectorySelector:
             env=os.environ.copy(),
         )
         self._ready = False
+        self._stdout_buffer = ""
         return self._proc
 
     def _readline_with_timeout(self, proc: subprocess.Popen[str], timeout_sec: Optional[float]) -> str:
         if proc.stdout is None:
             raise RuntimeError("VLM worker stdout is unavailable")
+        if "\n" in self._stdout_buffer:
+            line, self._stdout_buffer = self._stdout_buffer.split("\n", 1)
+            return line + "\n"
         deadline = None if timeout_sec is None else time.monotonic() + max(float(timeout_sec), 0.0)
         stdout_fd = proc.stdout.fileno()
         while True:
@@ -825,7 +842,17 @@ class SubprocessQwen3TrajectorySelector:
                 if not ready:
                     continue
             if ready:
-                return proc.stdout.readline()
+                chunk = os.read(stdout_fd, 4096)
+                if not chunk:
+                    if self._stdout_buffer:
+                        line = self._stdout_buffer
+                        self._stdout_buffer = ""
+                        return line
+                    return ""
+                self._stdout_buffer += chunk.decode("utf-8", errors="replace")
+                if "\n" in self._stdout_buffer:
+                    line, self._stdout_buffer = self._stdout_buffer.split("\n", 1)
+                    return line + "\n"
 
     def preload(self, timeout_sec: Optional[float] = None) -> None:
         if self._ready and self._proc is not None and self._proc.poll() is None:
@@ -964,17 +991,24 @@ def _coerce_candidate_scores(raw_scores: object, num_candidates: int) -> Tuple[O
 
 def _coerce_intervention_decision(
     parsed: object,
-) -> Tuple[Optional[bool], Optional[str], Optional[float], Optional[str], Optional[str]]:
+) -> Tuple[Optional[bool], Optional[str], Optional[str], Optional[float], Optional[str], Optional[str]]:
     if not isinstance(parsed, dict):
-        return None, None, None, None, "intervention_output_invalid"
+        return None, None, None, None, None, "intervention_output_invalid"
 
     raw_flag = parsed.get("should_intervene")
     if not isinstance(raw_flag, bool):
-        return None, None, None, None, "intervention_flag_missing"
+        return None, None, None, None, None, "intervention_flag_missing"
+
+    raw_severity = parsed.get("severity")
+    if not isinstance(raw_severity, str):
+        return None, None, None, None, None, "intervention_severity_missing"
+    severity = raw_severity.strip().lower()
+    if severity not in {"low", "medium", "high"}:
+        return None, None, None, None, None, f"intervention_severity_invalid:{severity}"
 
     corrective_action = normalize_corrective_action(parsed.get("corrective_action"))
     if raw_flag and corrective_action is None:
-        return None, None, None, None, "intervention_corrective_action_missing"
+        return None, None, None, None, None, "intervention_corrective_action_missing"
 
     confidence = None
     if "confidence" in parsed and parsed.get("confidence") is not None:
@@ -982,12 +1016,12 @@ def _coerce_intervention_decision(
         try:
             confidence = float(raw_confidence)
         except Exception:
-            return None, None, None, None, "intervention_confidence_invalid"
+            return None, None, None, None, None, "intervention_confidence_invalid"
 
     reasoning = parsed.get("reasoning")
     if reasoning is not None and not isinstance(reasoning, str):
         reasoning = str(reasoning)
-    return bool(raw_flag), corrective_action, confidence, reasoning, None
+    return bool(raw_flag), severity, corrective_action, confidence, reasoning, None
 
 
 def _select_from_vlm_scores(
@@ -1177,6 +1211,7 @@ class VLMPlanSelector:
         scoring_invoked = False
         intervention_invoked = False
         intervention_should_intervene = None
+        intervention_severity = None
         intervention_corrective_action = None
         intervention_confidence = None
         intervention_reasoning = None
@@ -1198,6 +1233,7 @@ class VLMPlanSelector:
                 "selected_proposal_index": selected_row.get("proposal_index"),
                 "intervention_invoked": False,
                 "intervention_should_intervene": None,
+                "intervention_severity": None,
                 "intervention_corrective_action": None,
                 "intervention_confidence": None,
                 "intervention_elapsed_sec": 0.0,
@@ -1223,6 +1259,7 @@ class VLMPlanSelector:
                 "scoring_invoked": False,
                 "intervention_invoked": False,
                 "intervention_should_intervene": None,
+                "intervention_severity": None,
                 "intervention_corrective_action": None,
                 "intervention_confidence": None,
                 "intervention_reasoning": None,
@@ -1303,7 +1340,7 @@ class VLMPlanSelector:
                 }
 
             intervention_elapsed_sec = float(intervention_result.get("elapsed_sec", 0.0))
-            intervention_should_intervene, intervention_corrective_action, intervention_confidence, intervention_reasoning, intervention_parse_error = (
+            intervention_should_intervene, intervention_severity, intervention_corrective_action, intervention_confidence, intervention_reasoning, intervention_parse_error = (
                 _coerce_intervention_decision(intervention_result.get("parsed_output"))
             )
             if intervention_elapsed_sec > self.cfg.intervention_timeout_sec:
@@ -1338,6 +1375,7 @@ class VLMPlanSelector:
                     "selected_proposal_index": selected_row.get("proposal_index"),
                     "intervention_invoked": True,
                     "intervention_should_intervene": intervention_should_intervene,
+                    "intervention_severity": intervention_severity,
                     "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_elapsed_sec": intervention_elapsed_sec,
@@ -1367,6 +1405,7 @@ class VLMPlanSelector:
                     "selected_path_reasoning": selected_path_reasoning,
                     "intervention_invoked": True,
                     "intervention_should_intervene": intervention_should_intervene,
+                    "intervention_severity": intervention_severity,
                     "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_reasoning": intervention_reasoning,
@@ -1418,6 +1457,7 @@ class VLMPlanSelector:
                     "scoring_invoked": False,
                     "intervention_invoked": True,
                     "intervention_should_intervene": intervention_should_intervene,
+                    "intervention_severity": intervention_severity,
                     "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_reasoning": intervention_reasoning,
@@ -1425,23 +1465,29 @@ class VLMPlanSelector:
                 }
 
         scoring_route_instruction = route_instruction
+        intervention_action_for_scoring = (
+            intervention_corrective_action
+            if self.cfg.intervention_enabled
+            and intervention_should_intervene is True
+            and intervention_severity in {"medium", "high"}
+            else None
+        )
 
         try:
             LOG.info(
-                "Running VLM selection for frame=%d candidates=%d route='%s' corrective_action='%s'",
+                "Running VLM selection for frame=%d candidates=%d route='%s' corrective_action='%s' intervention_severity='%s'",
                 frame_index,
                 len(candidate_rows),
                 scoring_route_instruction,
-                intervention_corrective_action,
+                intervention_action_for_scoring,
+                intervention_severity,
             )
             scoring_invoked = True
             scoring_prompt = build_scoring_prompt(
                 candidate_rows,
                 scoring_route_instruction,
                 intervention_corrective_action=(
-                    intervention_corrective_action
-                    if self.cfg.intervention_enabled and intervention_should_intervene is True
-                    else None
+                    intervention_action_for_scoring
                 ),
                 current_ego_speed_mps=current_ego_speed_mps,
                 current_ego_accel_mps2=current_ego_accel_mps2,
@@ -1573,6 +1619,7 @@ class VLMPlanSelector:
             "selected_proposal_index": selected_row.get("proposal_index"),
             "intervention_invoked": intervention_invoked,
             "intervention_should_intervene": intervention_should_intervene,
+            "intervention_severity": intervention_severity,
             "intervention_corrective_action": intervention_corrective_action,
             "intervention_confidence": intervention_confidence,
             "intervention_elapsed_sec": intervention_elapsed_sec,
@@ -1608,6 +1655,7 @@ class VLMPlanSelector:
             "selected_path_reasoning": selected_path_reasoning,
             "intervention_invoked": intervention_invoked,
             "intervention_should_intervene": intervention_should_intervene,
+            "intervention_severity": intervention_severity,
             "intervention_corrective_action": intervention_corrective_action,
             "intervention_confidence": intervention_confidence,
             "intervention_reasoning": intervention_reasoning,
@@ -1670,6 +1718,8 @@ class VLMPlanSelector:
             "vlm_failed": (not vlm_q_valid) or vlm_timed_out,
             "intervention_invoked": intervention_invoked,
             "intervention_should_intervene": intervention_should_intervene,
+            "intervention_severity": intervention_severity,
+            "intervention_corrective_action": intervention_corrective_action,
             "intervention_confidence": intervention_confidence,
             "intervention_reasoning": intervention_reasoning,
             "intervention_elapsed_sec": intervention_elapsed_sec,
@@ -1705,6 +1755,28 @@ class VLMPlanSelector:
             for record in self._timeline_records
             if record.get("intervention_invoked") and record.get("intervention_should_intervene") is True
         ) / len(self._timeline_records)
+        intervention_low_rate = sum(
+            1.0
+            for record in self._timeline_records
+            if record.get("intervention_invoked") and record.get("intervention_severity") == "low"
+        ) / len(self._timeline_records)
+        intervention_medium_rate = sum(
+            1.0
+            for record in self._timeline_records
+            if record.get("intervention_invoked") and record.get("intervention_severity") == "medium"
+        ) / len(self._timeline_records)
+        intervention_high_rate = sum(
+            1.0
+            for record in self._timeline_records
+            if record.get("intervention_invoked") and record.get("intervention_severity") == "high"
+        ) / len(self._timeline_records)
+        intervention_action_applied_rate = sum(
+            1.0
+            for record in self._timeline_records
+            if record.get("intervention_invoked")
+            and record.get("intervention_should_intervene") is True
+            and record.get("intervention_severity") in {"medium", "high"}
+        ) / len(self._timeline_records)
         gate_skip_rate = sum(
             1.0
             for record in self._timeline_records
@@ -1735,6 +1807,10 @@ class VLMPlanSelector:
             "switch_to_current_rate": float(switch_rate),
             "fallback_rate": float(fallback_rate),
             "intervention_trigger_rate": float(intervention_trigger_rate),
+            "intervention_low_rate": float(intervention_low_rate),
+            "intervention_medium_rate": float(intervention_medium_rate),
+            "intervention_high_rate": float(intervention_high_rate),
+            "intervention_action_applied_rate": float(intervention_action_applied_rate),
             "gate_skip_rate": float(gate_skip_rate),
             "scoring_invoked_rate": float(scoring_invoked_rate),
             "vlm_q_valid_rate": float(

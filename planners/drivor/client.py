@@ -1397,6 +1397,7 @@ def main() -> int:
                             "scoring_invoked": selection_result.get("scoring_invoked"),
                             "intervention_invoked": selection_result.get("intervention_invoked"),
                             "intervention_should_intervene": selection_result.get("intervention_should_intervene"),
+                            "intervention_severity": selection_result.get("intervention_severity"),
                             "intervention_corrective_action": selection_result.get("intervention_corrective_action"),
                             "intervention_confidence": selection_result.get("intervention_confidence"),
                             "intervention_reasoning": selection_result.get("intervention_reasoning"),
