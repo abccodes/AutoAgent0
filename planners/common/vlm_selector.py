@@ -11,7 +11,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
-
 import cv2
 import numpy as np
 from PIL import Image
@@ -51,6 +50,8 @@ class VLMSelectorConfig:
     intervention_max_new_tokens: int = 120
     timeout_sec: float = 10.0
     intervention_timeout_sec: float = 10.0
+    intervention_action_threshold: float = 0.65
+    intervention_high_threshold: float = 0.85
     preload_on_init: bool = True
     save_debug_artifacts: bool = True
     debug_dir_name: str = "vlm_debug"
@@ -566,7 +567,7 @@ Decision policy:
 - Set "should_intervene" to true when the baseline action appears risky, ambiguous, instruction-inconsistent, poorly centered, too close to obstacles or lane boundaries, or likely to benefit from short-horizon correction.
 - Use "should_intervene" = false when the baseline action looks safe enough to continue until the next replan, even if a different action might be slightly cleaner or more comfortable.
 - Use "should_intervene" = false only for trajectories that are genuinely acceptable for the next short horizon: lane-aligned enough, route-consistent enough, and not trending toward a meaningful safety or progress problem.
-- If the baseline shows noticeable drift toward a lane boundary, side clutter, a curb, vegetation, or an off-route heading, do not dismiss it as harmless merely because collision is not yet immediate. Treat persistent or meaningful margin loss as intervention-worthy.
+- If the baseline shows noticeable drift toward a lane boundary, side clutter, a curb, vegetation, or an off-route heading, do not dismiss it as harmless merely because collision is not yet immediate. However, reserve intervention for drift or margin loss that is persistent, worsening, or likely to matter before the next replan; small recoverable deviations should usually stay below the action threshold.
 - Borderline or low-margin cases may still be marked as intervention-worthy, but they should usually receive low severity only when the issue is minor enough that no corrective override is needed yet.
 - In multiview mode, use extra camera views to judge surrounding safety context, not to reinterpret the path geometry shown on the front image.
 {multiview_guidance}
@@ -583,15 +584,19 @@ Reasoning style:
   2. the likely short-horizon consequence if the baseline action continues,
   3. whether that consequence is acceptable,
   4. why the corrective action is the best immediate revision when intervention is needed.
-- Assign severity using this scale:
-  - "low": no override needed now. Use this when the baseline is acceptable for the next short horizon or when any concern is only a minor refinement.
-  - "medium": a meaningful short-horizon safety, route-consistency, lane-centering, or progress concern that should revise the baseline now, even if failure is not yet imminent.
-  - "high": a concrete near-term failure mode that should revise the baseline immediately, such as likely lane departure, likely obstacle conflict, likely route miss at an intersection, or clearly unsafe clearance before the next replan.
-- Use "high" whenever the consequence is concrete and near-term; do not collapse all positive interventions into "medium".
-- If "should_intervene" is false, severity should almost always be "low".
-- If "should_intervene" is true, use:
-  - "medium" for meaningful but non-imminent corrections,
-  - "high" for imminent or clearly unacceptable trajectories.
+- Assign a numeric "severity_score" in [0.0, 1.0] using this guidance:
+  - 0.00-0.20: effectively safe to continue; no meaningful concern before next replan.
+  - 0.20-0.40: mild concern or small refinement opportunity.
+  - 0.40-0.60: borderline or low-margin issue worth noting, but not necessarily strong enough to force an override.
+  - 0.60-0.85: meaningful short-horizon safety, route-consistency, lane-centering, or progress concern that should revise the baseline now.
+  - 0.85-1.00: concrete near-term failure mode that should revise the baseline immediately, such as likely lane departure, likely obstacle conflict, likely route miss at an intersection, or clearly unsafe clearance before the next replan.
+- Use values across the range rather than snapping to boundary examples like 0.60, 0.65, or 0.85. Prefer roughly 0.05 increments and place the score at the lowest value that still matches the actual consequence.
+- If "should_intervene" is false, severity_score should usually stay below 0.60, and often below 0.50 when the baseline is clearly acceptable.
+- If "should_intervene" is true:
+  - use roughly 0.45-0.60 for borderline cases that are worth flagging but not worth overriding,
+  - use roughly 0.65-0.75 for meaningful but non-imminent corrections that should revise the baseline now,
+  - use roughly 0.75-0.84 for strong non-imminent corrections with clear downside if left unchanged,
+  - use 0.85+ only for imminent or clearly unacceptable trajectories.
 
 Baseline trajectory:
 {candidate_text}
@@ -599,7 +604,7 @@ Baseline trajectory:
 Return ONLY valid JSON in this exact schema:
 {{
   "should_intervene": <true or false>,
-  "severity": "<low or medium or high>",
+  "severity_score": <float between 0.0 and 1.0>,
   "corrective_action": "<left or right or straight>",
   "reasoning": "<short causal explanation for why intervention is or is not needed>"
 }}
@@ -989,9 +994,24 @@ def _coerce_candidate_scores(raw_scores: object, num_candidates: int) -> Tuple[O
     return [float(score) for score in scores], None
 
 
+def _intervention_severity_band(
+    severity_score: Optional[float],
+    *,
+    action_threshold: float,
+    high_threshold: float,
+) -> Optional[str]:
+    if severity_score is None:
+        return None
+    if severity_score >= high_threshold:
+        return "high"
+    if severity_score >= action_threshold:
+        return "medium"
+    return "low"
+
+
 def _coerce_intervention_decision(
     parsed: object,
-) -> Tuple[Optional[bool], Optional[str], Optional[str], Optional[float], Optional[str], Optional[str]]:
+) -> Tuple[Optional[bool], Optional[float], Optional[str], Optional[float], Optional[str], Optional[str]]:
     if not isinstance(parsed, dict):
         return None, None, None, None, None, "intervention_output_invalid"
 
@@ -999,12 +1019,15 @@ def _coerce_intervention_decision(
     if not isinstance(raw_flag, bool):
         return None, None, None, None, None, "intervention_flag_missing"
 
-    raw_severity = parsed.get("severity")
-    if not isinstance(raw_severity, str):
-        return None, None, None, None, None, "intervention_severity_missing"
-    severity = raw_severity.strip().lower()
-    if severity not in {"low", "medium", "high"}:
-        return None, None, None, None, None, f"intervention_severity_invalid:{severity}"
+    raw_severity_score = parsed.get("severity_score")
+    if raw_severity_score is None:
+        return None, None, None, None, None, "intervention_severity_score_missing"
+    try:
+        severity_score = float(raw_severity_score)
+    except Exception:
+        return None, None, None, None, None, "intervention_severity_score_invalid"
+    if not (0.0 <= severity_score <= 1.0):
+        return None, None, None, None, None, f"intervention_severity_score_out_of_range:{severity_score}"
 
     corrective_action = normalize_corrective_action(parsed.get("corrective_action"))
     if raw_flag and corrective_action is None:
@@ -1021,7 +1044,7 @@ def _coerce_intervention_decision(
     reasoning = parsed.get("reasoning")
     if reasoning is not None and not isinstance(reasoning, str):
         reasoning = str(reasoning)
-    return bool(raw_flag), severity, corrective_action, confidence, reasoning, None
+    return bool(raw_flag), severity_score, corrective_action, confidence, reasoning, None
 
 
 def _select_from_vlm_scores(
@@ -1211,7 +1234,8 @@ class VLMPlanSelector:
         scoring_invoked = False
         intervention_invoked = False
         intervention_should_intervene = None
-        intervention_severity = None
+        intervention_severity_score = None
+        intervention_severity_band = None
         intervention_corrective_action = None
         intervention_confidence = None
         intervention_reasoning = None
@@ -1233,7 +1257,8 @@ class VLMPlanSelector:
                 "selected_proposal_index": selected_row.get("proposal_index"),
                 "intervention_invoked": False,
                 "intervention_should_intervene": None,
-                "intervention_severity": None,
+                "intervention_severity_score": None,
+                "intervention_severity_band": None,
                 "intervention_corrective_action": None,
                 "intervention_confidence": None,
                 "intervention_elapsed_sec": 0.0,
@@ -1259,7 +1284,8 @@ class VLMPlanSelector:
                 "scoring_invoked": False,
                 "intervention_invoked": False,
                 "intervention_should_intervene": None,
-                "intervention_severity": None,
+                "intervention_severity_score": None,
+                "intervention_severity_band": None,
                 "intervention_corrective_action": None,
                 "intervention_confidence": None,
                 "intervention_reasoning": None,
@@ -1340,8 +1366,13 @@ class VLMPlanSelector:
                 }
 
             intervention_elapsed_sec = float(intervention_result.get("elapsed_sec", 0.0))
-            intervention_should_intervene, intervention_severity, intervention_corrective_action, intervention_confidence, intervention_reasoning, intervention_parse_error = (
+            intervention_should_intervene, intervention_severity_score, intervention_corrective_action, intervention_confidence, intervention_reasoning, intervention_parse_error = (
                 _coerce_intervention_decision(intervention_result.get("parsed_output"))
+            )
+            intervention_severity_band = _intervention_severity_band(
+                intervention_severity_score,
+                action_threshold=float(self.cfg.intervention_action_threshold),
+                high_threshold=float(self.cfg.intervention_high_threshold),
             )
             if intervention_elapsed_sec > self.cfg.intervention_timeout_sec:
                 intervention_error = f"intervention_timeout_fallback_rap:{intervention_elapsed_sec:.3f}"
@@ -1375,7 +1406,8 @@ class VLMPlanSelector:
                     "selected_proposal_index": selected_row.get("proposal_index"),
                     "intervention_invoked": True,
                     "intervention_should_intervene": intervention_should_intervene,
-                    "intervention_severity": intervention_severity,
+                    "intervention_severity_score": intervention_severity_score,
+                    "intervention_severity_band": intervention_severity_band,
                     "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_elapsed_sec": intervention_elapsed_sec,
@@ -1405,7 +1437,8 @@ class VLMPlanSelector:
                     "selected_path_reasoning": selected_path_reasoning,
                     "intervention_invoked": True,
                     "intervention_should_intervene": intervention_should_intervene,
-                    "intervention_severity": intervention_severity,
+                    "intervention_severity_score": intervention_severity_score,
+                    "intervention_severity_band": intervention_severity_band,
                     "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_reasoning": intervention_reasoning,
@@ -1457,7 +1490,8 @@ class VLMPlanSelector:
                     "scoring_invoked": False,
                     "intervention_invoked": True,
                     "intervention_should_intervene": intervention_should_intervene,
-                    "intervention_severity": intervention_severity,
+                    "intervention_severity_score": intervention_severity_score,
+                    "intervention_severity_band": intervention_severity_band,
                     "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_reasoning": intervention_reasoning,
@@ -1469,18 +1503,20 @@ class VLMPlanSelector:
             intervention_corrective_action
             if self.cfg.intervention_enabled
             and intervention_should_intervene is True
-            and intervention_severity in {"medium", "high"}
+            and intervention_severity_score is not None
+            and intervention_severity_score >= float(self.cfg.intervention_action_threshold)
             else None
         )
 
         try:
             LOG.info(
-                "Running VLM selection for frame=%d candidates=%d route='%s' corrective_action='%s' intervention_severity='%s'",
+                "Running VLM selection for frame=%d candidates=%d route='%s' corrective_action='%s' intervention_score='%.3f' intervention_band='%s'",
                 frame_index,
                 len(candidate_rows),
                 scoring_route_instruction,
                 intervention_action_for_scoring,
-                intervention_severity,
+                -1.0 if intervention_severity_score is None else intervention_severity_score,
+                intervention_severity_band,
             )
             scoring_invoked = True
             scoring_prompt = build_scoring_prompt(
@@ -1619,7 +1655,8 @@ class VLMPlanSelector:
             "selected_proposal_index": selected_row.get("proposal_index"),
             "intervention_invoked": intervention_invoked,
             "intervention_should_intervene": intervention_should_intervene,
-            "intervention_severity": intervention_severity,
+            "intervention_severity_score": intervention_severity_score,
+            "intervention_severity_band": intervention_severity_band,
             "intervention_corrective_action": intervention_corrective_action,
             "intervention_confidence": intervention_confidence,
             "intervention_elapsed_sec": intervention_elapsed_sec,
@@ -1655,7 +1692,8 @@ class VLMPlanSelector:
             "selected_path_reasoning": selected_path_reasoning,
             "intervention_invoked": intervention_invoked,
             "intervention_should_intervene": intervention_should_intervene,
-            "intervention_severity": intervention_severity,
+            "intervention_severity_score": intervention_severity_score,
+            "intervention_severity_band": intervention_severity_band,
             "intervention_corrective_action": intervention_corrective_action,
             "intervention_confidence": intervention_confidence,
             "intervention_reasoning": intervention_reasoning,
@@ -1718,7 +1756,8 @@ class VLMPlanSelector:
             "vlm_failed": (not vlm_q_valid) or vlm_timed_out,
             "intervention_invoked": intervention_invoked,
             "intervention_should_intervene": intervention_should_intervene,
-            "intervention_severity": intervention_severity,
+            "intervention_severity_score": intervention_severity_score,
+            "intervention_severity_band": intervention_severity_band,
             "intervention_corrective_action": intervention_corrective_action,
             "intervention_confidence": intervention_confidence,
             "intervention_reasoning": intervention_reasoning,
@@ -1755,27 +1794,33 @@ class VLMPlanSelector:
             for record in self._timeline_records
             if record.get("intervention_invoked") and record.get("intervention_should_intervene") is True
         ) / len(self._timeline_records)
+        intervention_scores = [
+            float(record["intervention_severity_score"])
+            for record in self._timeline_records
+            if record.get("intervention_severity_score") is not None
+        ]
         intervention_low_rate = sum(
             1.0
             for record in self._timeline_records
-            if record.get("intervention_invoked") and record.get("intervention_severity") == "low"
+            if record.get("intervention_invoked") and record.get("intervention_severity_band") == "low"
         ) / len(self._timeline_records)
         intervention_medium_rate = sum(
             1.0
             for record in self._timeline_records
-            if record.get("intervention_invoked") and record.get("intervention_severity") == "medium"
+            if record.get("intervention_invoked") and record.get("intervention_severity_band") == "medium"
         ) / len(self._timeline_records)
         intervention_high_rate = sum(
             1.0
             for record in self._timeline_records
-            if record.get("intervention_invoked") and record.get("intervention_severity") == "high"
+            if record.get("intervention_invoked") and record.get("intervention_severity_band") == "high"
         ) / len(self._timeline_records)
         intervention_action_applied_rate = sum(
             1.0
             for record in self._timeline_records
             if record.get("intervention_invoked")
             and record.get("intervention_should_intervene") is True
-            and record.get("intervention_severity") in {"medium", "high"}
+            and record.get("intervention_severity_score") is not None
+            and float(record.get("intervention_severity_score")) >= float(self.cfg.intervention_action_threshold)
         ) / len(self._timeline_records)
         gate_skip_rate = sum(
             1.0
@@ -1811,6 +1856,11 @@ class VLMPlanSelector:
             "intervention_medium_rate": float(intervention_medium_rate),
             "intervention_high_rate": float(intervention_high_rate),
             "intervention_action_applied_rate": float(intervention_action_applied_rate),
+            "intervention_action_threshold": float(self.cfg.intervention_action_threshold),
+            "intervention_high_threshold": float(self.cfg.intervention_high_threshold),
+            "intervention_severity_score_mean": float(np.mean(intervention_scores)) if intervention_scores else 0.0,
+            "intervention_severity_score_p50": float(np.percentile(intervention_scores, 50)) if intervention_scores else 0.0,
+            "intervention_severity_score_p95": float(np.percentile(intervention_scores, 95)) if intervention_scores else 0.0,
             "gate_skip_rate": float(gate_skip_rate),
             "scoring_invoked_rate": float(scoring_invoked_rate),
             "vlm_q_valid_rate": float(
