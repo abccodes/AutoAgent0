@@ -210,6 +210,144 @@ class HUGSimEnv(gymnasium.Env):
             obj_boxes.append([obj_b2w[2, 3].item(), -obj_b2w[0, 3].item(), -obj_b2w[1, 3].item(), wlh[0], wlh[1], wlh[2], -yaw-0.5*np.pi])
         return obj_boxes
 
+    def get_agent_privileged_info(self):
+        """DEVELOPMENT ONLY helper: return privileged per-agent info for non-ego agents.
+
+        Returns a list of dicts with keys mirroring the ego info layout where possible:
+          - agent_id: str
+          - agent_pos_world: [x, y, z]
+          - agent_pos_imu: [x, y, z] (same ordering as `objs_list` entries)
+          - agent_rot: [rx, ry, rz] Euler (XYZ) from agent pose matrix
+          - agent_velo: scalar speed (if available from planner.stats)
+          - agent_heading: float (radians, converted similar to `objs_list` convention)
+          - agent_steer: steering angle if available, else None
+          - accel: acceleration if available, else None
+          - steer_rate: steering-rate if available, else None
+          - b2w: full 4x4 transform (ndarray)
+          - route: planned route array (if planner.route populated), else None
+
+        Notes:
+        - This is intentionally permissive: many fields may be None depending on
+          the planner/controller implementation. Use `agent_id` to track agents
+          over time.
+        - The IMU ordering matches `objs_list` (x= b2w[2,3], y = -b2w[0,3], z = -b2w[1,3]).
+        """
+        out = []
+        planning = self.render_kwargs.get('planning', [None, {}])
+        b2ws = {}
+        if planning and isinstance(planning, (list, tuple)):
+            try:
+                b2ws = planning[0] or {}
+            except Exception:
+                b2ws = {}
+        elif isinstance(planning, dict):
+            b2ws = planning
+
+        for agent_id, b2w in b2ws.items():
+            try:
+                # tensors may be on GPU
+                if hasattr(b2w, 'detach'):
+                    b2w_np = b2w.detach().cpu().numpy()
+                else:
+                    b2w_np = np.asarray(b2w)
+            except Exception:
+                b2w_np = np.asarray(b2w)
+
+            # world pose r,t (pose2rt returns euler XYZ and translation)
+            try:
+                agent_rot_euler, agent_trans = pose2rt(b2w_np)
+                agent_rot = list(np.asarray(agent_rot_euler).tolist())
+                agent_pos_world = [float(agent_trans[0]), float(agent_trans[1]), float(agent_trans[2])]
+            except Exception:
+                agent_rot = None
+                agent_pos_world = [float(b2w_np[0, 3]), float(b2w_np[1, 3]), float(b2w_np[2, 3])]
+
+            # IMU ordering used elsewhere in env (objs_list)
+            imu_x = float(b2w_np[2, 3])
+            imu_y = float(-b2w_np[0, 3])
+            imu_z = float(-b2w_np[1, 3])
+
+            # derive heading consistent with objs_list
+            try:
+                yaw = SCR.from_matrix(b2w_np[:3, :3]).as_euler('YXZ')[0]
+                heading = float(-yaw - 0.5 * np.pi)
+            except Exception:
+                heading = None
+
+            stat = self.planner.stats.get(agent_id) if hasattr(self, 'planner') else None
+            speed = None
+            if stat is not None:
+                try:
+                    speed = float(stat[4])
+                except Exception:
+                    speed = None
+
+            # approximate velocity vector in world frame (vx, vy, vz)
+            if speed is not None and heading is not None:
+                vx = float(speed * np.sin(heading))
+                vy = float(speed * np.cos(heading))
+                vz = 0.0
+                agent_velo = speed
+                agent_vel_vec = [vx, vy, vz]
+            else:
+                agent_velo = None
+                agent_vel_vec = None
+
+            # attempt to extract controller-level inputs if present
+            accel = None
+            steer_rate = None
+            agent_steer = None
+            if hasattr(self, 'planner'):
+                controller = self.planner.controller.get(agent_id) if hasattr(self.planner, 'controller') else None
+                if controller is not None:
+                    # common controller state names may vary; probe defensively
+                    if hasattr(controller, 'last_accel'):
+                        try:
+                            accel = float(controller.last_accel)
+                        except Exception:
+                            accel = None
+                    if hasattr(controller, 'last_steer_rate'):
+                        try:
+                            steer_rate = float(controller.last_steer_rate)
+                        except Exception:
+                            steer_rate = None
+                    if hasattr(controller, 'steer'):
+                        try:
+                            agent_steer = float(controller.steer)
+                        except Exception:
+                            agent_steer = None
+
+            route = None
+            if hasattr(self, 'planner') and hasattr(self.planner, 'route'):
+                try:
+                    r = self.planner.route.get(agent_id)
+                    if r is not None:
+                        route = r.detach().cpu().numpy().tolist() if hasattr(r, 'detach') else (r.tolist() if hasattr(r, 'tolist') else r)
+                except Exception:
+                    route = None
+
+            ckpt = None
+            if hasattr(self, 'planner') and hasattr(self.planner, 'ckpts'):
+                ckpt = self.planner.ckpts.get(agent_id)
+
+            out.append({
+                'agent_id': agent_id,
+                'b2w': b2w_np,
+                'agent_pos_world': agent_pos_world,
+                'agent_pos_imu': [imu_x, imu_y, imu_z],
+                'agent_rot': agent_rot,
+                'agent_velo': agent_velo,
+                'agent_vel_vec': agent_vel_vec,
+                'agent_heading': heading,
+                'agent_steer': agent_steer,
+                'accel': accel,
+                'steer_rate': steer_rate,
+                'route': route,
+                'ckpt': ckpt,
+            })
+
+        return out
+
     def _get_obs(self):
         rgbs, semantics, depths = {}, {}, {}
         v2front = self.cam_params['CAM_FRONT']["v2c"]
