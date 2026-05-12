@@ -188,6 +188,10 @@ if __name__ == "__main__":
         cfg.update(model_config)
     else:
         logger.warning(f"Model config not found at {model_config_path}; skipping")
+    # Ensure cfg has `model_path` (required by the environment loader)
+    if 'model_path' not in cfg:
+        logger.info(f"Setting cfg.model_path to {model_path}")
+        cfg.model_path = model_path
     
     # Run test
     run_payload_test(cfg, args.output_dir)
