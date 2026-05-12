@@ -20,7 +20,7 @@ if [[ -n "${SLURM_JOB_ID:-}" || -n "${SLURM_STEP_ID:-}" ]]; then
 fi
 SIM_CUDA="${2:-${DEFAULT_CUDA_ID}}"
 
-BASE_PATH="${BASE_PATH:-configs/sim/nuscenes_base_local.yaml}"
+BASE_PATH="${BASE_PATH:-configs/sim/nuscenes_base.yaml}"
 CAMERA_PATH="${CAMERA_PATH:-configs/sim/nuscenes_camera.yaml}"
 KINEMATIC_PATH="${KINEMATIC_PATH:-configs/sim/kinematic.yaml}"
 
