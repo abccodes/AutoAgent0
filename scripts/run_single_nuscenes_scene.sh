@@ -111,14 +111,14 @@ echo "sim_cuda=${SIM_CUDA} ad_cuda=${AD_CUDA}"
 echo "include_privileged_pipe=${INCLUDE_PRIVILEGED_PIPE}"
 echo "ld_library_path=${LD_LIBRARY_PATH:-unset}"
 
-CLOSED_LOOP_EXTRA_ARGS=()
-case "$(printf '%s' "${INCLUDE_PRIVILEGED_PIPE}" | tr '[:upper:]' '[:lower:]')" in
-    1|true|yes|on)
-        CLOSED_LOOP_EXTRA_ARGS+=(--include_privileged_pipe)
-        ;;
-esac
+# CLOSED_LOOP_EXTRA_ARGS=()
+# case "$(printf '%s' "${INCLUDE_PRIVILEGED_PIPE}" | tr '[:upper:]' '[:lower:]')" in
+#     1|true|yes|on)
+#         CLOSED_LOOP_EXTRA_ARGS+=(--include_privileged_pipe)
+#         ;;
+# esac
 
-echo "closed loop extra args=${CLOSED_LOOP_EXTRA_ARGS}"
+
 
 if ! "${HUGSIM_PYTHON_BIN}" -c "from simple_knn._C import distCUDA2" >/dev/null 2>&1; then
     echo "simple_knn missing in ${HUGSIM_PYTHON_BIN}; bootstrapping local CUDA extension"
@@ -147,7 +147,7 @@ if [[ "${SIM_CUDA}" == "inherit" ]]; then
         --planner_path "${PLANNER_PATH}" \
         --ad "${AD_NAME}" \
         --ad_cuda "${AD_CUDA}" \
-        --include_privileged_pipe "${CLOSED_LOOP_EXTRA_ARGS[@]}"
+        --include_privileged_pipe "${INCLUDE_PRIVILEGED_PIPE}"
 else
     CUDA_VISIBLE_DEVICES="${SIM_CUDA}" \
     "${HUGSIM_PYTHON_BIN}" closed_loop.py \
@@ -158,5 +158,5 @@ else
         --planner_path "${PLANNER_PATH}" \
         --ad "${AD_NAME}" \
         --ad_cuda "${AD_CUDA}" \
-        --include_privileged_pipe "${CLOSED_LOOP_EXTRA_ARGS[@]}"
+        --include_privileged_pipe "${INCLUDE_PRIVILEGED_PIPE}"
 fi
