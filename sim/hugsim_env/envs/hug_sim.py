@@ -461,5 +461,7 @@ class HUGSimEnv(gymnasium.Env):
         info = self._get_info()
         info['rc'] = rc
         info['collision'] = bg_collision or fg_collision
-        
-        return observation, reward, terminated, False, info
+
+        # return privileged info alongside the usual env.step outputs
+        privileged_info = self.get_agent_privileged_info()
+        return observation, reward, terminated, False, info, privileged_info

@@ -92,10 +92,11 @@ def run_payload_test(cfg: OmegaConf, output_dir: str) -> None:
     try:
         # Frame 0: Reset
         logger.info("Resetting environment...")
-        obs0, info0 = env.reset()
+        obs0, info0, priv0 = env.reset()
+        # obs0, info0 = env.reset()
         
-        # Get privileged info at frame 0
-        priv0 = env.unwrapped.get_agent_privileged_info()
+        # # Get privileged info at frame 0
+        # priv0 = env.unwrapped.get_agent_privileged_info()
         
         frame0_data = {
             "frame_idx": 0,
@@ -110,10 +111,7 @@ def run_payload_test(cfg: OmegaConf, output_dir: str) -> None:
         logger.info("Taking a step...")
         # Minimal action: zero acceleration and steering rate
         action = {'acc': 0.0, 'steer_rate': 0.0}
-        obs1, reward, terminated, truncated, info1 = env.step(action)
-        
-        # Get privileged info at frame 1
-        priv1 = env.unwrapped.get_agent_privileged_info()
+        obs1, reward, terminated, truncated, info1, priv1 = env.step(action)
         
         frame1_data = {
             "frame_idx": 1,
