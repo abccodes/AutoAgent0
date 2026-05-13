@@ -30,7 +30,9 @@ echo "LAUNCH DEBUG: (DRIVOR env vars will be shown after defaults are applied)"
 export PYTHONPATH="${HUGSIM_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Ensure the DrivoR env's torch CUDA libs resolve before system/HUGSIM copies.
+echo "LAUNCH DEBUG: DRIVOR_PYTHON_BIN=${DRIVOR_PYTHON_BIN:-unset}"
 DRIVOR_ENV_ROOT="$(cd "$(dirname "${DRIVOR_PYTHON_BIN}")/.." && pwd)"
+echo "LAUNCH DEBUG: DRIVOR_ENV_ROOT=${DRIVOR_ENV_ROOT}"
 DRIVOR_TORCH_LIB_DIR="${DRIVOR_ENV_ROOT}/lib/python3.8/site-packages/torch/lib"
 if [[ -d "${DRIVOR_TORCH_LIB_DIR}" ]]; then
   export LD_LIBRARY_PATH="${DRIVOR_TORCH_LIB_DIR}:${DRIVOR_ENV_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
@@ -39,7 +41,7 @@ fi
 echo "LAUNCH DEBUG: DRIVOR_PYTHON_BIN=${DRIVOR_PYTHON_BIN:-unset}"
 echo "LAUNCH DEBUG: DRIVOR_REPO_ROOT=${DRIVOR_REPO_ROOT:-unset}"
 echo "LAUNCH DEBUG: DRIVOR_CHECKPOINT=${DRIVOR_CHECKPOINT:-unset}"
-echo "LAUNCH DEBUG: DRIVOR_ENV_ROOT=${DRIVOR_ENV_ROOT}"
+
 echo "LAUNCH DEBUG: DRIVOR_TORCH_LIB_DIR=${DRIVOR_TORCH_LIB_DIR} (exists=$( [[ -d \"${DRIVOR_TORCH_LIB_DIR}\" ]] && echo true || echo false ))"
 echo "LAUNCH DEBUG: LD_LIBRARY_PATH after adding drivor torch lib=${LD_LIBRARY_PATH:-unset}"
 
