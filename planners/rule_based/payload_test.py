@@ -95,12 +95,16 @@ def visualize_array_to_txt(obs, output_path, file_name):
     num_classes = len(unique_values)
     
      # Create the image
-    plt.imshow(data_array, norm="linear", cmap='gray', vmin=0, vmax=255)
+    plt.imshow(data_array, norm="linear", cmap='gray', vmin=min(unique_values), vmax=max(unique_values))
     plt.xticks([])
     plt.yticks([])
 
     # Save the image
-    plt.savefig(output_path)
+    plt.savefig(
+        output_path,
+        bbox_inches='tight',
+        pad_inches=0
+    )
     print(f"Image saved to {output_path}")
 
     # Determine the color mapping range (0-255)
