@@ -95,7 +95,7 @@ def visualize_array_to_txt(obs, output_path, file_name):
     num_classes = len(unique_values)
     
      # Create the image
-    plt.imshow(data_array, cmap='gray', vmin=0, vmax=255)
+    plt.imshow(data_array, norm="linear", cmap='gray', vmin=0, vmax=255)
     plt.xticks([])
     plt.yticks([])
 
