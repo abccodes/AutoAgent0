@@ -111,8 +111,12 @@ def run_payload_test(cfg: OmegaConf, output_dir: str) -> None:
         logger.info("Taking a step...")
         # Minimal action: zero acceleration and steering rate
         action = {'acc': 0.0, 'steer_rate': 0.0}
-        obs1, reward, terminated, truncated, info1, priv1 = env.step(action)
-        
+        obs1, reward, terminated, truncated, info1 = env.step(action)
+        # fetch privileged info separately to remain gym-compliant
+        try:
+            priv1 = env.unwrapped.get_agent_privileged_info()
+        except Exception:
+            priv1 = None
         frame1_data = {
             "frame_idx": 1,
             "obs": _serialize_for_json(obs1),

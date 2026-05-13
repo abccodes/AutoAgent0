@@ -905,7 +905,13 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
             )
 
             action = {'acc': acc, 'steer_rate': steer_rate}
-            obs, reward, terminated, truncated, info, privileged_info = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
+            # update privileged_info after step without changing Env.step() signature
+            if include_privileged_pipe:
+                try:
+                    privileged_info = env.unwrapped.get_agent_privileged_info()
+                except Exception:
+                    privileged_info = None
             cnt += 1
             done = terminated or truncated or cnt > 400
 
