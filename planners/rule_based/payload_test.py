@@ -106,6 +106,8 @@ def visualize_array_to_txt(obs, output_path, file_name):
             for c in range(cols):
                 row_str += str(data_array[r, c]) + " "
             f.write(row_str + "\n")
+    print(f"unique values are {unique_values}")
+    print(f"wrote {file_name} to {output_path}")
 
 
 def run_payload_test(cfg: OmegaConf, output_dir: str) -> None:
@@ -140,7 +142,12 @@ def run_payload_test(cfg: OmegaConf, output_dir: str) -> None:
         }
         frames_data.append(frame0_data)
         logger.info(f"Frame 0 captured. Ego pos: {info0.get('ego_pos', 'N/A')}")
+
+        print("visualizing segmentation info....")
         visualize_array_to_txt(obs0, output_dir, "obs0.txt")
+        print("visualized segmentation info!")
+
+
         # Frame 1: Step
         logger.info("Taking a step...")
         # Minimal action: zero acceleration and steering rate
