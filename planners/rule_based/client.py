@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-DrivoR HUGSIM FIFO adapter (client.py)
+Rule-based Planner HUGSIM FIFO adapter (client.py)
 
-- Reads pickled (obs, info) messages from obs_pipe
-- Builds navsim.AgentInput (reusing navsim dataclasses)
-- Uses DrivoRAgent.get_feature_builders() (DrivoRFeatureBuilder) to compute features
-- Runs agent.forward(features) to get proposals and scores
+- Reads pickled (obs, info, privileged_info) messages from obs_pipe
+- Uses PrivilegedPlannerService.process() to generate trajectory plans
+- Converts Trajectory objects to proposal format compatible with HUGSIM
 - Writes a plan payload to plan_pipe (pickled, with 8-byte length prefix) compatible with HUGSIM
 
 Assumptions (review before running):
-- HUGSIM message format: same as RAP adapter: pickled tuple (obs, info)
+- HUGSIM message format: pickled tuple (obs, info, privileged_info)
   - obs['rgb'][cam_name] -> H x W x 3 uint8 images
   - info contains 'cam_params'[cam_name] with {intrinsic: {W,H,cx,cy,fovx,fovy}, l2c_rot: [3 deg], l2c_trans: [3]}
   - info contains ego_pos/ego_rot or timestamp fields used to compute velocities
-- Camera mapping to DrivoR sensors (edit MAP_HUGSIM_TO_DRIVOR if needed)
+  - privileged_info contains ground-truth agent/vehicle info from closed-loop simulator
+- Environment variables: RULE_BASED_REPO_ROOT (path to rule-based planner repo)
 """
 import argparse
 import logging
@@ -27,33 +27,9 @@ import traceback
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-import torch
-import inspect
-
-# Bridge the pytree registration API for older torch versions.
-# Newer transformers expects torch>=2.2's public pytree registration name.
-# DrivoR environments may still run with torch 2.1, which exposes the private helper.
-try:
-    from torch.utils import _pytree as _torch_pytree
-
-    if hasattr(_torch_pytree, "_register_pytree_node"):
-        _raw_register_pytree_node = _torch_pytree._register_pytree_node
-        _raw_signature = inspect.signature(_raw_register_pytree_node)
-
-        def _compat_register_pytree_node(cls, flatten_fn, unflatten_fn, **kwargs):
-            supported_kwargs = {
-                key: value
-                for key, value in kwargs.items()
-                if key in _raw_signature.parameters
-            }
-            return _raw_register_pytree_node(cls, flatten_fn, unflatten_fn, **supported_kwargs)
-
-        _torch_pytree.register_pytree_node = _compat_register_pytree_node
-except Exception:
-    pass
 
 from scipy.spatial.transform import Rotation as SCR
 from planners.common.vlm_selector import VLMPlanSelector, VLMSelectorConfig
@@ -63,17 +39,23 @@ from planners.common.vlm_env import (
     get_prefixed_env_value,
 )
 
-# Import navsim dataclasses (AgentInput, Camera, Cameras, Lidar, EgoStatus)
-# We add repo root to path based on env var DRIVOR_REPO_ROOT (set by HUGSIM launch)
-DRIVOR_REPO_ROOT = os.environ.get("DRIVOR_REPO_ROOT", "")
-if not DRIVOR_REPO_ROOT:
-    raise RuntimeError("DRIVOR_REPO_ROOT must be set in environment")
-sys.path.insert(0, str(Path(DRIVOR_REPO_ROOT).resolve()))
+# Import custom rule-based planner
+# Add repo root to path based on env var RULE_BASED_REPO_ROOT (set by HUGSIM launch)
+RULE_BASED_REPO_ROOT = os.environ.get("RULE_BASED_REPO_ROOT", "")
+if not RULE_BASED_REPO_ROOT:
+    raise RuntimeError("RULE_BASED_REPO_ROOT must be set in environment")
+sys.path.insert(0, str(Path(RULE_BASED_REPO_ROOT).resolve()))
 
-from navsim.common.dataclasses import AgentInput, Cameras, Camera, Lidar, EgoStatus  # type: ignore
-from navsim.agents.drivoR.drivor_agent import DrivoRAgent  # type: ignore
+try:
+    # from planners.rule_based.planner_service import PlannerService
+    from privileged_planner.service import PrivilegedPlannerService
+except ImportError as e:
+    raise RuntimeError(
+        f"PrivilegedPlannerService not found in {RULE_BASED_REPO_ROOT}. "
+        "Ensure planners.rule_based.planner_service module exists. Error: {e}"
+    ) from e
 
-LOG = logging.getLogger("drivor_adapter")
+LOG = logging.getLogger("rule_based_adapter")
 
 DEFAULT_CAM_ORDER = [
     "CAM_BACK",
@@ -84,21 +66,9 @@ DEFAULT_CAM_ORDER = [
     "CAM_BACK_RIGHT",
 ]
 
-# Map HUGSIM camera names to navsim Cameras field names
-# NOTE: Only map cameras that are enabled in the model config.
-# DrivoR config has: cam_f0:[3], cam_l0:[3], cam_r0:[3], cam_b0:[3] (enabled)
-#                   cam_l1:[], cam_l2:[], cam_r1:[], cam_r2:[] (disabled/empty)
-# To avoid feature mismatch (8 cameras vs 4 scene tokens), we only populate enabled slots.
-MAP_HUGSIM_TO_DRIVOR = {
-    "CAM_FRONT": "cam_f0",
-    "CAM_BACK": "cam_b0",
-    "CAM_FRONT_LEFT": "cam_l0",
-    "CAM_FRONT_RIGHT": "cam_r0",
-    # Disabled in model config: cam_l1, cam_l2, cam_r1, cam_r2
-}
-
-# history frames used to build AgentInput (DrivoR config often expects 4)
+# Trajectory horizon and time step
 EGO_HISTORY_FRAMES = 4
+DEFAULT_OUTPUT_POSES = 8
 
 TOPK = 10
 
@@ -106,7 +76,7 @@ PLAN_DT_SEC = 0.5
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="DrivoR FIFO client for HUGSIM")
+    parser = argparse.ArgumentParser(description="Rule-based planner FIFO client for HUGSIM")
     parser.add_argument("--output", required=True, help="HUGSIM output directory containing FIFO pipes")
     return parser.parse_args()
 
@@ -130,26 +100,30 @@ def _coerce_env_value(raw_value, default_value):
 #automatically resolves VLM config values based on vlm_env.py
 def resolve_vlm_config() -> VLMSelectorConfig:
     values = {}
-    drivor_python_bin = os.environ.get("DRIVOR_PYTHON_BIN", "")
+    rule_based_python_bin = os.environ.get("RULE_BASED_PYTHON_BIN", "")
     for suffix, field_name in VLM_ENV_FIELD_NAMES.items():
         default_value = VLM_ENV_DEFAULTS[suffix]
         if suffix == "PYTHON_BIN":
-            default_value = drivor_python_bin
-        raw_value = get_prefixed_env_value(suffix, default=default_value)
+            default_value = rule_based_python_bin
+        raw_value = get_prefixed_env_value(
+            suffix,
+            default=default_value,
+            prefixes=("RULE_BASED_VLM_", "PLANNER_VLM_"),
+        )
         values[field_name] = _coerce_env_value(raw_value, default_value)
     return VLMSelectorConfig(**values)
 
 
 def setup_logging(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    log_path = output_dir / "drivor_client.log"
+    log_path = output_dir / "rule_based_client.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(log_path, mode="w"), logging.StreamHandler(sys.stdout)],
     )
 
-#no need for load_rap_model since it's abstracted to DrivoRAgent.initialize()
+# no need for load_rap_model since this adapter owns its own planner bootstrap
 
 def make_command_one_hot(command: int) -> np.ndarray:
     # HUGSIM commands: 0=right, 1=left, 2=forward
@@ -160,90 +134,7 @@ def make_command_one_hot(command: int) -> np.ndarray:
     }
     return mapping.get(int(command), np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32))
 
-# no need for preprocess_image because DrivoR uses its own feature builders to perform preprocessing
-
-#helper functions for camera and ego state related calculations/transformations
-def euler_deg_to_rot_matrix(angles_deg: Sequence[float]) -> np.ndarray:
-    """
-    Convert Euler angles in degrees to rotation matrix.
-    Assumes angles are [roll, pitch, yaw] in degrees and uses R = Rz(yaw) @ Ry(pitch) @ Rx(roll).
-    This ordering is a common convention but may need adjustment to match HUGSIM.
-    """
-    roll, pitch, yaw = np.deg2rad(angles_deg[:3])
-    Rx = np.array([[1, 0, 0], [0, math.cos(roll), -math.sin(roll)], [0, math.sin(roll), math.cos(roll)]], dtype=np.float32)
-    Ry = np.array([[math.cos(pitch), 0, math.sin(pitch)], [0, 1, 0], [-math.sin(pitch), 0, math.cos(pitch)]], dtype=np.float32)
-    Rz = np.array([[math.cos(yaw), -math.sin(yaw), 0], [math.sin(yaw), math.cos(yaw), 0], [0, 0, 1]], dtype=np.float32)
-    R = Rz @ Ry @ Rx
-    return R
-
-
-def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: Dict) -> Camera:
-    """
-    Build navsim.common.dataclasses.Camera from HUGSIM image and cam_params.
-    cam_params expected shape:
-      cam_params[cam_name]["intrinsic"] with W,H,cx,cy,fovx,fovy
-      cam_params[cam_name]["l2c_rot"] (3 angles deg) and l2c_trans (3 floats) OR cam_params[cam_name]['l2c'] a 4x4 matrix
-    """
-    # intrinsics -> 3x3 matrix
-    intr = cam_params.get("intrinsic", {})
-    W = float(intr.get("W", cam_params.get("W", 800)))
-    H = float(intr.get("H", cam_params.get("H", 450)))
-    cx = float(intr.get("cx", intr.get("cx", W / 2.0)))
-    cy = float(intr.get("cy", intr.get("cy", H / 2.0)))
-    fovx = float(intr.get("fovx", 60.0))
-    fovy = float(intr.get("fovy", 40.0))
-    # compute fx, fy as RAP did
-    fx = W / (2.0 * math.tan(math.radians(fovx) / 2.0))
-    fy = H / (2.0 * math.tan(math.radians(fovy) / 2.0))
-    cam_intrinsic = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32)
-
-    # Compute sensor2lidar rotation and translation by inverting lidar->cam if available
-    # HUGSIM sometimes provides l2c_rot and l2c_trans (degrees and meters)
-    sensor2lidar_rot = None
-    sensor2lidar_trans = None
-    if "l2c" in cam_params:
-        # assume provided full 4x4 matrix l2c
-        l2c = np.array(cam_params["l2c"], dtype=np.float32)
-        if l2c.shape == (4, 4):
-            cam2lidar = np.linalg.inv(l2c)
-            sensor2lidar_rot = cam2lidar[:3, :3].astype(np.float32)
-            sensor2lidar_trans = cam2lidar[:3, 3].astype(np.float32)
-    else:
-        # try l2c_rot / l2c_trans keys (degrees + meters)
-        rot_angles = cam_params.get("l2c_rot", None)
-        trans = cam_params.get("l2c_trans", None)
-        if rot_angles is not None and trans is not None:
-            R_l2c = euler_deg_to_rot_matrix(rot_angles)
-            t_l2c = np.array(trans, dtype=np.float32)
-            # lidar -> cam : [R_l2c, t_l2c], invert to get cam -> lidar
-            R_c2l = R_l2c.T
-            t_c2l = -R_c2l @ t_l2c
-            sensor2lidar_rot = R_c2l.astype(np.float32)
-            sensor2lidar_trans = t_c2l.astype(np.float32)
-
-    # fallback to identity / zero if missing
-    if sensor2lidar_rot is None:
-        sensor2lidar_rot = np.eye(3, dtype=np.float32)
-    if sensor2lidar_trans is None:
-        sensor2lidar_trans = np.zeros(3, dtype=np.float32)
-
-    if rgb_image is None:
-        LOG.warning(
-            "Missing HUGSIM camera image for %s; using blank %dx%d black frame",
-            cam_name,
-            int(H),
-            int(W),
-        )
-        rgb_image = np.zeros((int(H), int(W), 3), dtype=np.uint8)
-
-    cam = Camera(
-        image=rgb_image,
-        sensor2lidar_rotation=sensor2lidar_rot,
-        sensor2lidar_translation=sensor2lidar_trans,
-        intrinsics=cam_intrinsic,
-        distortion=None,
-    )
-    return cam
+# no need for preprocess_image because rule-based planner handles its own preprocessing
 
 def forward_left_basis(yaw: float):
         forward_dir = np.array([math.sin(yaw), math.cos(yaw)], dtype=np.float32)
@@ -309,123 +200,61 @@ def compute_local_acceleration(info_history: Sequence[Dict], index: int) -> np.n
 
 
 
-#comparable to build_features for RAP
-def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_history: int = EGO_HISTORY_FRAMES) -> AgentInput:
-    """
-    Convert HUGSIM obs + info_history into navsim.AgentInput.
-    - obs is expected to be {'rgb': {cam_name: HxWx3 array}, ...}
-    - info_history is a list of info dicts (most recent last) with keys: 'cam_params', 'ego_pos', 'ego_rot', 'timestamp', 'command' ...
-    """
-    # ensure length
-    while len(info_history) < num_history:
-        info_history.insert(0, info_history[0].copy())
-
-    ego_statuses = []
-    cameras_list = []
-    lidars_list = []
-
-    # Debug: log high-level obs/cam_params info to help diagnose missing images
-    try:
-        rgb_keys = list(obs.get("rgb", {}).keys()) if isinstance(obs, dict) else []
-        LOG.info("build_agent_input_from_hugsim: num_history=%d, obs rgb keys=%s", num_history, rgb_keys)
-    except Exception:
-        LOG.exception("Failed to summarize obs in build_agent_input_from_hugsim")
-
-    for idx in range(-num_history, 0):
-        info = info_history[idx]
-        # compute ego_pose local: DrivoR feature builder expects local ego pose; the AgentInput factory normally converts global to local
-        # Here we set ego_pose to [0,0,0] (local origin) for the most recent frame and relative for older frames is not strictly required by builder.
-        # Simpler: set ego_pose to [0,0,0] for every history step (builder primarily uses relative ego status).
-        ego_pose = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-
-        ego_velocity = compute_local_velocity(info_history[-num_history:], idx + num_history)
-        ego_accel = compute_local_acceleration(info_history[-num_history:], idx + num_history)
-        cmd = info.get("command", -1)
-        driving_command = make_command_one_hot(cmd)
-        ego_status = EgoStatus(ego_pose.astype(np.float64), ego_velocity.astype(np.float32), ego_accel.astype(np.float32), driving_command)
-        ego_statuses.append(ego_status)
-
-        # Build Cameras dataclass (all camera fields)
-        cam_dict = {}
-        cam_params = info.get("cam_params", {})
-        rgb = obs.get("rgb", {})
-        # per-frame debug: timestamp and available camera keys
-        try:
-            LOG.debug("Frame idx=%d timestamp=%s obs.rgb keys=%s cam_params keys=%s", idx, info.get("timestamp"), list(rgb.keys()) if isinstance(rgb, dict) else None, list(cam_params.keys()) if isinstance(cam_params, dict) else None)
-        except Exception:
-            LOG.exception("Failed to log frame-level debug info")
-
-        # create Camera objects for navsim Cameras
-        cams_kwargs = {}
-        for hug_name, drv_field in MAP_HUGSIM_TO_DRIVOR.items():
-            img = rgb.get(hug_name, None)
-            params = cam_params.get(hug_name, {})
-            # debug: missing/invalid image diagnostics
-            if img is None:
-                LOG.warning(
-                    "HUGSIM missing image for %s at frame idx=%d timestamp=%s; obs.rgb keys=%s; cam_params for this cam: %s",
-                    hug_name,
-                    idx,
-                    info.get("timestamp"),
-                    list(rgb.keys()) if isinstance(rgb, dict) else None,
-                    cam_params.get(hug_name),
-                )
-            else:
-                try:
-                    if isinstance(img, np.ndarray):
-                        LOG.debug("HUGSIM image %s shape=%s dtype=%s min=%s max=%s", hug_name, img.shape, img.dtype, int(img.min()) if img.size else None, int(img.max()) if img.size else None)
-                    else:
-                        LOG.warning("HUGSIM image for %s has unexpected type %s", hug_name, type(img))
-                except Exception:
-                    LOG.exception("Failed to inspect image for %s", hug_name)
-            cam_obj = build_camera_from_hugsim(hug_name, img, params)
-            cams_kwargs[drv_field] = cam_obj
-
-        # Ensure all Cameras dataclass fields are populated, but only with enabled cameras.
-        # Disabled camera slots (per drivor.yaml config) are set to None to prevent feature mismatch.
-        # Enabled cameras: cam_f0, cam_l0, cam_r0, cam_b0 (4 cameras)
-        # Disabled cameras: cam_l1, cam_l2, cam_r1, cam_r2 (set to None so feature builder skips them)
-        all_fields = ["cam_f0", "cam_l0", "cam_l1", "cam_l2", "cam_r0", "cam_r1", "cam_r2", "cam_b0"]
-        enabled_fields = ["cam_f0", "cam_l0", "cam_r0", "cam_b0"]
-        for f in all_fields:
-            if f not in cams_kwargs:
-                if f in enabled_fields:
-                    # Enabled camera but no HUGSIM source: create black frame
-                    cams_kwargs[f] = build_camera_from_hugsim(f, None, {})
-                else:
-                    # Disabled camera: create a Camera object with image=None so the
-                    # DrivoR feature builder can check `cam.image is None` safely
-                    cams_kwargs[f] = Camera(
-                        image=None,
-                        sensor2lidar_rotation=np.eye(3, dtype=np.float32),
-                        sensor2lidar_translation=np.zeros(3, dtype=np.float32),
-                        intrinsics=np.eye(3, dtype=np.float32),
-                        distortion=None,
-                    )
-        
-        # Construct Cameras dataclass by positional order
-        cameras_dataclass = Cameras(
-            cam_f0=cams_kwargs.get("cam_f0"),
-            cam_l0=cams_kwargs.get("cam_l0"),
-            cam_l1=cams_kwargs.get("cam_l1"),  # None - disabled in config
-            cam_l2=cams_kwargs.get("cam_l2"),  # None - disabled in config
-            cam_r0=cams_kwargs.get("cam_r0"),
-            cam_r1=cams_kwargs.get("cam_r1"),  # None - disabled in config
-            cam_r2=cams_kwargs.get("cam_r2"),  # None - disabled in config
-            cam_b0=cams_kwargs.get("cam_b0"),
-        )
-        cameras_list.append(cameras_dataclass)
-        # no lidar provided -> push empty Lidar
-        lidars_list.append(Lidar())
-
-    return AgentInput(ego_statuses=ego_statuses, cameras=cameras_list, lidars=lidars_list)
-
-#comparable to rap_to_hugsim_plan
-def drivor_to_hugsim_plan(trajectory: np.ndarray) -> np.ndarray:
+# comparable to rap_to_hugsim_plan
+def rule_based_to_hugsim_plan(trajectory: np.ndarray) -> np.ndarray:
     # NAVSIM predictions: [x_forward, y_left, heading] -> HUGSIM expects [x_right, y_forward]
     right = -trajectory[:, 1]
     forward = trajectory[:, 0]
     return np.stack([right, forward], axis=-1).astype(np.float32)
+
+
+# ============================================================================
+# Rule-based planner adapter helpers
+# ============================================================================
+
+def trajectory_to_proposals(traj: Any, output_num_poses: int) -> np.ndarray:
+    """
+    Convert Trajectory object from rule-based planner to proposal format.
+    
+    Args:
+        traj: Trajectory object with .states [T, 2] (x_forward, y_left in ego frame)
+        output_num_poses: horizon length for padding/truncation
+        
+    Returns:
+        proposals: np.ndarray of shape [1, output_num_poses, 3] 
+                  (single proposal with x_forward, y_left, heading=0)
+    """
+    states = np.asarray(traj.states, dtype=np.float32)  # [T, 2]
+    
+    # Pad or truncate to output_num_poses
+    if states.shape[0] < output_num_poses:
+        pad_len = output_num_poses - states.shape[0]
+        last_state = states[-1] if len(states) > 0 else np.zeros(2, dtype=np.float32)
+        pad = np.tile(last_state, (pad_len, 1)).astype(np.float32)
+        states = np.concatenate([states, pad], axis=0)
+    else:
+        states = states[:output_num_poses]
+    
+    # Pad heading dimension (set to 0)
+    headings = np.zeros((output_num_poses, 1), dtype=np.float32)
+    traj_3d = np.concatenate([states[:, :2], headings], axis=1)  # [T, 3]
+    
+    # Return in rule-based planner format [proposals, timesteps, xyz]
+    return np.expand_dims(traj_3d, axis=0)  # [1, T, 3]
+
+
+def trajectory_to_scores(debug_info: Dict[str, Any]) -> np.ndarray:
+    """
+    Extract score from planner debug info.
+    
+    Args:
+        debug_info: Debug dict from planner with 'best_score' key
+        
+    Returns:
+        scores: np.ndarray of shape [1] with single planner score
+    """
+    best_score = float(debug_info.get("best_score", 1.0))
+    return np.array([best_score], dtype=np.float32)
 
 #gotta figure out what the functions up to world_points_to_current_local do
 
@@ -626,7 +455,7 @@ def read_obs_file(pipe):
         payload.extend(chunk)
     return pickle.loads(payload)
 
-#writes DrivoR plan back to HUGSIM
+# writes planner plan back to HUGSIM
 def write_plan(plan_pipe: Path, plan) -> None:
     payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
     with open(plan_pipe, "wb") as pipe:
@@ -644,69 +473,8 @@ def write_plan_file(pipe, plan) -> None:
 # NEW FUNCTIONS: RAP-compatible candidate generation and payload building
 # ============================================================================
 
-def extract_proposals_and_scores_from_predictions(
-    predictions: Dict,
-    output_num_poses: int = 8,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Extract trajectory and score tensors from model predictions and normalize to [P,T,3] and [P].
-    
-    Mirrors model output extraction from build_plan_payload_from_model_output,
-    but returns only proposals and scores without payload construction.
-    
-    Returns:
-        proposals: np.ndarray of shape [P, T, 3] (proposals, timesteps, xyz with padded heading)
-        scores: np.ndarray of shape [P] (proposal scores)
-    """
-    # Prefer the full proposal set over the already-selected single trajectory.
-    traj = None
-    scores = None
-    for key in ["proposals", "proposals_traj", "trajectories", "trajectory"]:
-        if key in predictions:
-            traj = predictions[key]
-            break
-    for key in ["pdm_score", "score", "scores", "prob", "logits"]:
-        if key in predictions:
-            scores = predictions[key]
-            break
 
-    # Fallback: search for any tensor with right dimensionality
-    if traj is None:
-        for v in predictions.values():
-            if isinstance(v, torch.Tensor) and v.ndim >= 3 and v.shape[-1] in [2, 3]:
-                traj = v
-                break
-
-    if traj is None:
-        raise RuntimeError(f"Model output has no trajectory tensor. Available keys: {list(predictions.keys())}")
-
-    # Convert to numpy and normalize shape to [P, T, D]
-    traj_np = traj.detach().cpu().numpy()
-    if traj_np.ndim == 4:
-        traj_np = traj_np[0]  # [B, P, T, D] -> [P, T, D]
-    elif traj_np.ndim == 3:
-        pass  # Already [P, T, D]
-    else:
-        raise RuntimeError(f"Unexpected trajectory shape: {traj_np.shape}, expected [B,P,T,D] or [P,T,D]")
-
-    # Pad heading dimension if needed
-    if traj_np.shape[-1] == 2:
-        traj_np = np.pad(traj_np, ((0, 0), (0, 0), (0, 1)), mode="constant", constant_values=0)
-
-    if scores is not None:
-        scores_np = scores.detach().cpu().numpy()
-        if scores_np.ndim == 2:
-            scores_np = scores_np[0]  # [B, P] -> [P]
-    else:
-        scores_np = np.zeros(len(traj_np), dtype=np.float32)
-
-    if scores_np.ndim != 1:
-        scores_np = np.asarray(scores_np).reshape(-1)
-
-    return traj_np, scores_np
-
-
-def build_drivor_candidate_rows(
+def build_rule_based_candidate_rows(
     proposals: np.ndarray,
     scores: np.ndarray,
     output_num_poses: int,
@@ -720,7 +488,7 @@ def build_drivor_candidate_rows(
 ) -> Tuple[List[Dict[str, object]], bool]:
     """
     Build candidate rows from top-k proposals, carry_prev, and optional default fallbacks.
-    Mirrors RAP's build_vlm_candidate_rows but adapted for DrivoR model outputs.
+    Mirrors RAP's build_vlm_candidate_rows but adapted for rule-based planner outputs.
     
     All returned plans are in HUGSIM format [x_right, y_forward] and truncated to shared_horizon.
     
@@ -763,10 +531,10 @@ def build_drivor_candidate_rows(
 
     # Add top-k current proposals (converted to HUGSIM coords)
     for idx in candidate_indices:
-        full_plan = drivor_to_hugsim_plan(proposals[idx, :output_num_poses])
+        full_plan = rule_based_to_hugsim_plan(proposals[idx, :output_num_poses])
         candidate_rows.append(
             {
-                "source": "current_drivor",
+                "source": "rule_based_planner",
                 "proposal_index": int(idx),
                 "proposal_score": float(scores[idx]),
                 "local_plan": full_plan,
@@ -806,7 +574,7 @@ def build_plan_payload(
     scores: np.ndarray,
     output_num_poses: int,
     selected_idx: Optional[int] = None,
-    selected_source: str = "drivor_argmax",
+    selected_source: str = "rule_based_argmax",
     selection_debug: Optional[Dict[str, object]] = None,
     selected_plan_override: Optional[np.ndarray] = None,
     selected_score_override: Optional[float] = None,
@@ -815,7 +583,7 @@ def build_plan_payload(
 ) -> Dict[str, object]:
     """
     Build complete plan payload with candidate pool, defaults, and VLM metadata.
-    Mirrors RAP's build_plan_payload but adapted for DrivoR models.
+    Mirrors RAP's build_plan_payload but adapted for rule-based planner outputs.
     
     Handles both direct proposal selection and VLM-selected plan override.
     """
@@ -836,7 +604,7 @@ def build_plan_payload(
     else:
         assert selected_idx is not None
         selected_traj = proposals[selected_idx, :output_num_poses]
-        selected_plan = drivor_to_hugsim_plan(selected_traj)
+        selected_plan = rule_based_to_hugsim_plan(selected_traj)
         selected_score = float(scores[selected_idx])
 
     # Build candidate pool (either from provided rows or derived from top-k)
@@ -854,7 +622,7 @@ def build_plan_payload(
             None if row.get("q_score") is None else float(row["q_score"])
             for row in candidate_pool_rows
         ]
-        candidate_pool_sources = [str(row.get("source", "current_drivor")) for row in candidate_pool_rows]
+        candidate_pool_sources = [str(row.get("source", "current_rule_based")) for row in candidate_pool_rows]
         candidate_pool_proposal_indices = [
             None if row.get("proposal_index") is None else int(row["proposal_index"])
             for row in candidate_pool_rows
@@ -862,13 +630,13 @@ def build_plan_payload(
     else:
         # Fallback: derive candidate pool from top-k proposals
         candidate_pool_plans = [
-            drivor_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
+            rule_based_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
             for idx in top_indices
         ]
         candidate_pool_scores = [float(scores[idx]) for idx in top_indices]
         candidate_pool_execution_plans = list(candidate_pool_plans)
         candidate_pool_q_scores = [None for _ in top_indices]
-        candidate_pool_sources = ["current_drivor" for _ in top_indices]
+        candidate_pool_sources = ["rule_based_planner" for _ in top_indices]
         candidate_pool_proposal_indices = [int(idx) for idx in top_indices]
 
     # Build default overlay plans if requested
@@ -887,7 +655,7 @@ def build_plan_payload(
         "topk_indices": [int(idx) for idx in top_indices],
         "topk_scores": [float(scores[idx]) for idx in top_indices],
         "topk_plans": [
-            drivor_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
+            rule_based_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
             for idx in top_indices
         ],
         "candidate_pool_plans": candidate_pool_plans,
@@ -907,18 +675,18 @@ def build_plan_payload(
     return payload
 
 
-def build_plain_drivor_plan_result(
+def build_plain_rule_based_plan_result(
     proposals: np.ndarray,
     scores: np.ndarray,
     output_num_poses: int,
 ) -> Dict[str, object]:
     """
-    Plain argmax fallback for DrivoR when VLM is disabled.
+    Plain argmax fallback for rule-based planner.
     Returns the selected_plan, selected_score, selected_score_raw, selected_row, and a plan_payload.
     """
     best_idx = int(np.argmax(scores))
     selected_traj = proposals[best_idx, :output_num_poses]
-    selected_plan = drivor_to_hugsim_plan(selected_traj)
+    selected_plan = rule_based_to_hugsim_plan(selected_traj)
     selected_score = float(scores[best_idx])
     selected_score_raw = float(selected_score)
     plan_payload = build_plan_payload(
@@ -926,7 +694,7 @@ def build_plain_drivor_plan_result(
         scores=scores,
         output_num_poses=output_num_poses,
         selected_idx=best_idx,
-        selected_source="drivor_argmax",
+        selected_source="rule_based_argmax",
         selection_debug={
             "vlm_invoked": False,
             "display_default_trajectories": False,
@@ -941,10 +709,9 @@ def build_plain_drivor_plan_result(
         "selected_plan": selected_plan,
         "selected_score": selected_score,
         "selected_score_raw": selected_score_raw,
-        "selected_row": {"source": "current_drivor", "proposal_index": best_idx},
+        "selected_row": {"source": "rule_based_planner", "proposal_index": best_idx},
         "plan_payload": plan_payload,
     }
-
 
 
 
@@ -952,120 +719,62 @@ def main() -> int:
     args = parse_args()
     output_dir = Path(args.output).resolve()
     setup_logging(output_dir)
-    LOG.info("Starting DrivoR adapter")
+    LOG.info("Starting rule-based planner adapter")
 
     # Env vars
-    repo_root = Path(os.environ["DRIVOR_REPO_ROOT"]).expanduser().resolve()
-    checkpoint = os.environ["DRIVOR_CHECKPOINT"]
-    dino = os.environ.get("DRIVOR_DINO", "")
-    device_name = os.environ.get("DRIVOR_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device(device_name)
+    repo_root_value = os.environ.get("RULE_BASED_REPO_ROOT", "").strip()
+    if not repo_root_value:
+        raise RuntimeError("RULE_BASED_REPO_ROOT is not set")
+    repo_root = Path(repo_root_value).expanduser().resolve()
+    # don't need torch just yet
+    # device_name = os.environ.get(
+    #     "RULE_BASED_DEVICE",
+    #     os.environ.get("RULE_BASED_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"),
+    # )
+    # device = torch.device(device_name)
 
-    LOG.info("Repo root: %s, checkpoint: %s, dino: %s, device: %s", repo_root, checkpoint, dino, device)
+    LOG.info(
+        "Repo root: %s, device: %s, config: %s",
+        repo_root,
+        os.environ.get("RULE_BASED_DEVICE", "cuda"),
+        os.environ.get("RULE_BASED_CONFIG", ""),
+    )
 
     # Add repo root to sys.path (already done above)
     sys.path.insert(0, str(repo_root))
 
-    # Instantiate a DrivoR agent directly via constructor pattern used in repo.
-    # Minimal constructor params to match DrivoRAgent signature: (config, lr_args, checkpoint_path, ...)
-    # We will build a minimal config dict familiar to the agent. If you have a Hydra config you'd prefer,
-    # replace this block with hydra compose & instantiate.
-    # Attempt to import OmegaConf for Hydra-style configs; fall back gracefully.
-    try:
-        from omegaconf import OmegaConf  # type: ignore
-        omega_available = True
-    except Exception:
-        omega_available = False
-        LOG.warning("omegaconf not available; Hydra configs cannot be composed here")
-
-    # Minimal config: prefer loading a Hydra/OmegaConf config if provided via env var
-    # Set DRIVOR_CONFIG to a YAML file path (Hydra/omega format) to have it loaded here.
-    drivo_config = {}
-    drivor_config_path = os.environ.get("DRIVOR_CONFIG", "").strip()
-    LOG.info("DRIVOR_CONFIG env: '%s', OmegaConf available: %s", drivor_config_path, omega_available)
-
-    if drivor_config_path:
-        if omega_available:
-            try:
-                loaded = OmegaConf.load(drivor_config_path)
-                # If OmegaConf returned a plain dict (PyYAML backend), convert it to a DictConfig
-                if isinstance(loaded, dict):
-                    drivo_config = OmegaConf.create(loaded)
-                else:
-                    drivo_config = loaded
-                LOG.info("Loaded DrivoR config from %s (type=%s)", drivor_config_path, type(drivo_config))
-            except Exception:
-                LOG.exception("Failed to load DRIVOR_CONFIG=%s; falling back to minimal dict", drivor_config_path)
-                drivo_config = {}
-        else:
-            # Try to load as plain YAML to surface parse errors for easier debugging
-            try:
-                import yaml  # type: ignore
-
-                with open(drivor_config_path, "r") as f:
-                    loaded = yaml.safe_load(f)
-                drivo_config = loaded if isinstance(loaded, dict) else {}
-                LOG.info("Loaded plain YAML DRIVOR_CONFIG from %s (type=%s)", drivor_config_path, type(drivo_config))
-            except Exception:
-                LOG.exception("Failed to read DRIVOR_CONFIG=%s as YAML; falling back to minimal dict", drivor_config_path)
-                drivo_config = {}
+    # Load optional config from environment or file
+    planner_config = None
+    planner_config_path = os.environ.get("PLANNER_CONFIG", "").strip()
+    if planner_config_path:
+        try:
+            import yaml  # type: ignore
+            with open(planner_config_path, "r") as f:
+                planner_config = yaml.safe_load(f)
+            LOG.info("Loaded planner config from %s", planner_config_path)
+        except Exception:
+            LOG.exception("Failed to load PLANNER_CONFIG=%s; using None", planner_config_path)
     else:
-        LOG.info("No DRIVOR_CONFIG specified; using minimal config dict. Set DRIVOR_CONFIG to a yaml to pass a full config.")
+        LOG.info("No PLANNER_CONFIG specified; using default PrivilegedPlannerService initialization")
 
-    #unwrap config 
-    if omega_available and OmegaConf.is_config(drivo_config):
-        if "num_poses" not in drivo_config and "config" in drivo_config:
-            drivo_config = drivo_config.config
-    elif isinstance(drivo_config, dict):
-        if "num_poses" not in drivo_config and "config" in drivo_config:
-            drivo_config = drivo_config["config"]
-
-    # learning rate / optimizer args (still a plain dict)
-    lr_args = {"name": "AdamW", "base_lr": 5e-4, "base_batch_size": 64}
-
-    # Create agent instance
-    # We pass in the checkpoint path; DrivoRAgent.initialize() will load it.
-    LOG.info("DrivoRAgent instance going to be created using config var of type: %s", type(drivo_config))
-    agent = DrivoRAgent(config=drivo_config, lr_args=lr_args, checkpoint_path=checkpoint, progress_bar=False)
-    LOG.info("DrivoRAgent instance created")
-
-    # Initialize agent (this loads checkpoint if checkpoint_path != "")
+    # Create planner instance
     try:
-        agent.initialize()
+        planner = PrivilegedPlannerService(config=planner_config)
+        LOG.info("PrivilegedPlannerService initialized OK")
     except Exception:
-        LOG.exception("Failed to initialize DrivoRAgent (checkpoint loading may fail)")
+        LOG.exception("Failed to initialize PrivilegedPlannerService")
         return 1
-    LOG.info("Agent initialized OK")
 
-    # Set device
-    # The agent's internal ModelLoader would normally pick device; here ensure model on device
+    # Determine output_num_poses from planner config or use default
     try:
-        current_model_device = "unknown"
-        try:
-            first_param = next(agent._drivor_model.parameters())
-            current_model_device = str(first_param.device)
-        except StopIteration:
-            current_model_device = "no-parameters"
-        except Exception:
-            LOG.exception("Failed to inspect DrivoR model device before inference")
-
-        LOG.info("DrivoR model device before optional move: current=%s target=%s", current_model_device, device)
-        target_device = str(device)
-        if current_model_device.startswith(target_device) or (
-            target_device.startswith("cuda") and current_model_device.startswith("cuda")
-        ):
-            LOG.info("Skipping redundant DrivoR model.to(%s)", device)
-        else:
-            LOG.info("Moving DrivoR model to device %s", device)
-            agent._drivor_model.to(device)
-        agent._drivor_model.eval()
-        try:
-            first_param = next(agent._drivor_model.parameters())
-            LOG.info("DrivoR model ready for inference on device %s", first_param.device)
-        except Exception:
-            LOG.info("DrivoR model ready for inference")
+        output_num_poses = int(
+            planner_config.get("horizon", DEFAULT_OUTPUT_POSES) 
+            if planner_config and isinstance(planner_config, dict) 
+            else DEFAULT_OUTPUT_POSES
+        )
     except Exception:
-        LOG.warning("Could not move model to device; continuing")
+        output_num_poses = DEFAULT_OUTPUT_POSES
+    LOG.info("Using output_num_poses=%d", output_num_poses)
 
     obs_pipe = output_dir / "obs_pipe"
     plan_pipe = output_dir / "plan_pipe"
@@ -1107,84 +816,59 @@ def main() -> int:
                     LOG.info("Received shutdown signal")
                     break
 
-                obs, info = message
+                try:
+                    # REFAC: prefer privileged 3-tuple payloads, but fall back to
+                    # legacy 2-tuple messages so older scene drivers keep working.
+                    if isinstance(message, (tuple, list)) and len(message) == 3:
+                        obs, info, privileged_info = message
+                    elif isinstance(message, (tuple, list)) and len(message) == 2:
+                        obs, info = message
+                        privileged_info = None
+                    else:
+                        raise ValueError(
+                            f"unexpected payload length: {len(message) if isinstance(message, (tuple, list)) else 'n/a'}"
+                        )
+                except (ValueError, TypeError):
+                    LOG.error("Message format error: expected (obs, info) or (obs, info, privileged_info), got %s", type(message))
+                    write_plan_file(plan_pipe_writer, None)
+                    continue
+                
                 # info_history append and pad
                 info_history.append(dict(info))
                 while len(info_history) < EGO_HISTORY_FRAMES:
                     info_history.appendleft(dict(info_history[0]))
 
-                # Build AgentInput from HUGSIM data
-                agent_input = build_agent_input_from_hugsim(obs, list(info_history), num_history=EGO_HISTORY_FRAMES)
-
-                # Use DrivoR's feature builders (native) - get_feature_builders returns builder instances
-                builders = agent.get_feature_builders()
-                # DrivoRFeatureBuilder expects AgentInput; compute features
-                features = {}
-                for b in builders:
-                    # compute_features returns a dict of torch tensors (no batch dim)
-                    f = b.compute_features(agent_input)
-                    features.update(f)
-
-                # Add batch dimension and move to device
-                features_batched = {}
-                for k, v in features.items():
-                    if isinstance(v, torch.Tensor):
-                        features_batched[k] = v.unsqueeze(0).to(device)
-                    else:
-                        # if numpy arrays, convert and add batch dim
-                        try:
-                            t = torch.from_numpy(np.array(v))
-                            features_batched[k] = t.unsqueeze(0).to(device)
-                        except Exception:
-                            # leave as-is if not tensor-like
-                            features_batched[k] = v
-
-                # Run model forward (DrivoRAgent.forward delegates to DrivoRModel)
-                with torch.no_grad():
-                    # Debug: log shapes and dtypes of features before forwarding to the model
-                    try:
-                        for k, v in features_batched.items():
-                            try:
-                                if isinstance(v, torch.Tensor):
-                                    LOG.info("Feature '%s': tensor shape=%s dtype=%s", k, tuple(v.shape), v.dtype)
-                                else:
-                                    LOG.info("Feature '%s': type=%s", k, type(v))
-                            except Exception:
-                                LOG.exception("Failed to describe feature %s", k)
-                    except Exception:
-                        LOG.exception("Failed to iterate features_batched for debug")
-
-                    try:
-                        pred = agent.forward(features_batched)
-                    except Exception:
-                        LOG.exception("agent.forward failed; dumping feature diagnostics and calling internal model")
-                        try:
-                            for k, v in features_batched.items():
-                                if isinstance(v, torch.Tensor):
-                                    LOG.error("DIAG feature '%s' shape=%s dtype=%s", k, tuple(v.shape), v.dtype)
-                                else:
-                                    LOG.error("DIAG feature '%s' type=%s", k, type(v))
-                        except Exception:
-                            LOG.exception("Failed diag dump of features_batched")
-                        # fallback: call internal model directly
-                        pred = agent._drivor_model(features_batched)
-
-                # Extract proposals and scores from model predictions
+                # Run planner on current observation
                 try:
-                    output_num_poses = (
-                        int(agent._config.get("num_poses", 8))
-                        if hasattr(agent, "_config") and isinstance(agent._config, dict)
-                        else 8
+                    traj, planner_debug = planner.process(
+                        obs=obs,
+                        info=info,
+                        info_history=info_history,
+                        privileged_agents=privileged_info
                     )
-                    proposals, scores = extract_proposals_and_scores_from_predictions(pred, output_num_poses=output_num_poses)
+                    LOG.info(
+                        "Planner generated trajectory: behavior=%s, states_shape=%s",
+                        traj.behavior if hasattr(traj, 'behavior') else 'unknown',
+                        np.asarray(traj.states).shape if hasattr(traj, 'states') else None
+                    )
                 except Exception as e:
-                    LOG.exception("Failed to extract proposals/scores from model output: %s", e)
+                    LOG.exception("Planner.process() failed: %s", e)
+                    write_plan_file(plan_pipe_writer, None)
+                    continue
+
+                # Convert planner trajectory to proposal format
+                try:
+                    proposals = trajectory_to_proposals(traj, output_num_poses)
+                    scores = trajectory_to_scores(planner_debug)
+                    LOG.info("Converted trajectory to proposals shape=%s, scores=%s", proposals.shape, scores)
+                except Exception as e:
+                    LOG.exception("Failed to convert planner trajectory: %s", e)
                     write_plan_file(plan_pipe_writer, None)
                     continue
 
                 # Build candidate rows (includes carry_prev, top-k, and optional defaults)
                 try:
-                    candidate_rows, allow_carry_prev = build_drivor_candidate_rows(
+                    candidate_rows, allow_carry_prev = build_rule_based_candidate_rows(
                         proposals=proposals,
                         scores=scores,
                         output_num_poses=output_num_poses,
@@ -1212,22 +896,22 @@ def main() -> int:
                             break
                     if default_selected_index is None:
                         default_selected_index = 0  # Fallback to first candidate
-                    default_selected_source = "drivor_argmax"
+                    default_selected_source = "rule_based_argmax"
                 except Exception as e:
                     LOG.exception("Failed to determine default selection: %s", e)
                     default_selected_index = 0
-                    default_selected_source = "drivor_argmax"
+                    default_selected_source = "rule_based_argmax"
 
                 # Call VLM selector (or use default if disabled)
                 try:
                     # If VLM disabled, use plain argmax fallback similar to RAP's plain result
                     if not getattr(vlm_cfg, "enabled", False):
-                        plain_result = build_plain_drivor_plan_result(proposals, scores, output_num_poses)
+                        plain_result = build_plain_rule_based_plan_result(proposals, scores, output_num_poses)
                         selected_plan = np.asarray(plain_result["selected_plan"], dtype=np.float32)
                         selected_score = float(plain_result["selected_score"])
                         selected_score_raw = float(plain_result.get("selected_score_raw", selected_score))
                         selected_idx = int(plain_result["selected_row"]["proposal_index"]) if plain_result["selected_row"].get("proposal_index") is not None else None
-                        selected_source = "drivor_argmax"
+                        selected_source = "rule_based_argmax"
                         selection_debug = {
                             "vlm_invoked": False,
                             "fallback_selected_idx": int(default_selected_index),
@@ -1260,7 +944,7 @@ def main() -> int:
                             if selected_row.get("origin_selected_score_raw") is not None
                             else float(selected_score)
                         )
-                        selected_source = str(selection_result.get("selected_source", "drivor_vlm"))
+                        selected_source = str(selection_result.get("selected_source", "rule_based_vlm"))
 
                         # Build VLM selection debug metadata (non-Q fields only)
                         selection_debug = {
@@ -1297,11 +981,11 @@ def main() -> int:
                     # Fallback to model selection
                     best_idx = int(np.argmax(scores))
                     selected_traj = proposals[best_idx, :output_num_poses]
-                    selected_plan = drivor_to_hugsim_plan(selected_traj)
+                    selected_plan = rule_based_to_hugsim_plan(selected_traj)
                     selected_idx = best_idx
                     selected_score = float(scores[best_idx])
                     selected_score_raw = float(selected_score)
-                    selected_source = "drivor_argmax_fallback"
+                    selected_source = "rule_based_argmax_fallback"
                     selection_debug = {
                         "vlm_error": str(e),
                         "fallback_selected_idx": int(default_selected_index),

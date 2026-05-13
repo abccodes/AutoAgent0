@@ -611,12 +611,13 @@ def _select_overlay_plan(plan_traj, plan_path_length, last_valid_plan, stale_fra
     return None, stale_frames, False
 
 
-def create_gym_env(cfg, output, run_label):
+def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
 
     env = gymnasium.make('hugsim_env/HUGSim-v0', cfg=cfg, output=output)
 
     observations_save, infos_save = [], []
-    obs, info = env.reset()
+    #added privileged_info for init planner work
+    obs, info, privileged_info = env.reset()
     done = False
     cnt = 0
     save_data = {'type': 'closeloop', 'frames': []}
@@ -675,9 +676,9 @@ def create_gym_env(cfg, output, run_label):
         if name.endswith('.jpg'):
             os.remove(os.path.join(overlay_front_dir, name))
     while not done:
-
-        if obs is None or info is None:
-            obs, info = env.reset()
+        #added privileged_info for init planner work
+        if obs is None or info is None or privileged_info is None:
+            obs, info, privileged_info = env.reset()
         current_obs, current_info = obs, info
         infos_save.append(current_info)
 
@@ -713,7 +714,18 @@ def create_gym_env(cfg, output, run_label):
                 logger.info("Sending obs to adapter: rgb keys=%s; details=%s", list(rgb.keys()), "; ".join(rgb_details))
             except Exception:
                 logging.getLogger("closed_loop").exception("Failed to prepare current_obs before sending")
-            write_pipe_message_file(obs_pipe_writer, (current_obs, current_info))
+            # REFAC: default payload stays a 2-tuple. When the include flag is set,
+            # send privileged_info as the third object for planners that need it.
+            plan_request_payload = (
+                (current_obs, current_info, privileged_info)
+                if include_privileged_pipe
+                else (current_obs, current_info)
+            )
+            write_pipe_message_file(obs_pipe_writer, plan_request_payload)
+            # Old behavior kept for reference:
+            # write_pipe_message_file(obs_pipe_writer, (current_obs, current_info))
+            # REFAC: privileged payload form kept for reference:
+            # write_pipe_message_file(obs_pipe_writer, (current_obs, current_info, privileged_info))
             plan_payload = read_pipe_message_file(plan_pipe_reader)
             current_topk_plans = None
             current_topk_scores = None
@@ -946,6 +958,7 @@ if __name__ == "__main__":
     parser.add_argument("--planner_path", type=str, default="")
     parser.add_argument('--ad', default="uniad")
     parser.add_argument('--ad_cuda', default="1")
+    parser.add_argument('--include_privileged_pipe', default=False)
     args = parser.parse_args()
 
     scenario_config = OmegaConf.load(args.scenario_path)
@@ -970,6 +983,13 @@ if __name__ == "__main__":
         planner_output_suffix = planner_config.get('rap', {}).get('output_suffix', 'rap_vlm')
     if args.ad == 'drivor' and planner_config.get('drivor', {}).get('vlm', {}).get('enabled', False):
         planner_output_suffix = planner_config.get('drivor', {}).get('output_suffix', 'drivor_vlm')
+    if args.ad == 'rule_based' and planner_config.get('rule_based', {}).get('vlm', {}).get('enabled', False):
+        planner_output_suffix = planner_config.get('rule_based', {}).get('output_suffix', 'rap_vlm')
+    # planner_section = _get_planner_section(planner_config, args.ad)
+    # planner_vlm_cfg = planner_section.get('vlm') or {}
+    # if planner_vlm_cfg.get('enabled', False):
+    #     planner_output_suffix = planner_section.get('output_suffix', f'{args.ad}_vlm')
+    
     output_model_slug = _resolve_output_model_slug(args.ad, planner_config)
     cfg.base.output_dir = _prefix_output_dir_with_model(cfg.base.output_dir, output_model_slug)
     cfg.base.output_dir = cfg.base.output_dir + planner_output_suffix
@@ -991,6 +1011,13 @@ if __name__ == "__main__":
         ad_path = cfg.planner.rap.launch_path
     elif args.ad == "drivor":
         ad_path = cfg.planner.drivor.launch_path
+    elif args.ad == "rule_based":
+        ad_path = cfg.planner.rule_based.launch_path
+        # rule_based_section = _get_planner_section(cfg.planner, "rule_based")
+        # ad_path = rule_based_section.get(
+        #     'launch_path',
+        #     cfg.planner.get('drivor', {}).get('launch_path', './planners/rule_based/launch.sh'),
+        # )
     else:
         raise NotImplementedError
 
@@ -1055,10 +1082,39 @@ if __name__ == "__main__":
             )
             extra_env['PLANNER_VLM_DEVICE'] = vlm_device
             extra_env['DRIVOR_VLM_DEVICE'] = vlm_device
+    elif args.ad == "rule_based":
+        # rule_based_cfg = _get_planner_section(cfg.planner, "rule_based")
+        rule_based_python_bin = cfg.planner.rule_based.get('python_bin', 'python')
+        rule_based_device = os.environ.get('RULE_BASED_DEVICE_OVERRIDE') or cfg.planner.rule_based.get('device', 'cuda')
+        vlm_device = (
+                os.environ.get('PLANNER_VLM_DEVICE_OVERRIDE')
+                or os.environ.get('RULE_BASED_VLM_DEVICE_OVERRIDE')
+                or cfg.planner.rule_based.vlm.get('device', 'auto') if cfg.planner.rule_based.get('vlm') else 'auto'
+            )
+        extra_env = {
+            'RULE_BASED_REPO_ROOT': cfg.planner.rule_based.get('repo_root', ''),
+            'RULE_BASED_PYTHON_BIN': rule_based_python_bin,
+            'RULE_BASED_DEVICE': rule_based_device,
+            'RULE_BASED_CONFIG': cfg.planner.rule_based.get('config', ''),
+        }
+        # Add VLM support if configured
+        # rule_based_vlm_cfg = (cfg.planner.rule_based.get('vlm') or {}) if hasattr(cfg.planner.rule_based, 'get') else {}
+        # if rule_based_vlm_cfg and rule_based_vlm_cfg.get('enabled', False):
+        if cfg.planner.rule_based.get('vlm') and cfg.planner.rule_based.vlm.get('enabled', False):
+            extra_env.update(
+                build_prefixed_vlm_env(
+                    # rule_based_vlm_cfg,
+                    cfg.planner.rule_based.vlm,
+                    planner_python_bin=rule_based_python_bin,
+                    prefixes=("PLANNER_VLM_", "RULE_BASED_VLM_"),
+                )
+            )
+            extra_env['PLANNER_VLM_DEVICE'] = vlm_device
+            extra_env['RULE_BASED_VLM_DEVICE'] = vlm_device
 
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
     try:
-        create_gym_env(cfg, output, planner_output_suffix)
+        create_gym_env(cfg, output, planner_output_suffix, args.include_privileged_pipe)
         check_alive(process)
     except Exception as e:
         import traceback

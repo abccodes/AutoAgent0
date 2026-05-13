@@ -408,8 +408,10 @@ class HUGSimEnv(gymnasium.Env):
 
         observation = self._get_obs()
         info = self._get_info()
+        #extracting privileged agent info for init planner work
+        privileged_info = self.get_agent_privileged_info()
 
-        return observation, info
+        return observation, info, privileged_info
     
     def step(self, action):
         self.timestamp += self.dt
