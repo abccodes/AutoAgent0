@@ -104,11 +104,11 @@ def visualize_array_to_txt(obs, output_path, file_name):
         data_array,
         cmap=cmap,
         vmin=np.min(unique_values),
-        vmax=np.max(unique_value)
+        vmax=np.max(unique_values)
     )
 
-    plt.xticks([])
-    plt.yticks([])
+    ax.xticks([])
+    ax.yticks([])
 
     # Create legend patches
     legend_patches = []
