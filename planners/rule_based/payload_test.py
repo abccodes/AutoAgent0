@@ -99,7 +99,7 @@ def visualize_array_to_txt(obs, output_path, file_name):
     filepath = output_path + file_name
     with open(filepath, 'w') as f:
         f.write("unique values are: ")
-        f.write(unique_values)
+        f.write(str(unique_values))
         f.write("----------------------------------------")
         for r in range(rows):
             row_str = ""
