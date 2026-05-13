@@ -94,17 +94,49 @@ def visualize_array_to_txt(obs, output_path, file_name):
     unique_values = np.unique(data_array).tolist()
     num_classes = len(unique_values)
     
-     # Create the image
-    plt.imshow(data_array, norm="linear", cmap='gray', vmin=min(unique_values), vmax=max(unique_values))
+    # Create a discrete colormap
+    cmap = plt.cm.get_cmap('tab20', num_classes)
+
+    #plot
+    fig, ax = plt.subplots(figsize=(8, 8))
+    im = ax.imshow(
+        data_array,
+        cmap=cmap,
+        vmin=unique_values.min(),
+        vmax=unique_values.max()
+    )
+
     plt.xticks([])
     plt.yticks([])
+
+    # Create legend patches
+    legend_patches = []
+
+    for i, value in enumerate(unique_values):
+        color = cmap(i)
+        patch = mpatches.Patch(
+            color=color,
+            label=f"Class {value}"
+        )
+        legend_patches.append(patch)
+
+    # Add legend
+    ax.legend(
+        handles=legend_patches,
+        bbox_to_anchor=(1.05, 1),
+        loc='upper left',
+        borderaxespad=0.
+    )
 
     # Save the image
     plt.savefig(
         output_path,
         bbox_inches='tight',
-        pad_inches=0
+        pad_inches=0.1
     )
+
+    plt.close(fig)
+
     print(f"Image saved to {output_path}")
 
     # Determine the color mapping range (0-255)
