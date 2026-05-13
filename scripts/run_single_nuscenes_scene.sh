@@ -68,7 +68,8 @@ if [[ ! -x "${HUGSIM_PYTHON_BIN}" ]]; then
     exit 1
 fi
 
-mkdir -p /bigdata/aidan/outputs/benchmark/out
+#comment out for mlcav comaptibility
+# mkdir -p /bigdata/aidan/outputs/benchmark/out
 
 export PYTHONPATH="${PWD}:${PWD}/sim${PYTHONPATH:+:${PYTHONPATH}}"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
@@ -82,14 +83,15 @@ fi
 # Some CUDA wheel dependencies ship shared libraries outside torch/lib.
 # Include those packaged NVIDIA library directories so tinycudann can resolve
 # libnvrtc and related CUDA runtime libs on nodes without system CUDA paths.
-for extra_lib_dir in \
-    "${HUGSIM_ENV_ROOT}"/lib/python*/site-packages/nvidia/*/lib \
-    /bigdata/aidan/.home/envs/vlm/lib/python*/site-packages/nvidia/*/lib
-do
-    if [[ -d "${extra_lib_dir}" ]]; then
-        export LD_LIBRARY_PATH="${extra_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-    fi
-done
+#comment out for mlcav compatibility
+# for extra_lib_dir in \
+#     "${HUGSIM_ENV_ROOT}"/lib/python*/site-packages/nvidia/*/lib \
+#     /bigdata/aidan/.home/envs/vlm/lib/python*/site-packages/nvidia/*/lib
+# do
+#     if [[ -d "${extra_lib_dir}" ]]; then
+#         export LD_LIBRARY_PATH="${extra_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+#     fi
+# done
 
 echo "planner=${PLANNER_NAME}"
 echo "ad=${AD_NAME}"
