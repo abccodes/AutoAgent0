@@ -12,8 +12,8 @@ DEFAULT_CUDA_ID="0"
 if [[ -n "${SLURM_JOB_ID:-}" || -n "${SLURM_STEP_ID:-}" ]]; then
     DEFAULT_CUDA_ID="inherit"
 fi
-SIM_CUDA="${3:-${DEFAULT_CUDA_ID}}"
-AD_CUDA="${4:-${DEFAULT_CUDA_ID}}"
+SIM_CUDA="${3:-${SIM_CUDA:-${DEFAULT_CUDA_ID}}}"
+AD_CUDA="${4:-${AD_CUDA:-${DEFAULT_CUDA_ID}}}"
 BASE_PATH="${BASE_PATH:-configs/sim/nuscenes_base_local.yaml}"
 CAMERA_PATH="${CAMERA_PATH:-configs/sim/nuscenes_camera.yaml}"
 KINEMATIC_PATH="${KINEMATIC_PATH:-configs/sim/kinematic.yaml}"
