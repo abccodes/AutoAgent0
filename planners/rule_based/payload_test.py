@@ -74,6 +74,40 @@ def _serialize_for_json(obj: Any, max_items: int = 100) -> Any:
         return str(obj)
 
 
+def visualize_array_to_txt(obs, output_path, file_name):
+    """
+    Extracts unique values from a 2D NumPy array, and creates a text-based
+    visualization resembling a hxwx1 image.
+
+    Args:
+    obs0 (dict): The input dictionary containing the 'semantic' key, which is a dictionary
+                 of cameras.
+    """
+    # Access the 'CAM_FRONT' camera from the 'semantic' dictionary
+    cam_front_data = obs['semantic']['CAM_FRONT']
+
+    # Extract the 2D array from the 'data' key of the 'CAM_FRONT' camera
+    data_array = cam_front_data
+
+    # Extract unique values and sort them
+    unique_values = np.unique(data_array).tolist()
+
+    # Determine dimensions
+    rows, cols = data_array.shape
+
+    # Create the text-based visualization
+    filepath = output_path + file_name
+    with open(filepath, 'w') as f:
+        f.write("unique values are: ")
+        f.write(unique_values)
+        f.write("----------------------------------------")
+        for r in range(rows):
+            row_str = ""
+            for c in range(cols):
+                row_str += str(data_array[r, c]) + " "
+            f.write(row_str + "\n")
+
+
 def run_payload_test(cfg: OmegaConf, output_dir: str) -> None:
     """
     Run minimal 2-step env loop and dump obs/info/privileged data to JSON.
@@ -106,7 +140,7 @@ def run_payload_test(cfg: OmegaConf, output_dir: str) -> None:
         }
         frames_data.append(frame0_data)
         logger.info(f"Frame 0 captured. Ego pos: {info0.get('ego_pos', 'N/A')}")
-        
+        visualize_array_to_txt(obs0, output_dir, "obs0.txt")
         # Frame 1: Step
         logger.info("Taking a step...")
         # Minimal action: zero acceleration and steering rate
