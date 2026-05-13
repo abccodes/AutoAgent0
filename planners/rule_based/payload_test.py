@@ -29,6 +29,7 @@ import numpy as np
 from typing import Any, Dict, List
 import logging
 from matplotlib import pyplot as plt
+import matplotlib.patches as mpatches
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -102,8 +103,8 @@ def visualize_array_to_txt(obs, output_path, file_name):
     im = ax.imshow(
         data_array,
         cmap=cmap,
-        vmin=unique_values.min(),
-        vmax=unique_values.max()
+        vmin=np.min(unique_values),
+        vmax=np.max(unique_value)
     )
 
     plt.xticks([])
