@@ -107,8 +107,8 @@ def visualize_array_to_txt(obs, output_path, file_name):
         vmax=np.max(unique_values)
     )
 
-    ax.xticks([])
-    ax.yticks([])
+    ax.set_xticks([])
+    ax.set_yticks([])
 
     # Create legend patches
     legend_patches = []
