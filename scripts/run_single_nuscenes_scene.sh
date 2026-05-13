@@ -80,6 +80,14 @@ if [[ -d "${TORCH_LIB_DIR}" ]]; then
     export LD_LIBRARY_PATH="${TORCH_LIB_DIR}:${HUGSIM_ENV_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
 
+# Debug: surface HUGSIM env torch lib and LD_LIBRARY_PATH for troubleshooting
+echo "RUN DEBUG: HUGSIM_PYTHON_BIN=${HUGSIM_PYTHON_BIN}"
+echo "RUN DEBUG: HUGSIM_ENV_ROOT=${HUGSIM_ENV_ROOT}"
+echo "RUN DEBUG: TORCH_LIB_DIR=${TORCH_LIB_DIR} (exists=$( [[ -d \"${TORCH_LIB_DIR}\" ]] && echo true || echo false ))"
+echo "RUN DEBUG: LD_LIBRARY_PATH after HUGSIM torch lib add=${LD_LIBRARY_PATH:-unset}"
+echo "RUN DEBUG: PATH contains python? -> $(which python 2>/dev/null || echo none)"
+echo "RUN DEBUG: HUGSIM_PYTHON_BIN executable? -> $( [[ -x \"${HUGSIM_PYTHON_BIN}\" ]] && echo yes || echo no )"
+
 # Some CUDA wheel dependencies ship shared libraries outside torch/lib.
 # Include those packaged NVIDIA library directories so tinycudann can resolve
 # libnvrtc and related CUDA runtime libs on nodes without system CUDA paths.
