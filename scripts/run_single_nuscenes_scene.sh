@@ -118,6 +118,8 @@ case "$(printf '%s' "${INCLUDE_PRIVILEGED_PIPE}" | tr '[:upper:]' '[:lower:]')" 
         ;;
 esac
 
+echo "closed loop extra args=${CLOSED_LOOP_EXTRA_ARGS}"
+
 if ! "${HUGSIM_PYTHON_BIN}" -c "from simple_knn._C import distCUDA2" >/dev/null 2>&1; then
     echo "simple_knn missing in ${HUGSIM_PYTHON_BIN}; bootstrapping local CUDA extension"
     SIMPLE_KNN_LOCK_DIR="${TMPDIR:-/tmp}/hugsim-simple-knn-install.lock"
@@ -145,7 +147,7 @@ if [[ "${SIM_CUDA}" == "inherit" ]]; then
         --planner_path "${PLANNER_PATH}" \
         --ad "${AD_NAME}" \
         --ad_cuda "${AD_CUDA}" \
-        "${CLOSED_LOOP_EXTRA_ARGS[@]}"
+        --include_privileged_pipe "${CLOSED_LOOP_EXTRA_ARGS[@]}"
 else
     CUDA_VISIBLE_DEVICES="${SIM_CUDA}" \
     "${HUGSIM_PYTHON_BIN}" closed_loop.py \
@@ -156,5 +158,5 @@ else
         --planner_path "${PLANNER_PATH}" \
         --ad "${AD_NAME}" \
         --ad_cuda "${AD_CUDA}" \
-        "${CLOSED_LOOP_EXTRA_ARGS[@]}"
+        --include_privileged_pipe "${CLOSED_LOOP_EXTRA_ARGS[@]}"
 fi
