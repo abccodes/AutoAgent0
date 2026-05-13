@@ -28,6 +28,7 @@ import json
 import numpy as np
 from typing import Any, Dict, List
 import logging
+from matplotlib import pyplot as plt
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -91,23 +92,44 @@ def visualize_array_to_txt(obs, output_path, file_name):
 
     # Extract unique values and sort them
     unique_values = np.unique(data_array).tolist()
+    num_classes = len(unique_values)
+    
+     # Create the image
+    plt.imshow(data_array, cmap='gray', vmin=0, vmax=255)
+    plt.xticks([])
+    plt.yticks([])
+
+    # Save the image
+    plt.savefig(output_path)
+    print(f"Image saved to {output_path}")
+
+    # Determine the color mapping range (0-255)
+    color_range = np.linspace(0, 255, num_classes)
 
     # Determine dimensions
-    rows, cols = data_array.shape
+    # rows, cols = data_array.shape
 
     # Create the text-based visualization
-    filepath = output_path + file_name
+    filepath = os.path.join(output_path, file_name)
     with open(filepath, 'w') as f:
-        f.write("unique values are: ")
+        # f.write("unique values are: ")
+        # f.write(str(unique_values))
+        # f.write("----------------------------------------")
+        # for r in range(rows):
+        #     row_str = ""
+        #     for c in range(cols):
+        #         row_str += str(data_array[r, c]) + " "
+        #     f.write(row_str + "\n")
+        f.write("Unique values: ")
         f.write(str(unique_values))
-        f.write("----------------------------------------")
-        for r in range(rows):
-            row_str = ""
-            for c in range(cols):
-                row_str += str(data_array[r, c]) + " "
-            f.write(row_str + "\n")
+        f.write("\n")
+        f.write("Number of classes: ")
+        f.write(str(num_classes))
+        f.write("\n")
+        f.write("Color mapping range: ")
+        f.write(str(color_range))
     print(f"unique values are {unique_values}")
-    print(f"wrote {file_name} to {output_path}")
+    # print(f"wrote {file_name} to {output_path}")
 
 
 def run_payload_test(cfg: OmegaConf, output_dir: str) -> None:
