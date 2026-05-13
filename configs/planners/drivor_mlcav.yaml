@@ -3,7 +3,7 @@ drivor:
   repo_root: /data/guest_rui/ztrs_workspace/DrivoR
   checkpoint: /data/guest_rui/ztrs_workspace/DrivoRweights/checkpoints/drivor_Nav1_25epochs.pth
   dino: /data/guest_rui/ztrs_workspace/DrivoRweights/vit_small_patch14_reg4_dinov2.lvd142m
-  python_bin: /data2/guest_rui/miniconda3/envs/rule_based/bin/python3.8
+  python_bin: /data2/guest_rui/miniconda3/envs/drivor_py38/bin/python3.8
   config: /data/guest_rui/ztrs_workspace/DrivoRDrivoR/navsim/planning/script/config/common/agent/drivoR.yaml
 
   device: cuda
