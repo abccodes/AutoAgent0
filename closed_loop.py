@@ -822,6 +822,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
             # REFAC: privileged payload form kept for reference:
             # write_pipe_message_file(obs_pipe_writer, (current_obs, current_info, privileged_info))
             plan_payload = read_pipe_message_file(plan_pipe_reader)
+            print(f"[DEBUG] plan_payload has these keys: {list(plan_payload.keys())}")
             current_topk_plans = None
             current_topk_scores = None
             current_candidate_pool_plans = None
@@ -887,6 +888,23 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
                 np.asarray(current_info['ego_pos']),
             )
         plan_traj = current_plan_traj
+
+        # DEBUG (for reference): print selected and candidate trajectories
+        # This helps diagnose visualization/dataflow issues after planner refactors.
+        try:
+            cand_pool_count = 0 if current_candidate_pool_plans is None else int(len(current_candidate_pool_plans))
+            topk_count = 0 if current_topk_plans is None else int(len(current_topk_plans))
+            sel_len = 0 if plan_traj is None else int(len(plan_traj))
+            print(f"[DEBUG] candidate_pool_count={cand_pool_count} topk_count={topk_count} selected_plan_len={sel_len}")
+            # Print small samples for quick inspection (first 3 points)
+            if current_candidate_pool_plans is not None and len(current_candidate_pool_plans) > 0:
+                print(f"[DEBUG] candidate_pool_plans[0] sample={np.asarray(current_candidate_pool_plans[0],dtype=object)[:3]}")
+            if current_topk_plans is not None and len(current_topk_plans) > 0:
+                print(f"[DEBUG] topk_plans[0] sample={np.asarray(current_topk_plans[0],dtype=object)[:3]}")
+            if plan_traj is not None:
+                print(f"[DEBUG] selected_plan sample={np.asarray(plan_traj,dtype=object)[:3]}")
+        except Exception:
+            print("[DEBUG] failed to print candidate/selected traj samples")
 
         if plan_traj is not None:
             imu_plan_traj = plan_traj[:, [1, 0]]
