@@ -637,6 +637,20 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     plan_pipe_reader = os.fdopen(os.open(plan_pipe, os.O_RDWR), "rb", buffering=0)
     print('Ready for simulation')
 
+    # Send a tiny preflight package so the planner can verify the FIFO path
+    # before the first full observation payload is written.
+    preflight_payload = {
+        "message_type": "hugsim_preflight",
+        "output_dir": output,
+        "obs_pipe": obs_pipe,
+        "plan_pipe": plan_pipe,
+        "include_privileged_pipe": bool(include_privileged_pipe),
+        "camera_count": 0 if not isinstance(obs, dict) else len(obs.get("rgb", {})),
+        "timestamp": float(info.get("timestamp", 0.0)) if isinstance(info, dict) else None,
+    }
+    write_pipe_message_file(obs_pipe_writer, preflight_payload)
+    print(f'Wrote preflight diagnostic to {obs_pipe}')
+
     last_valid_overlay_plan = None
     last_valid_overlay_pose = None
     last_valid_overlay_plan_stale_frames = 0

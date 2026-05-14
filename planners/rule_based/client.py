@@ -809,6 +809,20 @@ def main() -> int:
 
     try:
         LOG.info("Entering adapter read loop; waiting for observations on %s", obs_pipe)
+        LOG.info("Attempting to read preflight diagnostic message")
+        message = read_obs_file(obs_pipe_reader)
+        if isinstance(message, dict) and message.get("message_type") == "hugsim_preflight":
+                    LOG.info(
+                        "Received HUGSIM preflight diagnostic: output_dir=%s obs_pipe=%s plan_pipe=%s include_privileged_pipe=%s camera_count=%s timestamp=%s",
+                        message.get("output_dir"),
+                        message.get("obs_pipe"),
+                        message.get("plan_pipe"),
+                        message.get("include_privileged_pipe"),
+                        message.get("camera_count"),
+                        message.get("timestamp"),
+                    )
+        
+
         while True:
             try:
                 LOG.info("Waiting for next observation payload on %s", obs_pipe)
