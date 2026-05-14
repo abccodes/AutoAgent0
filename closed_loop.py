@@ -651,10 +651,18 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
 
     obs_pipe = os.path.join(output, 'obs_pipe')
     plan_pipe = os.path.join(output, 'plan_pipe')
+    # Only create FIFOs if they do not already exist. Avoid removing and
+    # recreating them which changes the inode and can break already-open
+    # file descriptors held by external clients.
     for pipe_path in (obs_pipe, plan_pipe):
-        if os.path.exists(pipe_path):
-            os.remove(pipe_path)
-        os.mkfifo(pipe_path)
+        if not os.path.exists(pipe_path):
+            os.mkfifo(pipe_path)
+        else:
+            try:
+                st = os.stat(pipe_path)
+                print(f"[FIFO EXISTS] path={pipe_path} inode={st.st_ino} mode={oct(st.st_mode)} t={time.time():.6f}")
+            except Exception:
+                print(f"[FIFO EXISTS] path={pipe_path} (stat failed) t={time.time():.6f}")
     # Keep both FIFOs open in RDWR mode to avoid blocking open-order deadlocks
     # between closed_loop and the planner adapter. Actual message traffic still
     # uses fresh per-message open/read/write calls below.
