@@ -729,8 +729,8 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     # Pause to allow external reader to pick up preflight and for manual inspection
     # NOTE: do not attempt to read the preflight locally here — reading it
     # would consume the message so the external client could not see it.
-    print(f'[preflight] sleeping 10s at t={time.time():.6f}')
-    time.sleep(10.0)
+    # print(f'[preflight] sleeping 10s at t={time.time():.6f}')
+    # time.sleep(10.0)
 
     last_valid_overlay_plan = None
     last_valid_overlay_pose = None
