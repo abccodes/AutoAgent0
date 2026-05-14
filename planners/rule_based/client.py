@@ -822,7 +822,8 @@ def main() -> int:
                         message.get("timestamp"),
                     )
         
-
+        else:
+            LOG.info("preflight unsuccessful...message: %s, message type: %s", message, type(message))
         while True:
             try:
                 LOG.info("Waiting for next observation payload on %s", obs_pipe)
