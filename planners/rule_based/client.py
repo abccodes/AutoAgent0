@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import fcntl
 
 from scipy.spatial.transform import Rotation as SCR
 from planners.common.vlm_selector import VLMPlanSelector, VLMSelectorConfig
@@ -129,12 +130,18 @@ def _log_fifo_fd(pipe, label: str) -> None:
     try:
         fd = pipe.fileno()
         stat_result = os.fstat(fd)
+        # fetch open flags
+        try:
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        except Exception:
+            flags = None
         LOG.info(
-            "%s fd=%s inode=%s mode=%s",
+            "%s fd=%s inode=%s mode=%s flags=%s",
             label,
             fd,
             stat_result.st_ino,
             oct(stat_result.st_mode),
+            str(flags),
         )
         try:
             LOG.info("%s fd link=%s", label, os.readlink(f"/proc/{os.getpid()}/fd/{fd}"))
@@ -463,8 +470,9 @@ def read_obs(obs_pipe: Path):
 
 
 def read_obs_file(pipe, timeout_sec: float = 30.0):
-    LOG.info("entered read_obs_file function %s", pipe)
+    LOG.info("entered read_obs_file function %s at t=%s", pipe, time.time())
     fd = pipe.fileno()
+    LOG.info("select waiting on fd=%s timeout=%.1f at t=%s", fd, timeout_sec, time.time())
     ready, _, _ = select.select([fd], [], [], timeout_sec)
     if not ready:
         try:
@@ -480,13 +488,16 @@ def read_obs_file(pipe, timeout_sec: float = 30.0):
             LOG.error("Timeout waiting for FIFO readability after %.1fs", timeout_sec)
         raise TimeoutError(f"No obs_pipe data became readable within {timeout_sec} seconds")
 
+    LOG.info("about to read header at t=%s", time.time())
     header = pipe.read(8)
+    LOG.info("read header len=%s at t=%s", len(header) if header is not None else None, time.time())
     if len(header) != 8:
         raise EOFError("Incomplete pipe header from open obs pipe handle")
     payload_size = struct.unpack("<Q", header)[0]
     payload = bytearray()
     while len(payload) < payload_size:
         LOG.info("loading chunks, payload is size: %s", len(payload))
+        LOG.info("about to read chunk remaining=%s at t=%s", payload_size - len(payload), time.time())
         chunk = pipe.read(payload_size - len(payload))
         if not chunk:
             raise EOFError("Incomplete pipe payload from open obs pipe handle")
@@ -502,10 +513,19 @@ def write_plan(plan_pipe: Path, plan) -> None:
 
 
 def write_plan_file(pipe, plan) -> None:
-    payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
-    pipe.write(struct.pack("<Q", len(payload)))
-    pipe.write(payload)
-    pipe.flush()
+    try:
+        payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
+        fd = pipe.fileno()
+        try:
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        except Exception:
+            flags = None
+        LOG.info("write_plan_file: fd=%s flags=%s bytes=%s t=%s", fd, str(flags), len(payload), time.time())
+        pipe.write(struct.pack("<Q", len(payload)))
+        pipe.write(payload)
+        pipe.flush()
+    except Exception:
+        LOG.exception("Failed writing plan to pipe")
 
 # ============================================================================
 # NEW FUNCTIONS: RAP-compatible candidate generation and payload building

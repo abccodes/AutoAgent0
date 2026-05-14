@@ -394,6 +394,31 @@ def read_pipe_message(pipe_path):
 
 def write_pipe_message_file(pipe, payload_obj):
     payload = pickle.dumps(payload_obj, protocol=pickle.HIGHEST_PROTOCOL)
+    try:
+        fd = pipe.fileno()
+    except Exception:
+        fd = None
+    try:
+        if fd is not None:
+            try:
+                import fcntl as _fcntl
+                flags = _fcntl.fcntl(fd, _fcntl.F_GETFL)
+            except Exception:
+                flags = None
+            try:
+                stat_result = os.fstat(fd)
+                inode = stat_result.st_ino
+                mode = oct(stat_result.st_mode)
+            except Exception:
+                inode = None
+                mode = None
+        else:
+            flags = None
+            inode = None
+            mode = None
+        print(f"[write_pipe_message_file] fd={fd} inode={inode} mode={mode} flags={flags} bytes={len(payload)} t={time.time():.6f}")
+    except Exception:
+        print(f"[write_pipe_message_file] logging failed t={time.time():.6f}")
     pipe.write(struct.pack("<Q", len(payload)))
     pipe.write(payload)
     pipe.flush()
@@ -637,6 +662,44 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     plan_pipe_keepalive_fd = os.open(plan_pipe, os.O_RDWR | os.O_NONBLOCK)
     obs_pipe_writer = os.fdopen(os.open(obs_pipe, os.O_RDWR), "wb", buffering=0)
     plan_pipe_reader = os.fdopen(os.open(plan_pipe, os.O_RDWR), "rb", buffering=0)
+    # local helper for logging fd info
+    try:
+        import fcntl as _fcntl
+    except Exception:
+        _fcntl = None
+
+    def _log_fd_info(fd, label):
+        try:
+            stat_result = os.fstat(fd)
+            inode = stat_result.st_ino
+            mode = oct(stat_result.st_mode)
+        except Exception:
+            inode = None
+            mode = None
+        try:
+            if _fcntl is not None:
+                flags = _fcntl.fcntl(fd, _fcntl.F_GETFL)
+            else:
+                flags = None
+        except Exception:
+            flags = None
+        try:
+            link = os.readlink(f"/proc/{os.getpid()}/fd/{fd}")
+        except Exception:
+            link = None
+        print(f"[FIFO OPEN] {label} fd={fd} inode={inode} mode={mode} flags={flags} link={link} t={time.time():.6f}")
+
+    # Log keepalive and io fds
+    _log_fd_info(obs_pipe_keepalive_fd, 'obs_pipe_keepalive_fd')
+    _log_fd_info(plan_pipe_keepalive_fd, 'plan_pipe_keepalive_fd')
+    try:
+        _log_fd_info(obs_pipe_writer.fileno(), 'obs_pipe_writer')
+    except Exception:
+        pass
+    try:
+        _log_fd_info(plan_pipe_reader.fileno(), 'plan_pipe_reader')
+    except Exception:
+        pass
     print('Ready for simulation')
 
     # Send a tiny preflight package so the planner can verify the FIFO path
@@ -1141,8 +1204,10 @@ if __name__ == "__main__":
             )
             extra_env['PLANNER_VLM_DEVICE'] = vlm_device
             extra_env['RULE_BASED_VLM_DEVICE'] = vlm_device
-
+    print("preparing to launch client.py")
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
+    print("client.py launched, waiting 10 seconds before running create_gym_env")
+    time.sleep(10)
     try:
         create_gym_env(cfg, output, planner_output_suffix, args.include_privileged_pipe)
         check_alive(process)
