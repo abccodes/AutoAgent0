@@ -899,6 +899,8 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
             # Print small samples for quick inspection (first 3 points)
             if current_candidate_pool_plans is not None and len(current_candidate_pool_plans) > 0:
                 print(f"[DEBUG] candidate_pool_plans[0] sample={np.asarray(current_candidate_pool_plans[0],dtype=object)[:3]}")
+                for i in range(len(current_candidate_pool_plans)):
+                    print(f"[DEBUG] SAMPLE OF {i}th TRAJ: {np.asarray(current_candidate_pool_plans[i],dtype=object)[:2]}")
             if current_topk_plans is not None and len(current_topk_plans) > 0:
                 print(f"[DEBUG] topk_plans[0] sample={np.asarray(current_topk_plans[0],dtype=object)[:3]}")
             if plan_traj is not None:
