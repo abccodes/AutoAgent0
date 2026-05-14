@@ -648,6 +648,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
         "camera_count": 0 if not isinstance(obs, dict) else len(obs.get("rgb", {})),
         "timestamp": float(info.get("timestamp", 0.0)) if isinstance(info, dict) else None,
     }
+    print(f'Preflight diagnostic payload bytes={len(pickle.dumps(preflight_payload, protocol=pickle.HIGHEST_PROTOCOL))}')
     write_pipe_message_file(obs_pipe_writer, preflight_payload)
     print(f'Wrote preflight diagnostic to {obs_pipe}')
 

@@ -24,6 +24,7 @@ import struct
 import sys
 import time
 import traceback
+import select
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,6 +123,25 @@ def setup_logging(output_dir: Path) -> None:
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(log_path, mode="w"), logging.StreamHandler(sys.stdout)],
     )
+
+
+def _log_fifo_fd(pipe, label: str) -> None:
+    try:
+        fd = pipe.fileno()
+        stat_result = os.fstat(fd)
+        LOG.info(
+            "%s fd=%s inode=%s mode=%s",
+            label,
+            fd,
+            stat_result.st_ino,
+            oct(stat_result.st_mode),
+        )
+        try:
+            LOG.info("%s fd link=%s", label, os.readlink(f"/proc/{os.getpid()}/fd/{fd}"))
+        except Exception:
+            pass
+    except Exception:
+        LOG.exception("Failed to inspect FIFO fd for %s", label)
 
 # no need for load_rap_model since this adapter owns its own planner bootstrap
 
@@ -442,8 +462,24 @@ def read_obs(obs_pipe: Path):
     return pickle.loads(payload)
 
 
-def read_obs_file(pipe):
-    LOG.info("entered read_obs_file function")
+def read_obs_file(pipe, timeout_sec: float = 30.0):
+    LOG.info("entered read_obs_file function %s", pipe)
+    fd = pipe.fileno()
+    ready, _, _ = select.select([fd], [], [], timeout_sec)
+    if not ready:
+        try:
+            stat_result = os.fstat(fd)
+            LOG.error(
+                "Timeout waiting for FIFO readability after %.1fs: fd=%s inode=%s mode=%s",
+                timeout_sec,
+                fd,
+                stat_result.st_ino,
+                oct(stat_result.st_mode),
+            )
+        except Exception:
+            LOG.error("Timeout waiting for FIFO readability after %.1fs", timeout_sec)
+        raise TimeoutError(f"No obs_pipe data became readable within {timeout_sec} seconds")
+
     header = pipe.read(8)
     if len(header) != 8:
         raise EOFError("Incomplete pipe header from open obs pipe handle")
@@ -783,9 +819,11 @@ def main() -> int:
     LOG.info("Waiting for scene FIFOs to appear: obs=%s plan=%s", obs_pipe, plan_pipe)
     while not obs_pipe.exists() or not plan_pipe.exists():
         time.sleep(0.1)
-    obs_pipe_reader = os.fdopen(os.open(obs_pipe, os.O_RDWR), "rb", buffering=0)
+    obs_pipe_reader = os.fdopen(os.open(obs_pipe, os.O_RDONLY), "rb", buffering=0)
     plan_pipe_writer = os.fdopen(os.open(plan_pipe, os.O_RDWR), "wb", buffering=0)
     LOG.info("Opened persistent scene FIFOs for obs and plan exchange")
+    _log_fifo_fd(obs_pipe_reader, "obs_pipe_reader")
+    _log_fifo_fd(plan_pipe_writer, "plan_pipe_writer")
 
     info_history: deque[Dict[str, object]] = deque(maxlen=EGO_HISTORY_FRAMES)
 
@@ -827,7 +865,7 @@ def main() -> int:
         while True:
             try:
                 LOG.info("Waiting for next observation payload on %s", obs_pipe)
-                message = read_obs_file(obs_pipe_reader)
+                message = read_obs_file(obs_pipe_reader, timeout_sec=30.0)
                 LOG.info("Received observation payload from %s", obs_pipe)
                 if message == "Done":
                     LOG.info("Received shutdown signal")
