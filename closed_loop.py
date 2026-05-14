@@ -1212,10 +1212,10 @@ if __name__ == "__main__":
             )
             extra_env['PLANNER_VLM_DEVICE'] = vlm_device
             extra_env['RULE_BASED_VLM_DEVICE'] = vlm_device
-    print("preparing to launch client.py")
+    # print("preparing to launch client.py")
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
-    print("client.py launched, waiting 10 seconds before running create_gym_env")
-    time.sleep(10)
+    # print("client.py launched, waiting 10 seconds before running create_gym_env")
+    # time.sleep(10)
     try:
         create_gym_env(cfg, output, planner_output_suffix, args.include_privileged_pipe)
         check_alive(process)
