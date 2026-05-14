@@ -848,6 +848,38 @@ def main() -> int:
     _log_fifo_fd(obs_pipe_reader, "obs_pipe_reader")
     _log_fifo_fd(plan_pipe_writer, "plan_pipe_writer")
 
+    # Ensure the opened obs fd corresponds to the current path inode.
+    # If the writer removed and recreated the FIFO after we opened it,
+    # our fd will point to an unlinked inode and won't see new writes.
+    try:
+        def _ensure_fd_matches_path(fd_obj, path, attempts=10, delay=0.2):
+            for attempt in range(attempts):
+                try:
+                    fd = fd_obj.fileno()
+                    fd_inode = os.fstat(fd).st_ino
+                    path_inode = os.stat(path).st_ino
+                    if fd_inode == path_inode:
+                        LOG.info("obs fd inode matches path inode: %s", fd_inode)
+                        return True
+                    LOG.warning("FD inode %s != path inode %s; reopening (attempt %d)", fd_inode, path_inode, attempt + 1)
+                    try:
+                        fd_obj.close()
+                    except Exception:
+                        pass
+                    # Reopen fresh
+                    new_fd = os.fdopen(os.open(path, os.O_RDWR), "rb", buffering=0)
+                    fd_obj.__init__(new_fd.fileno(), new_fd.mode)
+                except FileNotFoundError:
+                    LOG.warning("Path %s disappeared while ensuring inode match; retrying", path)
+                except Exception:
+                    LOG.exception("Error ensuring fd/path inode match")
+                time.sleep(delay)
+            return False
+
+        _ensure_fd_matches_path(obs_pipe_reader, str(obs_pipe))
+    except Exception:
+        LOG.exception("Failed during obs_pipe inode sanity check")
+
     info_history: deque[Dict[str, object]] = deque(maxlen=EGO_HISTORY_FRAMES)
 
     # VLM selector setup
