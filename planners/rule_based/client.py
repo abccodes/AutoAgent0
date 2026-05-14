@@ -818,8 +818,11 @@ def main() -> int:
     plan_pipe = output_dir / "plan_pipe"
     LOG.info("Waiting for scene FIFOs to appear: obs=%s plan=%s", obs_pipe, plan_pipe)
     while not obs_pipe.exists() or not plan_pipe.exists():
+        LOG.info("obs_pipe and plan_pipe dont exist, sleeping for 0.1s")
         time.sleep(0.1)
-    obs_pipe_reader = os.fdopen(os.open(obs_pipe, os.O_RDONLY), "rb", buffering=0)
+    # Match the older DrivoR FIFO semantics: O_RDWR avoids startup deadlocks
+    # when the writer and reader come up in different orders.
+    obs_pipe_reader = os.fdopen(os.open(obs_pipe, os.O_RDWR), "rb", buffering=0)
     plan_pipe_writer = os.fdopen(os.open(plan_pipe, os.O_RDWR), "wb", buffering=0)
     LOG.info("Opened persistent scene FIFOs for obs and plan exchange")
     _log_fifo_fd(obs_pipe_reader, "obs_pipe_reader")

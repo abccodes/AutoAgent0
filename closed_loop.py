@@ -29,6 +29,8 @@ from sim.utils.score_calculator import hugsim_evaluate
 import numpy as np
 import cv2
 from moviepy import ImageSequenceClip
+import time
+import select
 from planners.common.candidate_visuals import get_candidate_visual_style
 from planners.common.vlm_env import build_prefixed_vlm_env
 
@@ -648,9 +650,38 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
         "camera_count": 0 if not isinstance(obs, dict) else len(obs.get("rgb", {})),
         "timestamp": float(info.get("timestamp", 0.0)) if isinstance(info, dict) else None,
     }
-    print(f'Preflight diagnostic payload bytes={len(pickle.dumps(preflight_payload, protocol=pickle.HIGHEST_PROTOCOL))}')
+    preflight_serialized = pickle.dumps(preflight_payload, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f'[preflight] t_before_write={time.time():.6f} bytes={len(preflight_serialized)}')
     write_pipe_message_file(obs_pipe_writer, preflight_payload)
-    print(f'Wrote preflight diagnostic to {obs_pipe}')
+    print(f'[preflight] t_after_write={time.time():.6f} Wrote preflight diagnostic to {obs_pipe}')
+
+    # Try to read the preflight back locally to validate FIFO visibility (diagnostic only)
+    try:
+        local_fd = os.open(obs_pipe, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            # wait briefly for readability
+            ready, _, _ = select.select([local_fd], [], [], 2.0)
+            if ready:
+                with os.fdopen(local_fd, "rb", buffering=0) as local_reader:
+                    try:
+                        msg = read_pipe_message_file(local_reader)
+                        print(f'[preflight] local read-back succeeded at t={time.time():.6f}: {type(msg)}')
+                    except Exception as e:
+                        print(f'[preflight] local read-back failed: {e}')
+            else:
+                print(f'[preflight] local read-back not ready after 2.0s at t={time.time():.6f}')
+        except Exception as e:
+            print(f'[preflight] error during local read-back select/read: {e}')
+            try:
+                os.close(local_fd)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f'[preflight] could not open local reader fd: {e}')
+
+    # Pause to allow external reader to pick up preflight and for manual inspection
+    print(f'[preflight] sleeping 10s at t={time.time():.6f}')
+    time.sleep(10.0)
 
     last_valid_overlay_plan = None
     last_valid_overlay_pose = None
