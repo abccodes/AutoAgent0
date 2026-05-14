@@ -22,7 +22,7 @@ echo "  EXPECTED_OBS_PIPE=${OUTPUT_DIR}/obs_pipe"
 # Provided by HUGSIM closed_loop.py via extra_env
 : "${RULE_BASED_PYTHON_BIN:=python}"
 : "${RULE_BASED_REPO_ROOT:?RULE_BASED_REPO_ROOT is not set}"
-: "${RULE_BASED_DEVICE:=cpu}"
+: "${RULE_BASED_DEVICE:=cuda}"
 : "${RULE_BASED_CONFIG:?RULE_BASED_CONFIG is not set}"
 
 echo "  RULE_BASED_PYTHON_BIN=${RULE_BASED_PYTHON_BIN}"
