@@ -280,7 +280,7 @@ def trajectory_to_scores(debug_info: Dict[str, Any]) -> np.ndarray:
     Returns:
         scores: np.ndarray of shape [1] with single planner score
     """
-    best_score = float(debug_info.get("best_score", 1.0))
+    best_score = float(debug_info.get("best_score").get("total_score", 1.0))
     return np.array([best_score], dtype=np.float32)
 
 #gotta figure out what the functions up to world_points_to_current_local do
