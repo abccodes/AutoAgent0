@@ -7,7 +7,7 @@ if [[ $# -lt 1 || $# -gt 4 ]]; then
 fi
 
 PLANNER_NAME="${1:?missing planner name}"
-SCENARIO_PATH="${2:-configs/benchmark/nuscenes/scene-0383-easy-00.yaml}"
+SCENARIO_PATH="${2:-${SCENARIO_PATH:-configs/benchmark/nuscenes/scene-0383-easy-00.yaml}}"
 DEFAULT_CUDA_ID="0"
 if [[ -n "${SLURM_JOB_ID:-}" || -n "${SLURM_STEP_ID:-}" ]]; then
     DEFAULT_CUDA_ID="inherit"
