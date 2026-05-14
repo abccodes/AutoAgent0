@@ -443,12 +443,14 @@ def read_obs(obs_pipe: Path):
 
 
 def read_obs_file(pipe):
+    LOG.info("entered read_obs_file function")
     header = pipe.read(8)
     if len(header) != 8:
         raise EOFError("Incomplete pipe header from open obs pipe handle")
     payload_size = struct.unpack("<Q", header)[0]
     payload = bytearray()
     while len(payload) < payload_size:
+        LOG.info("loading chunks, payload is size: %s", len(payload))
         chunk = pipe.read(payload_size - len(payload))
         if not chunk:
             raise EOFError("Incomplete pipe payload from open obs pipe handle")

@@ -11,11 +11,25 @@ if [[ "${CUDA_ID}" != "inherit" ]]; then
     export CUDA_VISIBLE_DEVICES="${CUDA_ID}"
 fi
 
+# Debug: echo invocation and key environment values so runtime can be inspected
+echo "[rule_based/launch.sh] PID $$ invoked"
+echo "  CUDA_ID=${CUDA_ID}"
+echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "  OUTPUT_DIR=${OUTPUT_DIR}"
+echo "  EXPECTED_OBS_PIPE=${OUTPUT_DIR}/obs_pipe"
+
+
 # Provided by HUGSIM closed_loop.py via extra_env
 : "${RULE_BASED_PYTHON_BIN:=python}"
 : "${RULE_BASED_REPO_ROOT:?RULE_BASED_REPO_ROOT is not set}"
-: "${RULE_BASED_DEVICE:=cuda}"
+: "${RULE_BASED_DEVICE:=cpu}"
 : "${RULE_BASED_CONFIG:?RULE_BASED_CONFIG is not set}"
+
+echo "  RULE_BASED_PYTHON_BIN=${RULE_BASED_PYTHON_BIN}"
+echo "  RULE_BASED_REPO_ROOT=${RULE_BASED_REPO_ROOT}"
+echo "  RULE_BASED_DEVICE=${RULE_BASED_DEVICE}"
+echo "  RULE_BASED_CONFIG=${RULE_BASED_CONFIG}"
+echo "  AD_CUDA=${AD_CUDA:-<unset>}"
 #gpt recommended this for some reason, but I don't see a reason to deviate from the format that DrivoR has.
 # export RULE_BASED_PYTHON_BIN="${RULE_BASED_PYTHON_BIN:-python}"
 # export RULE_BASED_REPO_ROOT="${RULE_BASED_REPO_ROOT:?RULE_BASED_REPO_ROOT is not set}"
@@ -53,4 +67,6 @@ export PLANNER_CONFIG="${RULE_BASED_CONFIG}"
 
 cd "${RULE_BASED_REPO_ROOT}"
 
+echo "Changing to repo: $(pwd)"
+echo "Launching client: ${RULE_BASED_PYTHON_BIN} ${SCRIPT_DIR}/client.py --output ${OUTPUT_DIR}"
 exec "${RULE_BASED_PYTHON_BIN}" "${SCRIPT_DIR}/client.py" --output "${OUTPUT_DIR}"

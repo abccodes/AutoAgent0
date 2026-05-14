@@ -1091,7 +1091,7 @@ if __name__ == "__main__":
     elif args.ad == "rule_based":
         # rule_based_cfg = _get_planner_section(cfg.planner, "rule_based")
         rule_based_python_bin = cfg.planner.rule_based.get('python_bin', 'python')
-        rule_based_device = os.environ.get('RULE_BASED_DEVICE_OVERRIDE') or cfg.planner.rule_based.get('device', 'cuda')
+        rule_based_device = os.environ.get('RULE_BASED_DEVICE_OVERRIDE') or cfg.planner.rule_based.get('device', 'cpu')
         vlm_device = (
                 os.environ.get('PLANNER_VLM_DEVICE_OVERRIDE')
                 or os.environ.get('RULE_BASED_VLM_DEVICE_OVERRIDE')
