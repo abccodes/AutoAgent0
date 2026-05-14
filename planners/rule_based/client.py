@@ -470,9 +470,9 @@ def read_obs(obs_pipe: Path):
 
 
 def read_obs_file(pipe, timeout_sec: float = 30.0):
-    LOG.info("entered read_obs_file function %s at t=%s", pipe, time.time())
+    # LOG.info("entered read_obs_file function %s at t=%s", pipe, time.time())
     fd = pipe.fileno()
-    LOG.info("select waiting on fd=%s timeout=%.1f at t=%s", fd, timeout_sec, time.time())
+    # LOG.info("select waiting on fd=%s timeout=%.1f at t=%s", fd, timeout_sec, time.time())
     ready, _, _ = select.select([fd], [], [], timeout_sec)
     if not ready:
         try:
@@ -488,16 +488,16 @@ def read_obs_file(pipe, timeout_sec: float = 30.0):
             LOG.error("Timeout waiting for FIFO readability after %.1fs", timeout_sec)
         raise TimeoutError(f"No obs_pipe data became readable within {timeout_sec} seconds")
 
-    LOG.info("about to read header at t=%s", time.time())
+    # LOG.info("about to read header at t=%s", time.time())
     header = pipe.read(8)
-    LOG.info("read header len=%s at t=%s", len(header) if header is not None else None, time.time())
+    # LOG.info("read header len=%s at t=%s", len(header) if header is not None else None, time.time())
     if len(header) != 8:
         raise EOFError("Incomplete pipe header from open obs pipe handle")
     payload_size = struct.unpack("<Q", header)[0]
     payload = bytearray()
     while len(payload) < payload_size:
-        LOG.info("loading chunks, payload is size: %s", len(payload))
-        LOG.info("about to read chunk remaining=%s at t=%s", payload_size - len(payload), time.time())
+        # LOG.info("loading chunks, payload is size: %s", len(payload))
+        # LOG.info("about to read chunk remaining=%s at t=%s", payload_size - len(payload), time.time())
         chunk = pipe.read(payload_size - len(payload))
         if not chunk:
             raise EOFError("Incomplete pipe payload from open obs pipe handle")
