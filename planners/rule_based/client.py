@@ -239,49 +239,79 @@ def rule_based_to_hugsim_plan(trajectory: np.ndarray) -> np.ndarray:
 # Rule-based planner adapter helpers
 # ============================================================================
 
-def trajectory_to_proposals(traj: Any, output_num_poses: int) -> np.ndarray:
+def trajectory_to_proposals(selected: Any, output_num_poses: int) -> np.ndarray:
     """
-    Convert Trajectory object from rule-based planner to proposal format.
-    
+    Convert planner output to proposal format used by HUGSIM.
+
     Args:
-        traj: Trajectory object with .states [T, 2] (x_forward, y_left in ego frame)
+        selected: Either a single Trajectory object, or a list of
+            (Trajectory, score_dict) tuples as returned by the refactored
+            planner (selected_list). If a list is provided, proposals for
+            all selected trajectories are returned in order.
         output_num_poses: horizon length for padding/truncation
-        
+
     Returns:
-        proposals: np.ndarray of shape [1, output_num_poses, 3] 
-                  (single proposal with x_forward, y_left, heading=0)
+        proposals: np.ndarray of shape [N, output_num_poses, 3]
+                   where N is number of trajectories (1 for single traj)
+                   and each entry is [x_forward, y_left, heading].
     """
-    states = np.asarray(traj.states, dtype=np.float32)  # [T, 2]
-    
-    # Pad or truncate to output_num_poses
-    if states.shape[0] < output_num_poses:
-        pad_len = output_num_poses - states.shape[0]
-        last_state = states[-1] if len(states) > 0 else np.zeros(2, dtype=np.float32)
-        pad = np.tile(last_state, (pad_len, 1)).astype(np.float32)
-        states = np.concatenate([states, pad], axis=0)
-    else:
-        states = states[:output_num_poses]
-    
-    # Pad heading dimension (set to 0)
-    headings = np.zeros((output_num_poses, 1), dtype=np.float32)
-    traj_3d = np.concatenate([states[:, :2], headings], axis=1)  # [T, 3]
-    
-    # Return in rule-based planner format [proposals, timesteps, xyz]
-    return np.expand_dims(traj_3d, axis=0)  # [1, T, 3]
+    def _traj_to_3d(traj_obj: Any) -> np.ndarray:
+        states = np.asarray(traj_obj.states, dtype=np.float32)  # [T, 2]
+        # Pad or turncate to output_num_poses
+        if states.shape[0] < output_num_poses:
+            pad_len = output_num_poses - states.shape[0]
+            last_state = states[-1] if len(states) > 0 else np.zeros(2, dtype=np.float32)
+            pad = np.tile(last_state, (pad_len, 1)).astype(np.float32)
+            states_p = np.concatenate([states, pad], axis=0)
+        else:
+            states_p = states[:output_num_poses]
+
+        # Pad heading dimension (set to 0)
+        headings = np.zeros((output_num_poses, 1), dtype=np.float32)
+        return np.concatenate([states_p[:, :2], headings], axis=1)
+
+    # If selected is a list of (traj, score_dict) tuples
+    if isinstance(selected, (list, tuple)) and len(selected) > 0 and isinstance(selected[0], (list, tuple)):
+        proposals = [_traj_to_3d(tup[0]) for tup in selected]
+        return np.stack(proposals, axis=0)
+
+    # Single trajectory case
+    return np.expand_dims(_traj_to_3d(selected), axis=0)
 
 
-def trajectory_to_scores(debug_info: Dict[str, Any]) -> np.ndarray:
+def trajectory_to_scores(selected: Any, debug_info: Optional[Dict[str, Any]] = None) -> np.ndarray:
     """
-    Extract score from planner debug info.
-    
+    Extract scores array corresponding to proposals.
+
     Args:
-        debug_info: Debug dict from planner with 'best_score' key
-        
+        selected: Either a list of (Trajectory, score_dict) tuples, or a
+            single Trajectory object. If a list is provided the corresponding
+            score_dicts are used to build the scores array.
+        debug_info: Optional legacy debug dict from planner which may contain
+            a 'best_score' entry. Used when `selected` does not contain
+            explicit score dicts.
+
     Returns:
-        scores: np.ndarray of shape [1] with single planner score
+        scores: np.ndarray of shape [N] with total_score for each proposal.
     """
-    best_score = float(debug_info.get("best_score").get("total_score", 1.0))
-    return np.array([best_score], dtype=np.float32)
+    # If selected is a list of (traj, score_dict)
+    if isinstance(selected, (list, tuple)) and len(selected) > 0 and isinstance(selected[0], (list, tuple)):
+        scores = []
+        for _, score_dict in selected:
+            if score_dict is None:
+                scores.append(0.0)
+            else:
+                scores.append(float(score_dict.get("total_score", 0.0)))
+        return np.asarray(scores, dtype=np.float32)
+
+    # Fallback: try to read from debug_info (legacy single-score format)
+    if debug_info is not None:
+        best = debug_info.get("best_score")
+        if isinstance(best, dict):
+            return np.array([float(best.get("total_score", 0.0))], dtype=np.float32)
+
+    # Unknown: return a single zero score
+    return np.array([0.0], dtype=np.float32)
 
 #gotta figure out what the functions up to world_points_to_current_local do
 
@@ -950,27 +980,40 @@ def main() -> int:
 
                 # Run planner on current observation
                 try:
-                    traj, planner_debug = planner.process(
+                    # Request top-N selected trajectories from the planner so we
+                    # can visualize multiple candidates. The planner defaults
+                    # to k=1 so this is explicit.
+                    selected, planner_debug = planner.process(
                         obs=obs,
                         info=info,
                         info_history=info_history,
-                        privileged_agents=privileged_info
+                        privileged_agents=privileged_info,
+                        k=TOPK,
                     )
+                    # selected is a list of (Trajectory, score_dict) tuples
+                    best_traj, best_score = selected[0]
                     LOG.info(
-                        "Planner generated trajectory: behavior=%s, states_shape=%s",
-                        traj.behavior if hasattr(traj, 'behavior') else 'unknown',
-                        np.asarray(traj.states).shape if hasattr(traj, 'states') else None
+                        "Planner returned %d selected trajectories; best behavior=%s, states_shape=%s",
+                        len(selected),
+                        best_traj.behavior if hasattr(best_traj, 'behavior') else 'unknown',
+                        np.asarray(best_traj.states).shape if hasattr(best_traj, 'states') else None,
                     )
                 except Exception as e:
                     LOG.exception("Planner.process() failed: %s", e)
                     write_plan_file(plan_pipe_writer, None)
                     continue
 
-                # Convert planner trajectory to proposal format
+                # Convert planner selected trajectories to proposals and extract scores
                 try:
-                    proposals = trajectory_to_proposals(traj, output_num_poses)
-                    scores = trajectory_to_scores(planner_debug)
-                    LOG.info("Converted trajectory to proposals shape=%s, scores=%s", proposals.shape, scores)
+                    proposals = trajectory_to_proposals(selected, output_num_poses)
+                    scores = trajectory_to_scores(selected, planner_debug)
+                    LOG.info(
+                        "Converted %d selected trajectories to proposals shape=%s, scores=%s",
+                        len(selected),
+                        proposals.shape,
+                        scores,
+                    )
+                    LOG.info("score breakdown: %s", planner_debug)
                 except Exception as e:
                     LOG.exception("Failed to convert planner trajectory: %s", e)
                     write_plan_file(plan_pipe_writer, None)
