@@ -643,8 +643,9 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     env = gymnasium.make('hugsim_env/HUGSim-v0', cfg=cfg, output=output)
 
     observations_save, infos_save = [], []
-    #added privileged_info for init planner work
-    obs, info, privileged_info = env.reset()
+    # Get initial obs/info from env.reset() and fetch privileged info separately
+    obs, info = env.reset()
+    privileged_info = env.get_agent_privileged_info()
     done = False
     cnt = 0
     save_data = {'type': 'closeloop', 'frames': []}
@@ -726,11 +727,6 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     write_pipe_message_file(obs_pipe_writer, preflight_payload)
     print(f'[preflight] t_after_write={time.time():.6f} Wrote preflight diagnostic to {obs_pipe}')
 
-    # Pause to allow external reader to pick up preflight and for manual inspection
-    # NOTE: do not attempt to read the preflight locally here — reading it
-    # would consume the message so the external client could not see it.
-    # print(f'[preflight] sleeping 10s at t={time.time():.6f}')
-    # time.sleep(10.0)
 
     last_valid_overlay_plan = None
     last_valid_overlay_pose = None
@@ -771,9 +767,10 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
         if name.endswith('.jpg'):
             os.remove(os.path.join(overlay_front_dir, name))
     while not done:
-        #added privileged_info for init planner work
+        # Ensure we have fresh privileged info when resetting
         if obs is None or info is None or privileged_info is None:
-            obs, info, privileged_info = env.reset()
+            obs, info = env.reset()
+            privileged_info = env.get_agent_privileged_info()
         current_obs, current_info = obs, info
         infos_save.append(current_info)
 
@@ -1134,11 +1131,7 @@ if __name__ == "__main__":
         ad_path = cfg.planner.drivor.launch_path
     elif args.ad == "rule_based":
         ad_path = cfg.planner.rule_based.launch_path
-        # rule_based_section = _get_planner_section(cfg.planner, "rule_based")
-        # ad_path = rule_based_section.get(
-        #     'launch_path',
-        #     cfg.planner.get('drivor', {}).get('launch_path', './planners/rule_based/launch.sh'),
-        # )
+        
     else:
         raise NotImplementedError
 
@@ -1232,10 +1225,9 @@ if __name__ == "__main__":
             )
             extra_env['PLANNER_VLM_DEVICE'] = vlm_device
             extra_env['RULE_BASED_VLM_DEVICE'] = vlm_device
-    # print("preparing to launch client.py")
+
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
-    # print("client.py launched, waiting 10 seconds before running create_gym_env")
-    # time.sleep(10)
+
     try:
         create_gym_env(cfg, output, planner_output_suffix, args.include_privileged_pipe)
         check_alive(process)
