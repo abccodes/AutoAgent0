@@ -56,6 +56,11 @@ except Exception:
     pass
 
 from scipy.spatial.transform import Rotation as SCR
+from planners.common.rule_based_provider import (
+    build_rule_based_candidate_rows,
+    get_rule_based_proposals_and_scores,
+    resolve_rule_based_merge_config,
+)
 from planners.common.vlm_selector import VLMPlanSelector, VLMSelectorConfig
 from planners.common.vlm_env import (
     VLM_ENV_DEFAULTS,
@@ -765,6 +770,7 @@ def build_drivor_candidate_rows(
     previous_selected_score: Optional[float],
     previous_selected_timestamp: Optional[float],
     previous_selected_source: Optional[str],
+    reserved_candidate_slots: int = 0,
 ) -> Tuple[List[Dict[str, object]], bool]:
     """
     Build candidate rows from top-k proposals, carry_prev, and optional default fallbacks.
@@ -799,7 +805,10 @@ def build_drivor_candidate_rows(
     # For now, fallback to a sensible default if missing
     candidate_limit = getattr(vlm_cfg, "candidate_limit", 8)
     carry_slot_count = 1 if carry_candidate is not None else 0
-    current_candidate_limit = max(1, int(candidate_limit) - carry_slot_count)
+    current_candidate_limit = max(
+        1,
+        int(candidate_limit) - carry_slot_count - max(0, int(reserved_candidate_slots)),
+    )
     current_candidate_limit = min(current_candidate_limit, int(len(sorted_indices)))
     candidate_indices = sorted_indices[:current_candidate_limit]
 
@@ -1202,6 +1211,10 @@ def main() -> int:
     LOG.info("Opened persistent scene FIFOs for obs and plan exchange")
 
     info_history: deque[Dict[str, object]] = deque(maxlen=EGO_HISTORY_FRAMES)
+    rule_based_merge_cfg = resolve_rule_based_merge_config(
+        planner_python_bin=os.environ.get("DRIVOR_PYTHON_BIN", ""),
+        prefixes=("PLANNER_RULE_BASED_", "DRIVOR_RULE_BASED_"),
+    )
 
     # VLM selector setup
     vlm_cfg = resolve_vlm_config()
@@ -1232,7 +1245,11 @@ def main() -> int:
                     LOG.info("Received shutdown signal")
                     break
 
-                obs, info = message
+                privileged_info = None
+                if isinstance(message, tuple) and len(message) == 3:
+                    obs, info, privileged_info = message
+                else:
+                    obs, info = message
                 # info_history append and pad
                 info_history.append(dict(info))
                 while len(info_history) < EGO_HISTORY_FRAMES:
@@ -1309,6 +1326,11 @@ def main() -> int:
 
                 # Build candidate rows (includes carry_prev, top-k, and optional defaults)
                 try:
+                    reserved_candidate_slots = (
+                        max(0, int(rule_based_merge_cfg.topk))
+                        if rule_based_merge_cfg.enabled
+                        else 0
+                    )
                     candidate_rows, allow_carry_prev = build_drivor_candidate_rows(
                         proposals=proposals,
                         scores=scores,
@@ -1320,6 +1342,36 @@ def main() -> int:
                         previous_selected_score=previous_selected_score,
                         previous_selected_timestamp=previous_selected_timestamp,
                         previous_selected_source=previous_selected_source,
+                        reserved_candidate_slots=reserved_candidate_slots,
+                    )
+                    if rule_based_merge_cfg.enabled:
+                        try:
+                            rb_proposals, rb_scores, _ = get_rule_based_proposals_and_scores(
+                                rule_based_merge_cfg,
+                                obs=obs,
+                                info=info,
+                                info_history=info_history,
+                                privileged_agents=privileged_info,
+                                output_num_poses=output_num_poses,
+                                topk=rule_based_merge_cfg.topk,
+                            )
+                            candidate_rows.extend(
+                                build_rule_based_candidate_rows(
+                                    rb_proposals,
+                                    rb_scores,
+                                    output_num_poses=output_num_poses,
+                                    source_name=rule_based_merge_cfg.source_name,
+                                    topk=rule_based_merge_cfg.topk,
+                                )
+                            )
+                        except Exception as e:
+                            LOG.exception("Failed to append rule-based DrivoR merge candidates: %s", e)
+                    candidate_sources = [str(row.get("source", "unknown")) for row in candidate_rows]
+                    LOG.info(
+                        "DrivoR candidate pool frame=%s size=%d sources=%s",
+                        frame_index,
+                        len(candidate_rows),
+                        candidate_sources,
                     )
                 except Exception as e:
                     LOG.exception("Failed to build candidate rows: %s", e)

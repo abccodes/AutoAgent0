@@ -17,6 +17,12 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as SCR
 
+from planners.common.rule_based_provider import (
+    RuleBasedMergeConfig,
+    build_rule_based_candidate_rows,
+    get_rule_based_proposals_and_scores,
+    resolve_rule_based_merge_config,
+)
 from planners.common.vlm_selector import VLMPlanSelector, VLMSelectorConfig
 from planners.common.vlm_env import (
     VLM_ENV_DEFAULTS,
@@ -75,6 +81,7 @@ class AdapterConfig:
     use_scene_rig_lidar2img: bool
     output_num_poses: int
     vlm: VLMSelectorConfig
+    rule_based_merge: RuleBasedMergeConfig
 
 
 def parse_args() -> argparse.Namespace:
@@ -137,6 +144,10 @@ def resolve_config(args: argparse.Namespace) -> AdapterConfig:
         use_scene_rig_lidar2img=env_flag("RAP_USE_SCENE_RIG_LIDAR2IMG", False),
         output_num_poses=DEFAULT_OUTPUT_POSES,
         vlm=resolve_vlm_config(),
+        rule_based_merge=resolve_rule_based_merge_config(
+            planner_python_bin=os.environ.get("RAP_PYTHON_BIN", ""),
+            prefixes=("PLANNER_RULE_BASED_", "RAP_RULE_BASED_"),
+        ),
     )
 
 
@@ -719,6 +730,7 @@ def build_vlm_candidate_rows(
     previous_selected_score: Optional[float],
     previous_selected_timestamp: Optional[float],
     previous_selected_source: Optional[str],
+    reserved_candidate_slots: int = 0,
 ) -> Tuple[List[Dict[str, object]], bool]:
     allow_carry_previous = not (
         previous_selected_source is not None
@@ -734,7 +746,11 @@ def build_vlm_candidate_rows(
     )
 
     sorted_indices = np.argsort(scores)[::-1]
-    current_candidate_limit = max(1, int(cfg.vlm.candidate_limit) - 1)
+    carry_slot_count = 1 if carry_candidate is not None else 0
+    current_candidate_limit = max(
+        1,
+        int(cfg.vlm.candidate_limit) - carry_slot_count - max(0, int(reserved_candidate_slots)),
+    )
     current_candidate_limit = min(current_candidate_limit, int(len(sorted_indices)))
     candidate_indices = sorted_indices[:current_candidate_limit]
     candidate_rows: List[Dict[str, object]] = []
@@ -809,7 +825,14 @@ def main() -> int:
                     logging.info("Received shutdown signal")
                     break
 
-                obs, info = message
+                privileged_info = None
+                if (
+                    isinstance(message, tuple)
+                    and len(message) == 3
+                ):
+                    obs, info, privileged_info = message
+                else:
+                    obs, info = message
                 info_history.append(dict(info))
                 while len(info_history) < EGO_HISTORY_FRAMES:
                     info_history.appendleft(dict(info_history[0]))
@@ -876,6 +899,11 @@ def main() -> int:
                     selected_row = plain_result["selected_row"]
                     plan_payload = plain_result["plan_payload"]
                 else:
+                    reserved_candidate_slots = (
+                        max(0, int(cfg.rule_based_merge.topk))
+                        if cfg.rule_based_merge.enabled
+                        else 0
+                    )
                     candidate_rows, allow_carry_previous = build_vlm_candidate_rows(
                         proposals=proposals,
                         scores=scores,
@@ -886,6 +914,36 @@ def main() -> int:
                         previous_selected_score=previous_selected_score,
                         previous_selected_timestamp=previous_selected_timestamp,
                         previous_selected_source=previous_selected_source,
+                        reserved_candidate_slots=reserved_candidate_slots,
+                    )
+                    if cfg.rule_based_merge.enabled:
+                        try:
+                            rb_proposals, rb_scores, _ = get_rule_based_proposals_and_scores(
+                                cfg.rule_based_merge,
+                                obs=obs,
+                                info=info,
+                                info_history=info_history,
+                                privileged_agents=privileged_info,
+                                output_num_poses=cfg.output_num_poses,
+                                topk=cfg.rule_based_merge.topk,
+                            )
+                            candidate_rows.extend(
+                                build_rule_based_candidate_rows(
+                                    rb_proposals,
+                                    rb_scores,
+                                    output_num_poses=cfg.output_num_poses,
+                                    source_name=cfg.rule_based_merge.source_name,
+                                    topk=cfg.rule_based_merge.topk,
+                                )
+                            )
+                        except Exception:
+                            logging.exception("Failed to append rule-based RAP merge candidates")
+                    candidate_sources = [str(row.get("source", "unknown")) for row in candidate_rows]
+                    logging.info(
+                        "RAP candidate pool frame=%s size=%d sources=%s",
+                        frame_index,
+                        len(candidate_rows),
+                        candidate_sources,
                     )
                     rap_best_idx = int(np.argmax(scores))
                     default_selected_index = next(

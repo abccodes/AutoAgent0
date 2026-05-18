@@ -2,23 +2,24 @@
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 4 ]]; then
-    echo "usage: $0 <planner:{rap|rap_vlm|drivor|drivor_vlm}> [scenario_yaml] [sim_cuda|inherit] [ad_cuda|inherit]" >&2
+    echo "usage: $0 <planner:{rap|rap_vlm|drivor|drivor_vlm|rule_based|rule_based_vlm}> [scenario_yaml] [sim_cuda|inherit] [ad_cuda|inherit]" >&2
     exit 2
 fi
 
 PLANNER_NAME="${1:?missing planner name}"
-SCENARIO_PATH="${2:-configs/benchmark/nuscenes/scene-0383-easy-00.yaml}"
+SCENARIO_PATH="${2:-${SCENARIO_PATH:-configs/benchmark/nuscenes/scene-0383-easy-00.yaml}}"
 DEFAULT_CUDA_ID="0"
 if [[ -n "${SLURM_JOB_ID:-}" || -n "${SLURM_STEP_ID:-}" ]]; then
     DEFAULT_CUDA_ID="inherit"
 fi
-SIM_CUDA="${3:-${DEFAULT_CUDA_ID}}"
-AD_CUDA="${4:-${DEFAULT_CUDA_ID}}"
+SIM_CUDA="${3:-${SIM_CUDA:-${DEFAULT_CUDA_ID}}}"
+AD_CUDA="${4:-${AD_CUDA:-${DEFAULT_CUDA_ID}}}"
 BASE_PATH="${BASE_PATH:-configs/sim/nuscenes_base_local.yaml}"
 CAMERA_PATH="${CAMERA_PATH:-configs/sim/nuscenes_camera.yaml}"
 KINEMATIC_PATH="${KINEMATIC_PATH:-configs/sim/kinematic.yaml}"
 PLANNER_PATH="${PLANNER_PATH:-configs/planners/${PLANNER_NAME}.yaml}"
 HUGSIM_PYTHON_BIN="${HUGSIM_PYTHON_BIN:-/bigdata/jason/drivor_evaluation/HUGSIM/.pixi/envs/default/bin/python}"
+INCLUDE_PRIVILEGED_PIPE="${INCLUDE_PRIVILEGED_PIPE:-}"
 
 case "${PLANNER_NAME}" in
     drivor|drivor_vlm)
@@ -27,11 +28,25 @@ case "${PLANNER_NAME}" in
     rap|rap_vlm)
         AD_NAME="rap"
         ;;
+    rule_based|rule_based_vlm)
+        AD_NAME="rule_based"
+        ;;
     *)
         echo "unsupported planner: ${PLANNER_NAME}" >&2
         exit 2
         ;;
 esac
+
+if [[ -z "${INCLUDE_PRIVILEGED_PIPE}" ]]; then
+    case "${AD_NAME}" in
+        rule_based)
+            INCLUDE_PRIVILEGED_PIPE="true"
+            ;;
+        *)
+            INCLUDE_PRIVILEGED_PIPE="false"
+            ;;
+    esac
+fi
 
 if [[ ! -f "${SCENARIO_PATH}" ]]; then
     echo "missing scenario config: ${SCENARIO_PATH}" >&2
@@ -69,6 +84,7 @@ fi
 # libnvrtc and related CUDA runtime libs on nodes without system CUDA paths.
 for extra_lib_dir in \
     "${HUGSIM_ENV_ROOT}"/lib/python*/site-packages/nvidia/*/lib \
+    "${VLM_ENV_DIR:-}"/lib/python*/site-packages/nvidia/*/lib \
     /bigdata/aidan/.home/envs/vlm/lib/python*/site-packages/nvidia/*/lib
 do
     if [[ -d "${extra_lib_dir}" ]]; then
@@ -83,6 +99,7 @@ echo "base=${BASE_PATH}"
 echo "planner_config=${PLANNER_PATH}"
 echo "hugsim_python=${HUGSIM_PYTHON_BIN}"
 echo "sim_cuda=${SIM_CUDA} ad_cuda=${AD_CUDA}"
+echo "include_privileged_pipe=${INCLUDE_PRIVILEGED_PIPE}"
 echo "ld_library_path=${LD_LIBRARY_PATH:-unset}"
 
 if ! "${HUGSIM_PYTHON_BIN}" -c "from simple_knn._C import distCUDA2" >/dev/null 2>&1; then
@@ -111,7 +128,8 @@ if [[ "${SIM_CUDA}" == "inherit" ]]; then
         --kinematic_path "${KINEMATIC_PATH}" \
         --planner_path "${PLANNER_PATH}" \
         --ad "${AD_NAME}" \
-        --ad_cuda "${AD_CUDA}"
+        --ad_cuda "${AD_CUDA}" \
+        --include_privileged_pipe "${INCLUDE_PRIVILEGED_PIPE}"
 else
     CUDA_VISIBLE_DEVICES="${SIM_CUDA}" \
     "${HUGSIM_PYTHON_BIN}" closed_loop.py \
@@ -121,5 +139,6 @@ else
         --kinematic_path "${KINEMATIC_PATH}" \
         --planner_path "${PLANNER_PATH}" \
         --ad "${AD_NAME}" \
-        --ad_cuda "${AD_CUDA}"
+        --ad_cuda "${AD_CUDA}" \
+        --include_privileged_pipe "${INCLUDE_PRIVILEGED_PIPE}"
 fi

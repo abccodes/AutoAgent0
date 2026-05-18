@@ -31,6 +31,7 @@ import cv2
 from moviepy import ImageSequenceClip
 from planners.common.candidate_visuals import get_candidate_visual_style
 from planners.common.vlm_env import build_prefixed_vlm_env
+from planners.common.rule_based_env import build_prefixed_rule_based_env
 
 VIDEO_LAYOUT = [
     ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT'],
@@ -411,6 +412,19 @@ def read_pipe_message_file(pipe):
     return pickle.loads(payload)
 
 
+def _parse_boolish(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_privileged_info(env):
+    try:
+        return env.unwrapped.get_agent_privileged_info()
+    except Exception:
+        return None
+
+
 def _select_reference_segment(reference_poses, current_c2w, lookahead=25):
     if reference_poses is None or len(reference_poses) == 0:
         return np.zeros((0, 3), dtype=np.float32)
@@ -611,12 +625,13 @@ def _select_overlay_plan(plan_traj, plan_path_length, last_valid_plan, stale_fra
     return None, stale_frames, False
 
 
-def create_gym_env(cfg, output, run_label):
+def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
 
     env = gymnasium.make('hugsim_env/HUGSim-v0', cfg=cfg, output=output)
 
     observations_save, infos_save = [], []
     obs, info = env.reset()
+    privileged_info = _get_privileged_info(env) if include_privileged_pipe else None
     done = False
     cnt = 0
     save_data = {'type': 'closeloop', 'frames': []}
@@ -678,6 +693,7 @@ def create_gym_env(cfg, output, run_label):
 
         if obs is None or info is None:
             obs, info = env.reset()
+            privileged_info = _get_privileged_info(env) if include_privileged_pipe else None
         current_obs, current_info = obs, info
         infos_save.append(current_info)
 
@@ -713,7 +729,12 @@ def create_gym_env(cfg, output, run_label):
                 logger.info("Sending obs to adapter: rgb keys=%s; details=%s", list(rgb.keys()), "; ".join(rgb_details))
             except Exception:
                 logging.getLogger("closed_loop").exception("Failed to prepare current_obs before sending")
-            write_pipe_message_file(obs_pipe_writer, (current_obs, current_info))
+            plan_request_payload = (
+                (current_obs, current_info, privileged_info)
+                if include_privileged_pipe
+                else (current_obs, current_info)
+            )
+            write_pipe_message_file(obs_pipe_writer, plan_request_payload)
             plan_payload = read_pipe_message_file(plan_pipe_reader)
             current_topk_plans = None
             current_topk_scores = None
@@ -894,6 +915,8 @@ def create_gym_env(cfg, output, run_label):
 
             action = {'acc': acc, 'steer_rate': steer_rate}
             obs, reward, terminated, truncated, info = env.step(action)
+            if include_privileged_pipe:
+                privileged_info = _get_privileged_info(env)
             cnt += 1
             done = terminated or truncated or cnt > 400
 
@@ -946,6 +969,7 @@ if __name__ == "__main__":
     parser.add_argument("--planner_path", type=str, default="")
     parser.add_argument('--ad', default="uniad")
     parser.add_argument('--ad_cuda', default="1")
+    parser.add_argument('--include_privileged_pipe', default=False)
     args = parser.parse_args()
 
     scenario_config = OmegaConf.load(args.scenario_path)
@@ -970,6 +994,8 @@ if __name__ == "__main__":
         planner_output_suffix = planner_config.get('rap', {}).get('output_suffix', 'rap_vlm')
     if args.ad == 'drivor' and planner_config.get('drivor', {}).get('vlm', {}).get('enabled', False):
         planner_output_suffix = planner_config.get('drivor', {}).get('output_suffix', 'drivor_vlm')
+    if args.ad == 'rule_based' and planner_config.get('rule_based', {}).get('vlm', {}).get('enabled', False):
+        planner_output_suffix = planner_config.get('rule_based', {}).get('output_suffix', 'rule_based_vlm')
     output_model_slug = _resolve_output_model_slug(args.ad, planner_config)
     cfg.base.output_dir = _prefix_output_dir_with_model(cfg.base.output_dir, output_model_slug)
     cfg.base.output_dir = cfg.base.output_dir + planner_output_suffix
@@ -991,6 +1017,8 @@ if __name__ == "__main__":
         ad_path = cfg.planner.rap.launch_path
     elif args.ad == "drivor":
         ad_path = cfg.planner.drivor.launch_path
+    elif args.ad == "rule_based":
+        ad_path = cfg.planner.rule_based.launch_path
     else:
         raise NotImplementedError
 
@@ -1026,6 +1054,13 @@ if __name__ == "__main__":
         )
         extra_env['PLANNER_VLM_DEVICE'] = vlm_device
         extra_env['RAP_VLM_DEVICE'] = vlm_device
+        extra_env.update(
+            build_prefixed_rule_based_env(
+                cfg.planner.rap.get('rule_based_merge', {}),
+                planner_python_bin=planner_python_bin,
+                prefixes=("PLANNER_RULE_BASED_", "RAP_RULE_BASED_"),
+            )
+        )
         
     elif args.ad == "drivor":
         drivor_python_bin = cfg.planner.drivor.get('python_bin', 'python')
@@ -1055,10 +1090,52 @@ if __name__ == "__main__":
             )
             extra_env['PLANNER_VLM_DEVICE'] = vlm_device
             extra_env['DRIVOR_VLM_DEVICE'] = vlm_device
+        extra_env.update(
+            build_prefixed_rule_based_env(
+                cfg.planner.drivor.get('rule_based_merge', {}),
+                planner_python_bin=drivor_python_bin,
+                prefixes=("PLANNER_RULE_BASED_", "DRIVOR_RULE_BASED_"),
+            )
+        )
+    elif args.ad == "rule_based":
+        rule_based_python_bin = cfg.planner.rule_based.get('python_bin', 'python')
+        rule_based_device = os.environ.get('RULE_BASED_DEVICE_OVERRIDE') or cfg.planner.rule_based.get('device', 'cpu')
+        extra_env = {
+            'RULE_BASED_REPO_ROOT': cfg.planner.rule_based.get('repo_root', ''),
+            'RULE_BASED_PYTHON_BIN': rule_based_python_bin,
+            'RULE_BASED_DEVICE': rule_based_device,
+            'RULE_BASED_CONFIG': cfg.planner.rule_based.get('config', ''),
+        }
+        if cfg.planner.rule_based.get('vlm') and cfg.planner.rule_based.vlm.get('enabled', False):
+            vlm_device = (
+                os.environ.get('PLANNER_VLM_DEVICE_OVERRIDE')
+                or os.environ.get('RULE_BASED_VLM_DEVICE_OVERRIDE')
+                or cfg.planner.rule_based.vlm.get('device', 'auto')
+            )
+            extra_env.update(
+                build_prefixed_vlm_env(
+                    cfg.planner.rule_based.vlm,
+                    planner_python_bin=rule_based_python_bin,
+                    prefixes=("PLANNER_VLM_", "RULE_BASED_VLM_"),
+                )
+            )
+            extra_env['PLANNER_VLM_DEVICE'] = vlm_device
+            extra_env['RULE_BASED_VLM_DEVICE'] = vlm_device
 
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
     try:
-        create_gym_env(cfg, output, planner_output_suffix)
+        include_privileged_pipe = _parse_boolish(args.include_privileged_pipe)
+        if args.ad == 'rule_based':
+            include_privileged_pipe = True
+        elif args.ad == 'rap':
+            rb_merge_cfg = cfg.planner.rap.get('rule_based_merge', {})
+            if rb_merge_cfg.get('enabled', False) and rb_merge_cfg.get('include_privileged_info', True):
+                include_privileged_pipe = True
+        elif args.ad == 'drivor':
+            rb_merge_cfg = cfg.planner.drivor.get('rule_based_merge', {})
+            if rb_merge_cfg.get('enabled', False) and rb_merge_cfg.get('include_privileged_info', True):
+                include_privileged_pipe = True
+        create_gym_env(cfg, output, planner_output_suffix, include_privileged_pipe=include_privileged_pipe)
         check_alive(process)
     except Exception as e:
         import traceback

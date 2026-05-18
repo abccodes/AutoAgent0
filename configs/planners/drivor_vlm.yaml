@@ -36,3 +36,13 @@ drivor:
     q_carry_score_decay: 0.0
     display_default_trajectories: false
     include_default_candidates: false
+
+  rule_based_merge:
+    enabled: false
+    repo_root: /bigdata/aidan/HUGSIM/.external/Rule-Planner
+    python_bin: /bigdata/aidan/.home/envs/drivor/bin/python3.8
+    config: /bigdata/aidan/HUGSIM/.external/Rule-Planner/config_example.yaml
+    device: cpu
+    topk: 3
+    include_privileged_info: true
+    source_name: rule_based
