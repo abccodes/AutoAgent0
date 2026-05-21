@@ -22,6 +22,7 @@ import json
 import struct
 import logging
 import re
+import time
 from sim.utils.launch_ad import launch, check_alive
 from omegaconf import OmegaConf
 import open3d as o3d
@@ -396,9 +397,22 @@ def write_pipe_message_file(pipe, payload_obj):
     pipe.write(struct.pack("<Q", len(payload)))
     pipe.write(payload)
     pipe.flush()
+    try:
+        fd = pipe.fileno()
+        stat_result = os.fstat(fd)
+        print(
+            f"[write_pipe_message_file] fd={fd} inode={stat_result.st_ino} "
+            f"mode={oct(stat_result.st_mode)} bytes={len(payload)} t={time.time():.6f}"
+        )
+    except Exception:
+        print(f"[write_pipe_message_file] logging failed t={time.time():.6f}")
 
 
 def read_pipe_message_file(pipe):
+    try:
+        print(f"[read_pipe_message_file] waiting fd={pipe.fileno()} t={time.time():.6f}")
+    except Exception:
+        print(f"[read_pipe_message_file] waiting fd=? t={time.time():.6f}")
     header = pipe.read(8)
     if len(header) != 8:
         raise EOFError("Incomplete pipe header from open pipe handle")
@@ -409,6 +423,10 @@ def read_pipe_message_file(pipe):
         if not chunk:
             raise EOFError("Incomplete pipe payload from open pipe handle")
         payload.extend(chunk)
+    try:
+        print(f"[read_pipe_message_file] received fd={pipe.fileno()} bytes={payload_size} t={time.time():.6f}")
+    except Exception:
+        print(f"[read_pipe_message_file] received fd=? bytes={payload_size} t={time.time():.6f}")
     return pickle.loads(payload)
 
 
@@ -639,9 +657,14 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     obs_pipe = os.path.join(output, 'obs_pipe')
     plan_pipe = os.path.join(output, 'plan_pipe')
     for pipe_path in (obs_pipe, plan_pipe):
-        if os.path.exists(pipe_path):
-            os.remove(pipe_path)
-        os.mkfifo(pipe_path)
+        if not os.path.exists(pipe_path):
+            os.mkfifo(pipe_path)
+        else:
+            try:
+                st = os.stat(pipe_path)
+                print(f"[FIFO EXISTS] path={pipe_path} inode={st.st_ino} mode={oct(st.st_mode)} t={time.time():.6f}")
+            except Exception:
+                print(f"[FIFO EXISTS] path={pipe_path} (stat failed) t={time.time():.6f}")
     # Keep both FIFOs open in RDWR mode to avoid blocking open-order deadlocks
     # between closed_loop and the planner adapter. Actual message traffic still
     # uses fresh per-message open/read/write calls below.
@@ -650,6 +673,18 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     obs_pipe_writer = os.fdopen(os.open(obs_pipe, os.O_RDWR), "wb", buffering=0)
     plan_pipe_reader = os.fdopen(os.open(plan_pipe, os.O_RDWR), "rb", buffering=0)
     print('Ready for simulation')
+    preflight_payload = {
+        "message_type": "hugsim_preflight",
+        "output_dir": output,
+        "obs_pipe": obs_pipe,
+        "plan_pipe": plan_pipe,
+        "include_privileged_pipe": bool(include_privileged_pipe),
+        "camera_count": 0 if not isinstance(obs, dict) else len(obs.get("rgb", {})),
+        "timestamp": float(info.get("timestamp", 0.0)) if isinstance(info, dict) else None,
+    }
+    print(f"[preflight] about to write t={time.time():.6f}")
+    write_pipe_message_file(obs_pipe_writer, preflight_payload)
+    print(f"[preflight] wrote t={time.time():.6f}")
 
     last_valid_overlay_plan = None
     last_valid_overlay_pose = None
@@ -734,8 +769,14 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
                 if include_privileged_pipe
                 else (current_obs, current_info)
             )
+            print(
+                f"[plan_request] about to write t={time.time():.6f} "
+                f"include_privileged_pipe={include_privileged_pipe}"
+            )
             write_pipe_message_file(obs_pipe_writer, plan_request_payload)
+            print(f"[plan_request] wrote t={time.time():.6f}")
             plan_payload = read_pipe_message_file(plan_pipe_reader)
+            print(f"[plan_response] received t={time.time():.6f}")
             current_topk_plans = None
             current_topk_scores = None
             current_candidate_pool_plans = None
