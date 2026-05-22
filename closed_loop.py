@@ -770,7 +770,10 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
         # Ensure we have fresh privileged info when resetting
         if obs is None or info is None or privileged_info is None:
             obs, info = env.reset()
-            privileged_info = env.get_agent_privileged_info()
+            try:
+                privileged_info = env.unwrapped.get_agent_privileged_info()
+            except Exception:
+                privileged_info = None
         current_obs, current_info = obs, info
         infos_save.append(current_info)
 
