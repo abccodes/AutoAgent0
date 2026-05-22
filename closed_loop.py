@@ -645,7 +645,10 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     observations_save, infos_save = [], []
     # Get initial obs/info from env.reset() and fetch privileged info separately
     obs, info = env.reset()
-    privileged_info = env.get_agent_privileged_info()
+    try:
+        privileged_info = env.unwrapped.get_agent_privileged_info()
+    except Exception:
+        privileged_info = None
     done = False
     cnt = 0
     save_data = {'type': 'closeloop', 'frames': []}
