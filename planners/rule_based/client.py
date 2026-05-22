@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(RULE_BASED_REPO_ROOT).resolve()))
 
 try:
     # from planners.rule_based.planner_service import PlannerService
-    from privileged_planner.service import PrivilegedPlannerService
+    from privileged_planner_sd.service import PrivilegedPlannerService
 except ImportError as e:
     raise RuntimeError(
         f"PrivilegedPlannerService not found in {RULE_BASED_REPO_ROOT}. "
