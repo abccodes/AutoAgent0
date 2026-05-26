@@ -1,11 +1,5 @@
 # HUGSIM Methods and Run Guide
 
-This file is the current operational handoff for this repo. It is meant for both:
-- humans who need to run or debug experiments quickly
-- agents that need immediate context on the active planner setups
-
-It covers the current working methods, the main scripts/configs, the benchmark layout, and the current run conventions. It does **not** try to document every historical experiment.
-
 ## 1. Core Execution Model
 
 Most runs in this repo eventually go through:
@@ -27,11 +21,6 @@ The main environment variables used across runs are:
 - `rap` or `rap_vlm` -> primary backend `ad=rap`
 - `drivor` or `drivor_vlm` -> primary backend `ad=drivor`
 - `rule_based` or `rule_based_vlm` -> primary backend `ad=rule_based`
-
-Important distinction:
-- this backend mapping only tells HUGSIM which **main planner process** to launch
-- it does **not** mean RAP/DrivoR runs are “rule-based free”
-- RAP and DrivoR can still include rule-based logic as a **secondary planner family** through the `rule_based_merge` config block
 
 Current operational planner categories are:
 - **solo learned planner**
