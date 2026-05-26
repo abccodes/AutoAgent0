@@ -1239,26 +1239,26 @@ if __name__ == "__main__":
 
 
     elif args.ad == "sparsedrivev2":
-        sparsedrive_python_bin = cfg.planner.sparsedrive.get('python_bin', 'python')
-        sparsedrive_device = os.environ.get('SPARSEDRIVE_DEVICE_OVERRIDE') or cfg.planner.sparsedrive.get('device', 'cuda')
+        sparsedrive_python_bin = cfg.planner.sparsedrivev2.get('python_bin', 'python')
+        sparsedrive_device = os.environ.get('SPARSEDRIVEV2_DEVICE_OVERRIDE') or cfg.planner.sparsedrivev2.get('device', 'cuda')
         vlm_device = (
             os.environ.get('PLANNER_VLM_DEVICE_OVERRIDE')
-            or os.environ.get('SPARSEDRIVE_VLM_DEVICE_OVERRIDE')
-            or cfg.planner.sparsedrive.vlm.get('device', 'auto') if cfg.planner.sparsedrive.get('vlm') else 'auto'
+            or os.environ.get('SPARSEDRIVEV2_VLM_DEVICE_OVERRIDE')
+            or cfg.planner.sparsedrivev2.vlm.get('device', 'auto') if cfg.planner.sparsedrivev2.get('vlm') else 'auto'
         )
         extra_env = {
-            'SPARSEDRIVE_REPO_ROOT': cfg.planner.sparsedrive.get('repo_root', ''),
-            'SPARSEDRIVE_CHECKPOINT': cfg.planner.sparsedrive.get('checkpoint', ''),
-            'SPARSEDRIVE_PYTHON_BIN': sparsedrive_python_bin,
-            'SPARSEDRIVE_DEVICE': sparsedrive_device,
-            'SPARSEDRIVE_CONFIG': cfg.planner.sparsedrive.get('config', '')
+            'SPARSEDRIVEV2_REPO_ROOT': cfg.planner.sparsedrivev2.get('repo_root', ''),
+            'SPARSEDRIVEV2_CHECKPOINT': cfg.planner.sparsedrivev2.get('checkpoint', ''),
+            'SPARSEDRIVEV2_PYTHON_BIN': sparsedrive_python_bin,
+            'SPARSEDRIVEV2_DEVICE': sparsedrive_device,
+            'SPARSEDRIVEV2_CONFIG': cfg.planner.sparsedrivev2.get('config', '')
         }
         
         # Add VLM support if configured
-        if cfg.planner.sparsedrive.get('vlm') and cfg.planner.sparsedrive.vlm.get('enabled', False):
+        if cfg.planner.sparsedrivev2.get('vlm') and cfg.planner.sparsedrivev2.vlm.get('enabled', False):
             extra_env.update(
                 build_prefixed_vlm_env(
-                    cfg.planner.sparsedrive.vlm,
+                    cfg.planner.sparsedrivev2.vlm,
                     planner_python_bin=sparsedrive_python_bin,
                     prefixes=("PLANNER_VLM_", "SPARSEDRIVE_VLM_"),
                 )
