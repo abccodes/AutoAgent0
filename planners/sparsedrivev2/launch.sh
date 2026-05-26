@@ -14,7 +14,7 @@ fi
 # Debug: surface key env and paths for troubleshooting torch/LD issues
 echo "LAUNCH DEBUG: CUDA_ID=${CUDA_ID} OUTPUT_DIR=${OUTPUT_DIR}"
 echo "LAUNCH DEBUG: initial LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-unset}"
-echo "LAUNCH DEBUG: (DRIVOR env vars will be shown after defaults are applied)"
+echo "LAUNCH DEBUG: (SparseDriveV2 env vars will be shown after defaults are applied)"
 # Provided by HUGSIM closed_loop.py via extra_env
 : "${SPARSEDRIVE_PYTHON_BIN:=python}"
 : "${SPARSEDRIVE_REPO_ROOT:?SPARSEDRIVE_REPO_ROOT is not set}"

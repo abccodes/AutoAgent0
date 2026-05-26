@@ -1206,7 +1206,7 @@ if __name__ == "__main__":
             )
             extra_env['PLANNER_VLM_DEVICE'] = vlm_device
             extra_env['DRIVOR_VLM_DEVICE'] = vlm_device
-            
+
     elif args.ad == "rule_based":
         # rule_based_cfg = _get_planner_section(cfg.planner, "rule_based")
         rule_based_python_bin = cfg.planner.rule_based.get('python_bin', 'python')
@@ -1238,7 +1238,7 @@ if __name__ == "__main__":
             extra_env['RULE_BASED_VLM_DEVICE'] = vlm_device
 
 
-    elif args.ad == "sparsedrive":
+    elif args.ad == "sparsedrivev2":
         sparsedrive_python_bin = cfg.planner.sparsedrive.get('python_bin', 'python')
         sparsedrive_device = os.environ.get('SPARSEDRIVE_DEVICE_OVERRIDE') or cfg.planner.sparsedrive.get('device', 'cuda')
         vlm_device = (
