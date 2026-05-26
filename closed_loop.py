@@ -1240,18 +1240,18 @@ if __name__ == "__main__":
 
     elif args.ad == "sparsedrivev2":
         sparsedrive_python_bin = cfg.planner.sparsedrivev2.get('python_bin', 'python')
-        sparsedrive_device = os.environ.get('SPARSEDRIVEV2_DEVICE_OVERRIDE') or cfg.planner.sparsedrivev2.get('device', 'cuda')
+        sparsedrive_device = os.environ.get('SPARSEDRIVE_DEVICE_OVERRIDE') or cfg.planner.sparsedrivev2.get('device', 'cuda')
         vlm_device = (
             os.environ.get('PLANNER_VLM_DEVICE_OVERRIDE')
-            or os.environ.get('SPARSEDRIVEV2_VLM_DEVICE_OVERRIDE')
+            or os.environ.get('SPARSEDRIVE_VLM_DEVICE_OVERRIDE')
             or cfg.planner.sparsedrivev2.vlm.get('device', 'auto') if cfg.planner.sparsedrivev2.get('vlm') else 'auto'
         )
         extra_env = {
-            'SPARSEDRIVEV2_REPO_ROOT': cfg.planner.sparsedrivev2.get('repo_root', ''),
-            'SPARSEDRIVEV2_CHECKPOINT': cfg.planner.sparsedrivev2.get('checkpoint', ''),
-            'SPARSEDRIVEV2_PYTHON_BIN': sparsedrive_python_bin,
-            'SPARSEDRIVEV2_DEVICE': sparsedrive_device,
-            'SPARSEDRIVEV2_CONFIG': cfg.planner.sparsedrivev2.get('config', '')
+            'SPARSEDRIVE_REPO_ROOT': cfg.planner.sparsedrivev2.get('repo_root', ''),
+            'SPARSEDRIVE_CHECKPOINT': cfg.planner.sparsedrivev2.get('checkpoint', ''),
+            'SPARSEDRIVE_PYTHON_BIN': sparsedrive_python_bin,
+            'SPARSEDRIVE_DEVICE': sparsedrive_device,
+            'SPARSEDRIVE_CONFIG': cfg.planner.sparsedrivev2.get('config', '')
         }
         
         # Add VLM support if configured
