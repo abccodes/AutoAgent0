@@ -1,0 +1,9 @@
+realcar_path: /data/guest_rui/ztrs_workspace/HUGSIM/assets/3DRealCar
+model_base: /data/guest_rui/hugsim_nusc/models
+uniad_path: ""
+vad_path: ""
+ltf_path: ""
+output_dir: /data/guest_rui/hugsim_outputs/benchmark/out/sparsedrivev2/nusc_
+HD_map:
+  path: /data2/dataset/nuscenes
+  version: nusc_trainval

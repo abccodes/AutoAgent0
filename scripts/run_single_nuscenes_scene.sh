@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 4 ]]; then
-    echo "usage: $0 <planner:{rap|rap_vlm|drivor|drivor_vlm|rule_based|rule_based_vlm}> [scenario_yaml] [sim_cuda|inherit] [ad_cuda|inherit]" >&2
+    echo "usage: $0 <planner:{rap|rap_vlm|drivor|drivor_vlm|rule_based|rule_based_vlm|sparsedrivev2|sparsedrivev2_vlm}> [scenario_yaml] [sim_cuda|inherit] [ad_cuda|inherit]" >&2
     exit 2
 fi
 
@@ -30,6 +30,9 @@ case "${PLANNER_NAME}" in
         ;;
     rule_based|rule_based_vlm)
         AD_NAME="rule_based"
+        ;;
+    sparsedrivev2|sparsedrivev2_vlm)
+        AD_NAME="sparsedrivev2"
         ;;
     *)
         echo "unsupported planner: ${PLANNER_NAME}" >&2

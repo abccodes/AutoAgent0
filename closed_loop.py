@@ -1109,6 +1109,8 @@ if __name__ == "__main__":
         planner_output_suffix = planner_config.get('drivor', {}).get('output_suffix', 'drivor_vlm')
     if args.ad == 'rule_based' and planner_config.get('rule_based', {}).get('vlm', {}).get('enabled', False):
         planner_output_suffix = planner_config.get('rule_based', {}).get('output_suffix', 'rap_vlm')
+    if args.ad == 'sparsedrivev2' and planner_config.get('sparsedrivev2', {}).get('vlm', {}).get('enabled', False):
+        planner_output_suffix = planner_config.get('sparsedrivev2', {}).get('output_suffix', 'sparsedrivev2_vlm')
     # planner_section = _get_planner_section(planner_config, args.ad)
     # planner_vlm_cfg = planner_section.get('vlm') or {}
     # if planner_vlm_cfg.get('enabled', False):
@@ -1137,6 +1139,8 @@ if __name__ == "__main__":
         ad_path = cfg.planner.drivor.launch_path
     elif args.ad == "rule_based":
         ad_path = cfg.planner.rule_based.launch_path
+    elif args.ad == "sparsedrivev2":
+        ad_path = cfg.planner.sparsedrivev2.launch_path
         
     else:
         raise NotImplementedError
@@ -1202,6 +1206,7 @@ if __name__ == "__main__":
             )
             extra_env['PLANNER_VLM_DEVICE'] = vlm_device
             extra_env['DRIVOR_VLM_DEVICE'] = vlm_device
+            
     elif args.ad == "rule_based":
         # rule_based_cfg = _get_planner_section(cfg.planner, "rule_based")
         rule_based_python_bin = cfg.planner.rule_based.get('python_bin', 'python')
@@ -1232,6 +1237,35 @@ if __name__ == "__main__":
             extra_env['PLANNER_VLM_DEVICE'] = vlm_device
             extra_env['RULE_BASED_VLM_DEVICE'] = vlm_device
 
+
+    elif args.ad == "sparsedrive":
+        sparsedrive_python_bin = cfg.planner.sparsedrive.get('python_bin', 'python')
+        sparsedrive_device = os.environ.get('SPARSEDRIVE_DEVICE_OVERRIDE') or cfg.planner.sparsedrive.get('device', 'cuda')
+        vlm_device = (
+            os.environ.get('PLANNER_VLM_DEVICE_OVERRIDE')
+            or os.environ.get('SPARSEDRIVE_VLM_DEVICE_OVERRIDE')
+            or cfg.planner.sparsedrive.vlm.get('device', 'auto') if cfg.planner.sparsedrive.get('vlm') else 'auto'
+        )
+        extra_env = {
+            'SPARSEDRIVE_REPO_ROOT': cfg.planner.sparsedrive.get('repo_root', ''),
+            'SPARSEDRIVE_CHECKPOINT': cfg.planner.sparsedrive.get('checkpoint', ''),
+            'SPARSEDRIVE_PYTHON_BIN': sparsedrive_python_bin,
+            'SPARSEDRIVE_DEVICE': sparsedrive_device,
+            'SPARSEDRIVE_CONFIG': cfg.planner.sparsedrive.get('config', '')
+        }
+        
+        # Add VLM support if configured
+        if cfg.planner.sparsedrive.get('vlm') and cfg.planner.sparsedrive.vlm.get('enabled', False):
+            extra_env.update(
+                build_prefixed_vlm_env(
+                    cfg.planner.sparsedrive.vlm,
+                    planner_python_bin=sparsedrive_python_bin,
+                    prefixes=("PLANNER_VLM_", "SPARSEDRIVE_VLM_"),
+                )
+            )
+            extra_env['PLANNER_VLM_DEVICE'] = vlm_device
+            extra_env['SPARSEDRIVE_VLM_DEVICE'] = vlm_device
+            
     process = launch(ad_path, args.ad_cuda, output, extra_env=extra_env)
 
     try:
