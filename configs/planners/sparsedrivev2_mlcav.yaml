@@ -2,7 +2,7 @@ sparsedrivev2:
   launch_path: ./planners/sparsedrivev2/launch.sh
   repo_root: /data/guest_rui/ztrs_workspace/SparseDriveV2
   checkpoint: /data/guest_rui/ztrs_workspace/SparseDriveV2/weights/ckpt/resnet34.bin
-  python_bin: /data2/guest_rui/miniconda3/envs/navsim/bin/python3.9
+  python_bin: /data2/guest_rui/miniconda3/envs/navsim-test/bin/python3.9
   config: /data/guest_rui/ztrs_workspace/SparseDriveV2/navsim/agents/sparsedrive/sparsedrive_config.py
 
   device: cuda
