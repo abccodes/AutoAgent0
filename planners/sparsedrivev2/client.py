@@ -1202,6 +1202,23 @@ def extract_proposals_and_scores_from_predictions(
         proposals: np.ndarray of shape [P, T, 3] (proposals, timesteps, xyz with padded heading)
         scores: np.ndarray of shape [P] (proposal scores)
     """
+    # SparseDriveModel.forward returns (output_dict, loss_dict).
+    if isinstance(predictions, (tuple, list)):
+        if len(predictions) == 0:
+            raise RuntimeError("Model output tuple/list is empty")
+        LOG.info(
+            "extract_proposals_and_scores_from_predictions received %s of len=%d; using first element type=%s",
+            type(predictions).__name__,
+            len(predictions),
+            type(predictions[0]),
+        )
+        predictions = predictions[0]
+
+    if not isinstance(predictions, dict):
+        raise RuntimeError(
+            f"Model output must be a dict or (dict, loss_dict) tuple, got {type(predictions)}"
+        )
+
     # Prefer the full proposal set over the already-selected single trajectory.
     traj = None
     scores = None
