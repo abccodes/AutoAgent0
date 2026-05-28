@@ -231,14 +231,64 @@ def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: D
     if sensor2lidar_trans is None:
         sensor2lidar_trans = np.zeros(3, dtype=np.float32)
 
-    if rgb_image is None:
+    # Normalize/validate the provided image to H x W x 3 uint8.
+    def _make_blank():
         LOG.warning(
             "Missing HUGSIM camera image for %s; using blank %dx%d black frame",
             cam_name,
             int(H),
             int(W),
         )
-        rgb_image = np.zeros((int(H), int(W), 3), dtype=np.uint8)
+        return np.zeros((int(H), int(W), 3), dtype=np.uint8)
+
+    if rgb_image is None:
+        rgb_image = _make_blank()
+    else:
+        try:
+            arr = np.asarray(rgb_image)
+            # Handle channel arrangements and single-channel images
+            if arr.ndim == 2:
+                arr = np.stack([arr, arr, arr], axis=-1)
+            # If channels-first (C,H,W), convert to H,W,C
+            if arr.ndim == 3 and arr.shape[0] in (1, 3) and arr.shape[0] != arr.shape[-1]:
+                # Heuristic transpose from (C,H,W) -> (H,W,C)
+                arr = np.transpose(arr, (1, 2, 0))
+            # RGBA -> RGB
+            if arr.ndim == 3 and arr.shape[2] == 4:
+                arr = arr[:, :, :3]
+
+            # Resize/crop/pad to expected (H, W)
+            target_h = int(H)
+            target_w = int(W)
+            if arr.ndim == 3 and (arr.shape[0] != target_h or arr.shape[1] != target_w):
+                try:
+                    from PIL import Image
+
+                    pil = Image.fromarray(arr)
+                    pil = pil.resize((target_w, target_h), resample=Image.BILINEAR)
+                    arr = np.asarray(pil)
+                except Exception:
+                    # Fallback: crop or pad
+                    new = np.zeros((target_h, target_w, 3), dtype=arr.dtype if arr.dtype is not None else np.uint8)
+                    h = min(target_h, arr.shape[0])
+                    w = min(target_w, arr.shape[1])
+                    if arr.ndim == 3:
+                        new[:h, :w, :] = arr[:h, :w, :3]
+                    else:
+                        new[:h, :w, :] = np.stack([arr[:h, :w]] * 3, axis=-1)
+                    arr = new
+
+            # Ensure uint8 dtype; convert floats [0,1] -> [0,255]
+            if arr.dtype != np.uint8:
+                if np.issubdtype(arr.dtype, np.floating):
+                    arr = np.clip(arr, 0.0, 1.0)
+                    arr = (arr * 255.0).astype(np.uint8)
+                else:
+                    arr = arr.astype(np.uint8)
+            rgb_image = arr
+        except Exception:
+            LOG.exception("Failed to normalize image for %s; using blank frame", cam_name)
+            rgb_image = _make_blank()
 
     cam = Camera(
         image=rgb_image,
@@ -481,7 +531,7 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
             cam_obj = build_camera_from_hugsim(hug_name, img, params)
 
             try:
-                tmp_path = save_sparsedrive_frame_to_tmp(img, info.get("timestamp", 0), hug_name)
+                tmp_path = save_sparsedrive_frame_to_tmp(cam_obj.image, info.get("timestamp", 0), hug_name)
                 if tmp_path is not None:
                     try:
                         cam_obj.image_path = str(tmp_path)
