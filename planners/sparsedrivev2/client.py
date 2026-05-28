@@ -545,8 +545,40 @@ def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
     features = feature_builder.compute_features(agent_input)
     targets: Dict[str, torch.Tensor] = {}
     token = None
-    features, targets, token = feature_builder.pipeline(features, targets, token, test_mode=True, vis=False)
-    return features, targets, token
+    try:
+        features, targets, token = feature_builder.pipeline(features, targets, token, test_mode=True, vis=False)
+        return features, targets, token
+    except Exception:
+        LOG.exception("feature_builder.pipeline failed; dumping features diagnostics")
+        try:
+            def _diag(prefix: str, v, depth: int = 0):
+                if depth > 6:
+                    return
+                LOG.error("Diag %s: type=%s", prefix, type(v))
+                if isinstance(v, dict):
+                    for k, sv in v.items():
+                        _diag(f"{prefix}.{k}", sv, depth + 1)
+                elif isinstance(v, list):
+                    elem_types = {type(x) for x in v}
+                    LOG.error("Diag %s: list len=%d elem_types=%s", prefix, len(v), elem_types)
+                    for i, item in enumerate(v[:10]):
+                        _diag(f"{prefix}[{i}]", item, depth + 1)
+                elif isinstance(v, np.ndarray):
+                    try:
+                        LOG.error("Diag %s: ndarray dtype=%s shape=%s", prefix, v.dtype, v.shape)
+                    except Exception:
+                        LOG.error("Diag %s: ndarray (unable to inspect)", prefix)
+                else:
+                    try:
+                        arr = np.asarray(v)
+                        LOG.error("Diag %s: asarray dtype=%s shape=%s", prefix, arr.dtype, getattr(arr, 'shape', None))
+                    except Exception:
+                        LOG.error("Diag %s: cannot convert to ndarray (type=%s)", prefix, type(v))
+
+            _diag("features", features)
+        except Exception:
+            LOG.exception("Failed dumping feature diagnostics")
+        raise
 
 #gotta figure out what the functions up to world_points_to_current_local do
 
