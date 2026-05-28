@@ -493,15 +493,10 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
                     # Enabled camera but no HUGSIM source: create black frame
                     cams_kwargs[f] = build_camera_from_hugsim(f, None, {})
                 else:
-                    # Disabled camera: create a Camera object with image=None so the
-                    # SparseDrive feature builder can ignore it safely
-                    cams_kwargs[f] = Camera(
-                        image=None,
-                        sensor2lidar_rotation=np.eye(3, dtype=np.float32),
-                        sensor2lidar_translation=np.zeros(3, dtype=np.float32),
-                        intrinsics=np.eye(3, dtype=np.float32),
-                        distortion=None,
-                    )
+                    # Disabled camera: create a black frame Camera so downstream
+                    # lists do not contain `None` which would produce object-dtype
+                    # arrays when stacked. Use default intrinsics fallback.
+                    cams_kwargs[f] = build_camera_from_hugsim(f, None, {})
         
         # Construct Cameras dataclass by positional order
         cameras_dataclass = Cameras(
@@ -606,6 +601,30 @@ def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
                         LOG.error("Diag %s: cannot convert to ndarray (type=%s)", prefix, type(v))
 
             _diag("features", features)
+            # Targeted camera_feature inspection to identify non-numeric elements
+            try:
+                cf = features.get("camera_feature") if isinstance(features, dict) else None
+                if isinstance(cf, list):
+                    for fi, frame in enumerate(cf):
+                        try:
+                            LOG.error("Camera feature frame %d type=%s", fi, type(frame))
+                            if isinstance(frame, dict):
+                                for cam_k, cam_v in frame.items():
+                                    try:
+                                        if isinstance(cam_v, np.ndarray):
+                                            LOG.error("  %s: ndarray dtype=%s shape=%s", cam_k, cam_v.dtype, cam_v.shape)
+                                        elif cam_v is None:
+                                            LOG.error("  %s: None", cam_k)
+                                        else:
+                                            LOG.error("  %s: type=%s repr=%s", cam_k, type(cam_v), repr(cam_v)[:200])
+                                    except Exception:
+                                        LOG.exception("Failed inspecting camera_feature.%s in frame %d", cam_k, fi)
+                            else:
+                                LOG.error("  frame is not dict, repr=%s", repr(frame)[:300])
+                        except Exception:
+                            LOG.exception("Failed inspecting camera_feature frame %d", fi)
+            except Exception:
+                LOG.exception("Failed targeted camera_feature diagnostics")
         except Exception:
             LOG.exception("Failed dumping feature diagnostics")
         raise
