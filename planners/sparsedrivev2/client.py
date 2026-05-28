@@ -566,6 +566,29 @@ def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
             return obj
 
         features = _normalize_paths(features)
+        # Remove any image_path entries from the features tree to avoid
+        # non-numeric object arrays (strings/paths) being passed into
+        # numpy.stack -> torch.tensor in the SparseDrive data_adapter.
+        def _remove_image_path(obj):
+            if isinstance(obj, dict):
+                if "image_path" in obj:
+                    try:
+                        obj.pop("image_path", None)
+                    except Exception:
+                        pass
+                for k, v in list(obj.items()):
+                    _remove_image_path(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    _remove_image_path(item)
+            elif isinstance(obj, tuple):
+                for item in obj:
+                    _remove_image_path(item)
+
+        try:
+            _remove_image_path(features)
+        except Exception:
+            LOG.exception("Failed to strip image_path from features")
         features, targets, token = feature_builder.pipeline(features, targets, token, test_mode=True, vis=False)
         return features, targets, token
     except Exception:
