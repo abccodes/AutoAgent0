@@ -174,7 +174,45 @@ def euler_deg_to_rot_matrix(angles_deg: Sequence[float]) -> np.ndarray:
     return R
 
 
-def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: Dict) -> Camera:
+def _normalize_camera_distortion(cam_params: Dict) -> np.ndarray:
+    """Return a fixed-size numeric distortion vector for downstream stacking."""
+    raw = None
+    if isinstance(cam_params, dict):
+        raw = cam_params.get("distortion", cam_params.get("distortions", None))
+
+    if raw is None:
+        return np.zeros((5,), dtype=np.float32)
+
+    try:
+        arr = np.asarray(raw, dtype=np.float32).reshape(-1)
+    except Exception:
+        return np.zeros((5,), dtype=np.float32)
+
+    if arr.size == 0:
+        return np.zeros((5,), dtype=np.float32)
+    if arr.size < 5:
+        padded = np.zeros((5,), dtype=np.float32)
+        padded[: arr.size] = arr
+        return padded
+    if arr.size > 5:
+        return arr[:5].astype(np.float32, copy=False)
+    return arr.astype(np.float32, copy=False)
+
+
+def _attach_camera_image_path(cam_obj: Camera, timestamp: object, camera_label: str) -> None:
+    """Persist camera image to disk and attach a normalized string image_path."""
+    try:
+        tmp_path = save_sparsedrive_frame_to_tmp(cam_obj.image, timestamp, camera_label)
+        cam_obj.image_path = "" if tmp_path is None else str(tmp_path)
+    except Exception:
+        LOG.exception("Failed to save temp frame for camera %s", camera_label)
+        try:
+            cam_obj.image_path = ""
+        except Exception:
+            pass
+
+
+def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: Dict, warn_missing: bool = True) -> Camera:
     """
     Build navsim.common.dataclasses.Camera from HUGSIM image and cam_params.
     cam_params expected shape:
@@ -233,14 +271,17 @@ def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: D
     if sensor2lidar_trans is None:
         sensor2lidar_trans = np.zeros(3, dtype=np.float32)
 
+    cam_distortion = _normalize_camera_distortion(cam_params)
+
     # Normalize/validate the provided image to H x W x 3 uint8.
     def _make_blank():
-        LOG.warning(
-            "Missing HUGSIM camera image for %s; using blank %dx%d black frame",
-            cam_name,
-            int(H),
-            int(W),
-        )
+        if warn_missing:
+            LOG.warning(
+                "Missing HUGSIM camera image for %s; using blank %dx%d black frame",
+                cam_name,
+                int(H),
+                int(W),
+            )
         return np.zeros((int(H), int(W), 3), dtype=np.uint8)
 
     if rgb_image is None:
@@ -297,7 +338,7 @@ def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: D
         sensor2lidar_rotation=sensor2lidar_rot,
         sensor2lidar_translation=sensor2lidar_trans,
         intrinsics=cam_intrinsic,
-        distortion=None,
+        distortion=cam_distortion,
     )
     return cam
 
@@ -535,17 +576,8 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
             # SparseDrive's pipeline expects an on-disk `image_path` on Camera
             # instances. We keep the in-memory image for debugging, but also save
             # a temp file so the feature builder can load the frame from disk.
-            cam_obj = build_camera_from_hugsim(hug_name, img, params)
-
-            try:
-                tmp_path = save_sparsedrive_frame_to_tmp(cam_obj.image, info.get("timestamp", 0), hug_name)
-                if tmp_path is not None:
-                    try:
-                        cam_obj.image_path = str(tmp_path)
-                    except Exception:
-                        cam_obj.image_path = tmp_path
-            except Exception:
-                LOG.exception("Failed to save temp frame for camera %s", hug_name)
+            cam_obj = build_camera_from_hugsim(hug_name, img, params, warn_missing=True)
+            _attach_camera_image_path(cam_obj, info.get("timestamp", 0), hug_name)
 
             cams_kwargs[drv_field] = cam_obj
 
@@ -556,12 +588,13 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
             if f not in cams_kwargs:
                 if f in enabled_fields:
                     # Enabled camera but no HUGSIM source: create black frame
-                    cams_kwargs[f] = build_camera_from_hugsim(f, None, {})
+                    cams_kwargs[f] = build_camera_from_hugsim(f, None, {}, warn_missing=True)
                 else:
                     # Disabled camera: create a black frame Camera so downstream
                     # lists do not contain `None` which would produce object-dtype
                     # arrays when stacked. Use default intrinsics fallback.
-                    cams_kwargs[f] = build_camera_from_hugsim(f, None, {})
+                    cams_kwargs[f] = build_camera_from_hugsim(f, None, {}, warn_missing=False)
+                _attach_camera_image_path(cams_kwargs[f], info.get("timestamp", 0), f)
         
         # Construct Cameras dataclass by positional order
         cameras_dataclass = Cameras(
@@ -649,6 +682,43 @@ def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
             return obj
 
         features = _normalize_paths(features)
+
+        def _normalize_camera_feature_schema(camera_feature):
+            """Force camera_feature entries into adapter-friendly scalar/ndarray types."""
+            if not isinstance(camera_feature, list):
+                return camera_feature
+
+            normalized_frames = []
+            for frame in camera_feature:
+                if not isinstance(frame, dict):
+                    normalized_frames.append(frame)
+                    continue
+
+                normalized_frame = {}
+                for cam_name, cam_info in frame.items():
+                    if not isinstance(cam_info, dict):
+                        normalized_frame[cam_name] = cam_info
+                        continue
+
+                    normalized_frame[cam_name] = {
+                        "image_path": str(cam_info.get("image_path", "") or ""),
+                        "sensor2lidar_rotation": np.asarray(
+                            cam_info.get("sensor2lidar_rotation", np.eye(3, dtype=np.float32)), dtype=np.float32
+                        ),
+                        "sensor2lidar_translation": np.asarray(
+                            cam_info.get("sensor2lidar_translation", np.zeros(3, dtype=np.float32)), dtype=np.float32
+                        ),
+                        "intrinsics": np.asarray(
+                            cam_info.get("intrinsics", np.eye(3, dtype=np.float32)), dtype=np.float32
+                        ),
+                        "distortion": _normalize_camera_distortion(cam_info),
+                    }
+                normalized_frames.append(normalized_frame)
+            return normalized_frames
+
+        if isinstance(features, dict) and "camera_feature" in features:
+            features["camera_feature"] = _normalize_camera_feature_schema(features["camera_feature"])
+
         # Sanitize list-like feature entries so np.stack in SparseDrive data_adapter
         # does not encounter object-dtype arrays (e.g., mixed None, PIL, Path).
 
