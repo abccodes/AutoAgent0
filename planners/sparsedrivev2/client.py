@@ -18,6 +18,7 @@ Assumptions (review before running):
 import argparse
 import logging
 import math
+import numbers
 import os
 import pickle
 import struct
@@ -483,7 +484,7 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
         info = info_history[idx]
         # compute ego_pose local: DrivoR feature builder expects local ego pose; the AgentInput factory normally converts global to local
         # Here we set ego_pose to [0,0,0] (local origin) for the most recent frame and relative for older frames is not strictly required by builder.
-        # Simpler: set ego_pose to [0,0,0] for every history step (builder primarily uses relative ego status).
+        # Simpler: set ego_pose to [0,0,0] for every history step (builder primarily uses relative ego status).-
         ego_pose = np.array([0.0, 0.0, 0.0], dtype=np.float64)
 
         ego_velocity = compute_local_velocity(info_history[-num_history:], idx + num_history)
@@ -501,7 +502,7 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
         if rgb is None:
             LOG.error("rgb value is none when extracted from obs")
         else:
-            LOG.info("rgb value is not None:", type(rgb))
+            LOG.info("rgb value is not None: %s", type(rgb))
         # per-frame debug: timestamp and available camera keys
         try:
             LOG.debug("Frame idx=%d timestamp=%s obs.rgb keys=%s cam_params keys=%s", idx, info.get("timestamp"), list(rgb.keys()) if isinstance(rgb, dict) else None, list(cam_params.keys()) if isinstance(cam_params, dict) else None)
@@ -650,7 +651,6 @@ def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
         features = _normalize_paths(features)
         # Sanitize list-like feature entries so np.stack in SparseDrive data_adapter
         # does not encounter object-dtype arrays (e.g., mixed None, PIL, Path).
-        import numbers
 
         def _sanitize(obj, path="root"):
             if isinstance(obj, dict):
