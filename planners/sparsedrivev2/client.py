@@ -1232,12 +1232,43 @@ def main() -> int:
             try:
                 LOG.info("Waiting for next observation payload on %s", obs_pipe)
                 message = read_obs_file(obs_pipe_reader)
-                LOG.info("Received observation payload from %s", obs_pipe)
-                if message == "Done":
-                    LOG.info("Received shutdown signal")
-                    break
+                LOG.info("Received observation payload from %s; type=%s", obs_pipe, type(message))
+                try:
+                    if message == "Done":
+                        LOG.info("Received shutdown signal")
+                        break
 
-                obs, info = message
+                    # Handle stray preflight diagnostics that may appear here
+                    if isinstance(message, dict) and message.get("message_type") == "hugsim_preflight":
+                        LOG.info("Received HUGSIM preflight diagnostic (inside read loop); skipping")
+                        continue
+
+                    # Accept either (obs, info) or (obs, info, privileged_info)
+                    if isinstance(message, (tuple, list)):
+                        msg_len = len(message)
+                        LOG.info("Observation message is sequence length=%d", msg_len)
+                        if msg_len == 2:
+                            obs, info = message
+                        elif msg_len == 3:
+                            obs, info, privileged_msg = message
+                            # attach privileged info to info dict if possible for downstream code
+                            try:
+                                if isinstance(info, dict):
+                                    info["privileged"] = privileged_msg
+                            except Exception:
+                                LOG.exception("Failed to attach privileged info to info dict")
+                        else:
+                            LOG.error("Unexpected observation sequence length=%d; skipping", msg_len)
+                            write_plan_file(plan_pipe_writer, None)
+                            continue
+                    else:
+                        LOG.error("Unexpected observation message type %s; skipping", type(message))
+                        write_plan_file(plan_pipe_writer, None)
+                        continue
+                except Exception:
+                    LOG.exception("Failed to parse incoming observation message")
+                    write_plan_file(plan_pipe_writer, None)
+                    continue
                 # info_history append and pad
                 info_history.append(dict(info))
                 while len(info_history) < EGO_HISTORY_FRAMES:
