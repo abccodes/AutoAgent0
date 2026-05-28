@@ -825,7 +825,13 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
             # REFAC: privileged payload form kept for reference:
             # write_pipe_message_file(obs_pipe_writer, (current_obs, current_info, privileged_info))
             plan_payload = read_pipe_message_file(plan_pipe_reader)
-            print(f"[DEBUG] plan_payload has these keys: {list(plan_payload.keys())}")
+            if plan_payload is None:
+                print("[DEBUG] plan_payload is None (adapter signalled failure)")
+            else:
+                try:
+                    print(f"[DEBUG] plan_payload has these keys: {list(plan_payload.keys())}")
+                except Exception:
+                    print(f"[DEBUG] plan_payload non-dict type={type(plan_payload)} repr={repr(plan_payload)[:200]}")
             current_topk_plans = None
             current_topk_scores = None
             current_candidate_pool_plans = None
