@@ -646,6 +646,100 @@ def batch_and_move_feature_tree(value, device: torch.device):
         return value
 
 
+def _flatten_numeric_feature(value, dtype=np.float32) -> np.ndarray:
+    """Convert a scalar/array-like feature into a flat numeric vector."""
+    arr = np.asarray(value, dtype=dtype)
+    return arr.reshape(-1)
+
+
+def _normalize_status_feature_schema(status_feature) -> np.ndarray:
+    """Convert feature-builder status output into the flat 8D vector expected by SparseDriveModel.
+
+    Expected ordering matches SparseDriveModel._status_encoding input size 4 + 2 + 2:
+    [driving_command(4), ego_velocity(2), ego_acceleration(2)]
+    """
+    if isinstance(status_feature, np.ndarray):
+        arr = np.asarray(status_feature, dtype=np.float32)
+        return arr.reshape(-1)
+
+    if isinstance(status_feature, (list, tuple)):
+        if len(status_feature) == 0:
+            return np.zeros((8,), dtype=np.float32)
+        # If a history/list is provided, use the most recent entry.
+        if all(isinstance(item, dict) for item in status_feature):
+            return _normalize_status_feature_schema(status_feature[-1])
+        try:
+            return _flatten_numeric_feature(status_feature, dtype=np.float32)
+        except Exception:
+            return np.zeros((8,), dtype=np.float32)
+
+    if isinstance(status_feature, dict):
+        command_keys = ["driving_command", "command", "command_feature"]
+        velocity_keys = ["ego_velocity", "velocity", "vel"]
+        accel_keys = ["ego_acceleration", "ego_accel", "acceleration", "accel"]
+
+        def _get_first(keys):
+            for key in keys:
+                if key in status_feature:
+                    return status_feature[key]
+            return None
+
+        command_value = _get_first(command_keys)
+        velocity_value = _get_first(velocity_keys)
+        accel_value = _get_first(accel_keys)
+
+        if command_value is not None and velocity_value is not None and accel_value is not None:
+            command_vec = _flatten_numeric_feature(command_value, dtype=np.float32)
+            velocity_vec = _flatten_numeric_feature(velocity_value, dtype=np.float32)
+            accel_vec = _flatten_numeric_feature(accel_value, dtype=np.float32)
+
+            status_vec = np.concatenate([command_vec, velocity_vec, accel_vec], axis=0).astype(np.float32, copy=False)
+            if status_vec.size != 8:
+                LOG.warning(
+                    "status_feature assembled from keys has unexpected size=%d (keys=%s); coercing to length 8",
+                    status_vec.size,
+                    list(status_feature.keys()),
+                )
+                padded = np.zeros((8,), dtype=np.float32)
+                padded[: min(8, status_vec.size)] = status_vec[:8]
+                return padded
+            return status_vec
+
+        # Fallback: flatten all numeric leaves in insertion order and use if it matches the expected width.
+        flattened_parts = []
+        for key, value in status_feature.items():
+            try:
+                flattened_parts.append(_flatten_numeric_feature(value, dtype=np.float32))
+            except Exception:
+                LOG.debug("Skipping non-numeric status_feature entry key=%s type=%s", key, type(value))
+
+        if flattened_parts:
+            fallback = np.concatenate(flattened_parts, axis=0).astype(np.float32, copy=False)
+            if fallback.size == 8:
+                LOG.info("status_feature fallback flatten succeeded with keys=%s", list(status_feature.keys()))
+                return fallback
+            LOG.warning(
+                "status_feature fallback flatten produced size=%d from keys=%s; returning zero vector",
+                fallback.size,
+                list(status_feature.keys()),
+            )
+            padded = np.zeros((8,), dtype=np.float32)
+            padded[: min(8, fallback.size)] = fallback[:8]
+            return padded
+
+        LOG.warning("status_feature dict could not be normalized; keys=%s", list(status_feature.keys()))
+        return np.zeros((8,), dtype=np.float32)
+
+    try:
+        vec = _flatten_numeric_feature(status_feature, dtype=np.float32)
+        padded = np.zeros((8,), dtype=np.float32)
+        padded[: min(8, vec.size)] = vec[:8]
+        return padded
+    except Exception:
+        LOG.warning("Unsupported status_feature type=%s; returning zero vector", type(status_feature))
+        return np.zeros((8,), dtype=np.float32)
+
+
 def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
     features = feature_builder.compute_features(agent_input)
     targets: Dict[str, torch.Tensor] = {}
@@ -718,6 +812,25 @@ def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
 
         if isinstance(features, dict) and "camera_feature" in features:
             features["camera_feature"] = _normalize_camera_feature_schema(features["camera_feature"])
+        if isinstance(features, dict) and "status_feature" in features:
+            raw_status_feature = features["status_feature"]
+            try:
+                if isinstance(raw_status_feature, dict):
+                    LOG.info("Raw status_feature keys before normalization: %s", list(raw_status_feature.keys()))
+                else:
+                    LOG.info("Raw status_feature type before normalization: %s", type(raw_status_feature))
+            except Exception:
+                LOG.exception("Failed to summarize raw status_feature")
+            features["status_feature"] = _normalize_status_feature_schema(raw_status_feature)
+            try:
+                LOG.info(
+                    "Normalized status_feature shape=%s dtype=%s values=%s",
+                    tuple(np.asarray(features["status_feature"]).shape),
+                    np.asarray(features["status_feature"]).dtype,
+                    np.asarray(features["status_feature"]).tolist(),
+                )
+            except Exception:
+                LOG.exception("Failed to log normalized status_feature")
 
         # Sanitize list-like feature entries so np.stack in SparseDrive data_adapter
         # does not encounter object-dtype arrays (e.g., mixed None, PIL, Path).
@@ -1633,6 +1746,10 @@ def main() -> int:
                                 LOG.exception("Failed diag dump of features_batched")
 
                 if proposals is None or scores is None:
+                    if pred is None:
+                        LOG.error("SparseDrive model forward produced no output; features may still have a schema mismatch")
+                        write_plan_file(plan_pipe_writer, None)
+                        continue
                     try:
                         proposals, scores = extract_proposals_and_scores_from_predictions(pred, output_num_poses=output_num_poses)
                     except Exception as e:
