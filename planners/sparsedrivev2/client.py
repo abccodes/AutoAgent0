@@ -181,11 +181,8 @@ def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: D
       cam_params[cam_name]["l2c_rot"] (3 angles deg) and l2c_trans (3 floats) OR cam_params[cam_name]['l2c'] a 4x4 matrix
     """
     # Ensure image is a numpy array (PIL Image or other types may appear)
-    if rgb_image is None:
-        LOG.error("rgb_image is None")
-
     if rgb_image is not None and not isinstance(rgb_image, np.ndarray):
-        LOG.info("rgb_image isn't none, so we will try to convert to np array: ", type(rgb_image))
+        LOG.debug("Converting %s image from %s to numpy array", cam_name, type(rgb_image))
         try:
             rgb_image = np.asarray(rgb_image)
         except Exception:
@@ -503,6 +500,8 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
 
         if rgb is None:
             LOG.error("rgb value is none when extracted from obs")
+        else:
+            LOG.info("rgb value is not None:", type(rgb))
         # per-frame debug: timestamp and available camera keys
         try:
             LOG.debug("Frame idx=%d timestamp=%s obs.rgb keys=%s cam_params keys=%s", idx, info.get("timestamp"), list(rgb.keys()) if isinstance(rgb, dict) else None, list(cam_params.keys()) if isinstance(cam_params, dict) else None)
@@ -626,6 +625,20 @@ def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
                 return [_normalize_paths(v) for v in obj]
             if isinstance(obj, tuple):
                 return tuple(_normalize_paths(v) for v in obj)
+            if isinstance(obj, np.ndarray):
+                return np.array([_normalize_paths(v) for v in obj], dtype=object) if obj.dtype == object else obj
+            if hasattr(obj, "__dataclass_fields__"):
+                try:
+                    from dataclasses import asdict
+
+                    return _normalize_paths(asdict(obj))
+                except Exception:
+                    return _normalize_paths(vars(obj))
+            if hasattr(obj, "__dict__") and not isinstance(obj, (str, bytes, numbers.Number, np.generic)):
+                try:
+                    return _normalize_paths(vars(obj))
+                except Exception:
+                    return obj
             try:
                 from pathlib import Path as _Path
             except Exception:
@@ -644,62 +657,73 @@ def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
                 for k, v in list(obj.items()):
                     obj[k] = _sanitize(v, f"{path}.{k}")
                 return obj
-            if isinstance(obj, list):
-                # find first element that can be converted to numeric ndarray
-                first_valid = None
-                for x in obj:
-                    if x is not None:
-                        try:
-                            arr = np.asarray(x)
-                            if arr.dtype != object:
-                                first_valid = arr
-                                break
-                        except Exception:
-                            continue
-                if first_valid is None:
+            if isinstance(obj, np.ndarray):
+                if obj.dtype != object:
                     return obj
-                target_shape = getattr(first_valid, "shape", None)
-                target_dtype = first_valid.dtype
-                new_list = []
-                for i, item in enumerate(obj):
+                sanitized_items = [_sanitize(item, f"{path}[{i}]") for i, item in enumerate(obj.tolist())]
+                try:
+                    return np.stack(sanitized_items)
+                except Exception:
+                    return sanitized_items
+            if isinstance(obj, list):
+                sanitized = [_sanitize(item, f"{path}[{i}]") for i, item in enumerate(obj)]
+
+                # If the list contains dict-like or object-like elements, try to convert them
+                # into numpy arrays only when that conversion is actually lossless.
+                array_candidates = []
+                for item in sanitized:
                     if item is None:
-                        try:
-                            new_list.append(np.zeros(target_shape, dtype=target_dtype))
-                        except Exception:
-                            new_list.append(np.zeros((), dtype=target_dtype))
-                        LOG.warning("Sanitized None element in features at %s[%d]", path, i)
                         continue
-                    try:
-                        arr = np.asarray(item)
-                        if arr.dtype == object:
-                            # Try element-wise conversion if this is an array-of-objects
-                            try:
-                                arr = np.stack([np.asarray(e) for e in item])
-                            except Exception:
-                                LOG.warning("Failed to stack object-array at %s[%d]; replacing with zeros", path, i)
-                                arr = np.zeros(target_shape, dtype=target_dtype)
-                        # cast to target dtype when possible
+                    if isinstance(item, np.ndarray):
+                        array_candidates.append(item)
+                    elif isinstance(item, (list, tuple)):
                         try:
-                            arr = arr.astype(target_dtype)
+                            array_candidates.append(np.asarray(item))
                         except Exception:
                             pass
-                        # If shape mismatches, try to broadcast or replace with zeros
-                        if target_shape is not None and getattr(arr, "shape", None) != target_shape:
+                    elif isinstance(item, (numbers.Number, np.generic, bool)):
+                        array_candidates.append(np.asarray(item))
+
+                if array_candidates:
+                    first_valid = next((arr for arr in array_candidates if isinstance(arr, np.ndarray) and arr.dtype != object), None)
+                    if first_valid is not None:
+                        target_shape = getattr(first_valid, "shape", None)
+                        target_dtype = first_valid.dtype
+                        coerced = []
+                        for i, item in enumerate(sanitized):
+                            if item is None:
+                                LOG.warning("Sanitized None element in features at %s[%d]", path, i)
+                                coerced.append(np.zeros(target_shape, dtype=target_dtype))
+                                continue
                             try:
-                                arr = np.broadcast_to(arr, target_shape).astype(target_dtype)
+                                arr = np.asarray(item)
+                                if arr.dtype == object:
+                                    try:
+                                        arr = np.stack([np.asarray(e) for e in arr.tolist()])
+                                    except Exception:
+                                        LOG.warning("Failed to stack object-array at %s[%d]; replacing with zeros", path, i)
+                                        arr = np.zeros(target_shape, dtype=target_dtype)
+                                if arr.dtype != target_dtype:
+                                    try:
+                                        arr = arr.astype(target_dtype)
+                                    except Exception:
+                                        pass
+                                if target_shape is not None and getattr(arr, "shape", None) != target_shape:
+                                    try:
+                                        arr = np.broadcast_to(arr, target_shape).astype(target_dtype)
+                                    except Exception:
+                                        LOG.warning("Feature element at %s[%d] has mismatched shape; replacing with zeros", path, i)
+                                        arr = np.zeros(target_shape, dtype=target_dtype)
+                                coerced.append(arr)
                             except Exception:
-                                LOG.warning("Feature element at %s[%d] has mismatched shape; replacing with zeros", path, i)
-                                arr = np.zeros(target_shape, dtype=target_dtype)
-                        new_list.append(arr)
-                    except Exception:
-                        LOG.exception("Failed sanitizing feature element at %s[%d]; replacing with zeros", path, i)
-                        try:
-                            new_list.append(np.zeros(target_shape, dtype=target_dtype))
-                        except Exception:
-                            new_list.append(np.zeros((), dtype=target_dtype))
-                return new_list
+                                LOG.exception("Failed sanitizing feature element at %s[%d]; replacing with zeros", path, i)
+                                coerced.append(np.zeros(target_shape, dtype=target_dtype))
+                        return coerced
+                return sanitized
             # other scalar or array-like types
             return obj
+
+        LOG.info("SparseDrive features top-level keys before sanitization: %s", list(features.keys()) if isinstance(features, dict) else type(features))
 
         try:
             features = _sanitize(features)
