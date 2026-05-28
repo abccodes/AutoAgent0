@@ -500,6 +500,9 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
         cam_dict = {}
         cam_params = info.get("cam_params", {})
         rgb = obs.get("rgb", {})
+
+        if rgb is None:
+            LOG.error("rgb value is none when extracted from obs")
         # per-frame debug: timestamp and available camera keys
         try:
             LOG.debug("Frame idx=%d timestamp=%s obs.rgb keys=%s cam_params keys=%s", idx, info.get("timestamp"), list(rgb.keys()) if isinstance(rgb, dict) else None, list(cam_params.keys()) if isinstance(cam_params, dict) else None)
