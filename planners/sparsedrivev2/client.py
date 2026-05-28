@@ -1097,7 +1097,7 @@ def main() -> int:
 
     # Load SparseDrive config if provided; otherwise use the repo defaults.
     sparsedrive_config = SparseDriveConfig()
-    sparsedrive_config_path = os.environ.get("SPARSEDRIVE_CONFIG", os.environ.get("DRIVOR_CONFIG", "")).strip()
+    sparsedrive_config_path = os.environ.get("SPARSEDRIVE_CONFIG").strip()
     LOG.info("SPARSEDRIVE_CONFIG env: '%s', OmegaConf available: %s", sparsedrive_config_path, omega_available)
 
     if sparsedrive_config_path:

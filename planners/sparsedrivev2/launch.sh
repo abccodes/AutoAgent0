@@ -20,7 +20,8 @@ echo "LAUNCH DEBUG: (SparseDriveV2 env vars will be shown after defaults are app
 : "${SPARSEDRIVE_REPO_ROOT:?SPARSEDRIVE_REPO_ROOT is not set}"
 : "${SPARSEDRIVE_CHECKPOINT:?SPARSEDRIVE_CHECKPOINT is not set}"
 : "${SPARSEDRIVE_DEVICE:=cuda}"
-: "${SPARSEDRIVE_CONFIG:?SPARSEDRIVE_CONFIG is not set}"
+#disable since we don't have a valid yaml from sparsedrive out of the box, and the default config should be fine.
+# : "${SPARSEDRIVE_CONFIG:?SPARSEDRIVE_CONFIG is not set}"
 
 # Optional: if you add config composition
 # : "${SPARSEDRIVE_CONFIG_DIR:?SPARSEDRIVE_CONFIG_DIR is not set}"
