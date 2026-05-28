@@ -1,0 +1,6 @@
+realcar_path: /bigdata/jason/drivor_evaluation/HUGSIM/3DRealCar
+model_base: /bigdata/datasets/HUGSIM/scenes/waymo
+uniad_path: ""
+vad_path: ""
+ltf_path: ""
+output_dir: /bigdata/aidan/outputs/benchmark/out/waymo_

@@ -26,4 +26,17 @@ fi
 export SCENARIO_PATH
 
 cd "${REPO_ROOT}"
+GPU_LOCK_FILE="${GPU_LOCK_FILE:-}"
+GPU_LOCK_TIMEOUT_SEC="${GPU_LOCK_TIMEOUT_SEC:-0}"
+
+if [[ -n "${GPU_LOCK_FILE}" ]]; then
+    mkdir -p "$(dirname "${GPU_LOCK_FILE}")"
+    exec 9>"${GPU_LOCK_FILE}"
+    if [[ "${GPU_LOCK_TIMEOUT_SEC}" =~ ^[0-9]+$ ]] && [[ "${GPU_LOCK_TIMEOUT_SEC}" -gt 0 ]]; then
+        flock -w "${GPU_LOCK_TIMEOUT_SEC}" 9
+    else
+        flock 9
+    fi
+fi
+
 bash scripts/run_single_scene.slurm

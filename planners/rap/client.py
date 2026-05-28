@@ -6,6 +6,7 @@ import os
 import pickle
 import struct
 import sys
+import time
 import traceback
 from collections import deque
 from dataclasses import dataclass
@@ -234,6 +235,20 @@ def make_command_one_hot(command: int) -> np.ndarray:
 
 
 def preprocess_image(image: np.ndarray, image_scale: float) -> Tuple[np.ndarray, Tuple[int, int, int]]:
+    image = np.asarray(image)
+    if image.ndim != 3:
+        raise ValueError(f"Expected 3D camera image, got shape {image.shape}")
+
+    # Some scenes surface RGB frames in CHW layout instead of HWC. Normalize
+    # here so the RAP backbone always sees [num_cams, 3, H, W].
+    if image.shape[-1] not in (3, 4) and image.shape[0] in (3, 4):
+        image = np.transpose(image, (1, 2, 0))
+    elif image.shape[-1] not in (3, 4):
+        raise ValueError(f"Unsupported camera image layout {image.shape}")
+
+    if image.shape[-1] == 4:
+        image = image[..., :3]
+
     image = image.astype(np.float32)
     image = (image - MEAN) / STD
     scaled_w = max(1, int(round(image.shape[1] * image_scale)))
@@ -245,6 +260,22 @@ def preprocess_image(image: np.ndarray, image_scale: float) -> Tuple[np.ndarray,
     padded = np.zeros((pad_h, pad_w, image.shape[2]), dtype=np.float32)
     padded[: image.shape[0], : image.shape[1]] = image
     return padded, padded.shape
+
+
+def pad_camera_batch(images: Sequence[np.ndarray]) -> np.ndarray:
+    if not images:
+        raise ValueError("Expected at least one camera image")
+
+    max_h = max(int(image.shape[0]) for image in images)
+    max_w = max(int(image.shape[1]) for image in images)
+    channels = int(images[0].shape[2])
+    batch = np.zeros((len(images), max_h, max_w, channels), dtype=np.float32)
+    for idx, image in enumerate(images):
+        h, w, c = image.shape
+        if c != channels:
+            raise ValueError(f"Inconsistent channel count in camera batch: {c} vs {channels}")
+        batch[idx, :h, :w] = image
+    return batch
 
 
 def compute_lidar2img(cam_params: Dict[str, Dict[str, np.ndarray]], cam_name: str, image_scale: float) -> np.ndarray:
@@ -398,12 +429,14 @@ def build_features(
         if cam_name not in rgb_obs:
             raise KeyError(f"Missing camera {cam_name} in HUGSIM observation")
         image, img_shape = preprocess_image(rgb_obs[cam_name], cfg.image_scale)
-        camera_images.append(np.transpose(image, (2, 0, 1)))
+        camera_images.append(image)
         img_shapes.append(img_shape)
         if cfg.use_scene_rig_lidar2img and "front2cam" in cam_params[cam_name]:
             lidar2img.append(compute_scene_rig_lidar2img(cam_params, cam_name, cfg.image_scale))
         else:
             lidar2img.append(compute_lidar2img(cam_params, cam_name, cfg.image_scale))
+
+    camera_batch = pad_camera_batch(camera_images)
 
     current_pos = np.asarray(info["ego_pos"], dtype=np.float32)
     current_rot = np.asarray(info["ego_rot"], dtype=np.float32)
@@ -435,7 +468,7 @@ def build_features(
         ego_status_history.append(ego_status)
 
     features = {
-        "camera_feature": torch.from_numpy(np.stack(camera_images, axis=0)).unsqueeze(0).to(cfg.device),
+        "camera_feature": torch.from_numpy(np.transpose(camera_batch, (0, 3, 1, 2))).unsqueeze(0).to(cfg.device),
         "ego_status": torch.from_numpy(np.stack(ego_status_history, axis=0)[None]).to(cfg.device),
         "img_shape": torch.tensor(np.array(img_shapes, dtype=np.float32)).unsqueeze(0).to(cfg.device),
         "lidar2img": torch.tensor(np.array(lidar2img, dtype=np.float32)).unsqueeze(0).to(cfg.device),
@@ -597,11 +630,32 @@ def read_obs(obs_pipe: Path):
     return pickle.loads(payload)
 
 
+def read_obs_file(pipe):
+    header = pipe.read(8)
+    if len(header) != 8:
+        raise EOFError("Incomplete pipe header")
+    payload_size = struct.unpack("<Q", header)[0]
+    payload = bytearray()
+    while len(payload) < payload_size:
+        chunk = pipe.read(payload_size - len(payload))
+        if not chunk:
+            raise EOFError("Incomplete pipe payload")
+        payload.extend(chunk)
+    return pickle.loads(payload)
+
+
 def write_plan(plan_pipe: Path, plan) -> None:
     payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
     with open(plan_pipe, "wb") as pipe:
         pipe.write(struct.pack("<Q", len(payload)))
         pipe.write(payload)
+
+
+def write_plan_file(pipe, plan) -> None:
+    payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
+    pipe.write(struct.pack("<Q", len(payload)))
+    pipe.write(payload)
+    pipe.flush()
 
 
 def build_plan_payload(
@@ -816,23 +870,41 @@ def main() -> int:
     previous_selected_score: Optional[float] = None
     previous_selected_timestamp: Optional[float] = None
     previous_selected_source: Optional[str] = None
+    logging.info("Waiting for scene FIFOs to appear: obs=%s plan=%s", obs_pipe, plan_pipe)
+    while not obs_pipe.exists() or not plan_pipe.exists():
+        time.sleep(0.05)
+    obs_pipe_reader = os.fdopen(os.open(obs_pipe, os.O_RDWR), "rb", buffering=0)
+    plan_pipe_writer = os.fdopen(os.open(plan_pipe, os.O_RDWR), "wb", buffering=0)
 
     try:
         while True:
             try:
-                message = read_obs(obs_pipe)
+                message = read_obs_file(obs_pipe_reader)
                 if message == "Done":
                     logging.info("Received shutdown signal")
                     break
+                if isinstance(message, dict) and message.get("message_type") == "hugsim_preflight":
+                    logging.info(
+                        "Received HUGSIM preflight diagnostic: output_dir=%s obs_pipe=%s plan_pipe=%s include_privileged_pipe=%s camera_count=%s timestamp=%s",
+                        message.get("output_dir"),
+                        message.get("obs_pipe"),
+                        message.get("plan_pipe"),
+                        message.get("include_privileged_pipe"),
+                        message.get("camera_count"),
+                        message.get("timestamp"),
+                    )
+                    continue
 
                 privileged_info = None
-                if (
-                    isinstance(message, tuple)
-                    and len(message) == 3
-                ):
-                    obs, info, privileged_info = message
+                if isinstance(message, (list, tuple)):
+                    if len(message) >= 3:
+                        obs, info, privileged_info = message[:3]
+                    elif len(message) == 2:
+                        obs, info = message
+                    else:
+                        raise ValueError(f"Unexpected RAP message length: {len(message)}")
                 else:
-                    obs, info = message
+                    raise ValueError(f"Unexpected RAP message type: {type(message)}")
                 info_history.append(dict(info))
                 while len(info_history) < EGO_HISTORY_FRAMES:
                     info_history.appendleft(dict(info_history[0]))
@@ -901,10 +973,10 @@ def main() -> int:
                 else:
                     reserved_candidate_slots = (
                         max(0, int(cfg.rule_based_merge.topk))
-                        if cfg.rule_based_merge.enabled
+                        if cfg.rule_based_merge.enabled and not cfg.vlm.planner_gate_enabled
                         else 0
                     )
-                    candidate_rows, allow_carry_previous = build_vlm_candidate_rows(
+                    learned_candidate_rows, allow_carry_previous = build_vlm_candidate_rows(
                         proposals=proposals,
                         scores=scores,
                         cfg=cfg,
@@ -916,6 +988,7 @@ def main() -> int:
                         previous_selected_source=previous_selected_source,
                         reserved_candidate_slots=reserved_candidate_slots,
                     )
+                    rule_based_candidate_rows = []
                     if cfg.rule_based_merge.enabled:
                         try:
                             rb_proposals, rb_scores, _ = get_rule_based_proposals_and_scores(
@@ -927,30 +1000,69 @@ def main() -> int:
                                 output_num_poses=cfg.output_num_poses,
                                 topk=cfg.rule_based_merge.topk,
                             )
-                            candidate_rows.extend(
-                                build_rule_based_candidate_rows(
-                                    rb_proposals,
-                                    rb_scores,
-                                    output_num_poses=cfg.output_num_poses,
-                                    source_name=cfg.rule_based_merge.source_name,
-                                    topk=cfg.rule_based_merge.topk,
-                                )
+                            rule_based_candidate_rows = build_rule_based_candidate_rows(
+                                rb_proposals,
+                                rb_scores,
+                                output_num_poses=cfg.output_num_poses,
+                                source_name=cfg.rule_based_merge.source_name,
+                                topk=cfg.rule_based_merge.topk,
                             )
                         except Exception:
                             logging.exception("Failed to append rule-based RAP merge candidates")
+                    planner_gate_result = {
+                        "selected_planner": "learned",
+                        "confidence": None,
+                        "reasoning": "planner_gate_disabled",
+                        "elapsed_sec": 0.0,
+                        "error": None,
+                        "timed_out": False,
+                        "prompt_char_count": 0,
+                        "image_count": 0,
+                    }
+                    selected_planner = "learned"
+                    candidate_rows = learned_candidate_rows
+                    if cfg.vlm.planner_gate_enabled:
+                        planner_gate_result = vlm_selector.maybe_select_planner(
+                            frame_index=frame_index,
+                            camera_images=obs["rgb"],
+                            info=info,
+                            learned_candidate_rows=learned_candidate_rows,
+                            rule_based_candidate_rows=rule_based_candidate_rows,
+                        )
+                        selected_planner = str(planner_gate_result.get("selected_planner", "learned"))
+                        if selected_planner == "rule_based" and rule_based_candidate_rows:
+                            candidate_rows = rule_based_candidate_rows
+                        else:
+                            selected_planner = "learned"
+                            candidate_rows = learned_candidate_rows
+
                     candidate_sources = [str(row.get("source", "unknown")) for row in candidate_rows]
                     logging.info(
-                        "RAP candidate pool frame=%s size=%d sources=%s",
+                        "RAP planner gate frame=%s planner=%s confidence=%s error=%s timed_out=%s chosen_size=%d sources=%s",
                         frame_index,
+                        selected_planner,
+                        planner_gate_result.get("confidence"),
+                        planner_gate_result.get("error"),
+                        planner_gate_result.get("timed_out"),
                         len(candidate_rows),
                         candidate_sources,
                     )
-                    rap_best_idx = int(np.argmax(scores))
-                    default_selected_index = next(
-                        idx
-                        for idx, row in enumerate(candidate_rows)
-                        if row.get("source") == "current_rap" and row.get("proposal_index") == rap_best_idx
-                    )
+                    if selected_planner == "rule_based":
+                        default_selected_index = int(
+                            max(
+                                range(len(candidate_rows)),
+                                key=lambda idx: float(candidate_rows[idx].get("proposal_score", 0.0)),
+                            )
+                        )
+                        default_selected_source = "fallback_rule_based_argmax"
+                    else:
+                        rap_best_idx = int(np.argmax(scores))
+                        default_selected_index = next(
+                            idx
+                            for idx, row in enumerate(candidate_rows)
+                            if row.get("source") == "current_rap" and row.get("proposal_index") == rap_best_idx
+                        )
+                        default_selected_source = "fallback_rap_argmax"
 
                     selection_result = vlm_selector.maybe_select(
                         frame_index=frame_index,
@@ -958,7 +1070,7 @@ def main() -> int:
                         info=info,
                         candidate_rows=candidate_rows,
                         default_selected_index=default_selected_index,
-                        default_selected_source="fallback_rap_argmax",
+                        default_selected_source=default_selected_source,
                     )
                     frame_index += 1
 
@@ -986,7 +1098,15 @@ def main() -> int:
                         "q_selected_path_length": None,
                         "q_best_current_path_length": None,
                         "fallback_selected_idx": int(default_selected_index),
-                        "fallback_selected_source": "fallback_rap_argmax",
+                        "fallback_selected_source": default_selected_source,
+                        "planner_gate_selected_planner": selected_planner,
+                        "planner_gate_confidence": planner_gate_result.get("confidence"),
+                        "planner_gate_reasoning": planner_gate_result.get("reasoning"),
+                        "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
+                        "planner_gate_error": planner_gate_result.get("error"),
+                        "planner_gate_timed_out": planner_gate_result.get("timed_out"),
+                        "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
+                        "planner_gate_image_count": planner_gate_result.get("image_count"),
                         "display_default_trajectories": bool(cfg.vlm.display_default_trajectories),
                         "include_default_candidates": bool(cfg.vlm.include_default_candidates),
                         "q_invoked_vlm": bool(cfg.vlm.enabled),
@@ -1033,7 +1153,7 @@ def main() -> int:
                         selected_score_override=selected_score,
                         candidate_pool_rows=candidate_rows,
                     )
-                write_plan(plan_pipe, plan_payload)
+                write_plan_file(plan_pipe_writer, plan_payload)
 
                 previous_selected_plan = selected_plan.copy()
                 previous_selected_pose = info_to_pose(info)
@@ -1049,11 +1169,19 @@ def main() -> int:
                 logging.error("Inference failure in RAP adapter")
                 logging.error(traceback.format_exc())
                 try:
-                    write_plan(plan_pipe, None)
+                    write_plan_file(plan_pipe_writer, None)
                 except Exception:
                     logging.error("Failed to notify HUGSIM about planner failure")
                 return 1
     finally:
+        try:
+            obs_pipe_reader.close()
+        except Exception:
+            pass
+        try:
+            plan_pipe_writer.close()
+        except Exception:
+            pass
         vlm_selector.finalize()
 
     return 0

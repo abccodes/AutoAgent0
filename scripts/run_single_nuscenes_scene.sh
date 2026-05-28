@@ -6,6 +6,68 @@ if [[ $# -lt 1 || $# -gt 4 ]]; then
     exit 2
 fi
 
+default_planner_path() {
+    local planner_name="$1"
+    case "${planner_name}" in
+        rule_based|rule_based_vlm)
+            echo "configs/planners/rule_based_local_aidan.yaml"
+            ;;
+        *)
+            echo "configs/planners/${planner_name}.yaml"
+            ;;
+    esac
+}
+
+infer_dataset_type() {
+    local scenario_path="$1"
+    local python_bin="$2"
+    "${python_bin}" - <<'PY' "${scenario_path}"
+import sys
+from omegaconf import OmegaConf
+
+cfg = OmegaConf.load(sys.argv[1])
+print(str(cfg.get("data_type", "nuscenes")).strip().lower())
+PY
+}
+
+default_base_path_for_dataset() {
+    local data_type="$1"
+    case "${data_type}" in
+        nuscenes)
+            echo "configs/sim/nuscenes_base_local.yaml"
+            ;;
+        waymo)
+            echo "configs/sim/waymo_base_local.yaml"
+            ;;
+        kitti360)
+            echo "configs/sim/kitti360_base_local.yaml"
+            ;;
+        *)
+            echo "unsupported data_type: ${data_type}" >&2
+            exit 2
+            ;;
+    esac
+}
+
+default_camera_path_for_dataset() {
+    local data_type="$1"
+    case "${data_type}" in
+        nuscenes)
+            echo "configs/sim/nuscenes_camera.yaml"
+            ;;
+        waymo)
+            echo "configs/sim/waymo_camera.yaml"
+            ;;
+        kitti360)
+            echo "configs/sim/kitti360_camera.yaml"
+            ;;
+        *)
+            echo "unsupported data_type: ${data_type}" >&2
+            exit 2
+            ;;
+    esac
+}
+
 PLANNER_NAME="${1:?missing planner name}"
 SCENARIO_PATH="${2:-${SCENARIO_PATH:-configs/benchmark/nuscenes/scene-0383-easy-00.yaml}}"
 DEFAULT_CUDA_ID="0"
@@ -14,10 +76,8 @@ if [[ -n "${SLURM_JOB_ID:-}" || -n "${SLURM_STEP_ID:-}" ]]; then
 fi
 SIM_CUDA="${3:-${SIM_CUDA:-${DEFAULT_CUDA_ID}}}"
 AD_CUDA="${4:-${AD_CUDA:-${DEFAULT_CUDA_ID}}}"
-BASE_PATH="${BASE_PATH:-configs/sim/nuscenes_base_local.yaml}"
-CAMERA_PATH="${CAMERA_PATH:-configs/sim/nuscenes_camera.yaml}"
 KINEMATIC_PATH="${KINEMATIC_PATH:-configs/sim/kinematic.yaml}"
-PLANNER_PATH="${PLANNER_PATH:-configs/planners/${PLANNER_NAME}.yaml}"
+PLANNER_PATH="${PLANNER_PATH:-$(default_planner_path "${PLANNER_NAME}")}"
 HUGSIM_PYTHON_BIN="${HUGSIM_PYTHON_BIN:-/bigdata/jason/drivor_evaluation/HUGSIM/.pixi/envs/default/bin/python}"
 INCLUDE_PRIVILEGED_PIPE="${INCLUDE_PRIVILEGED_PIPE:-}"
 
@@ -53,6 +113,15 @@ if [[ ! -f "${SCENARIO_PATH}" ]]; then
     exit 1
 fi
 
+if [[ ! -x "${HUGSIM_PYTHON_BIN}" ]]; then
+    echo "missing HUGSIM python: ${HUGSIM_PYTHON_BIN}" >&2
+    exit 1
+fi
+
+DATA_TYPE="${DATA_TYPE:-$(infer_dataset_type "${SCENARIO_PATH}" "${HUGSIM_PYTHON_BIN}")}"
+BASE_PATH="${BASE_PATH:-$(default_base_path_for_dataset "${DATA_TYPE}")}"
+CAMERA_PATH="${CAMERA_PATH:-$(default_camera_path_for_dataset "${DATA_TYPE}")}"
+
 if [[ ! -f "${BASE_PATH}" ]]; then
     echo "missing base config: ${BASE_PATH}" >&2
     exit 1
@@ -60,11 +129,6 @@ fi
 
 if [[ ! -f "${PLANNER_PATH}" ]]; then
     echo "missing planner config: ${PLANNER_PATH}" >&2
-    exit 1
-fi
-
-if [[ ! -x "${HUGSIM_PYTHON_BIN}" ]]; then
-    echo "missing HUGSIM python: ${HUGSIM_PYTHON_BIN}" >&2
     exit 1
 fi
 
@@ -94,8 +158,10 @@ done
 
 echo "planner=${PLANNER_NAME}"
 echo "ad=${AD_NAME}"
+echo "data_type=${DATA_TYPE}"
 echo "scenario=${SCENARIO_PATH}"
 echo "base=${BASE_PATH}"
+echo "camera=${CAMERA_PATH}"
 echo "planner_config=${PLANNER_PATH}"
 echo "hugsim_python=${HUGSIM_PYTHON_BIN}"
 echo "sim_cuda=${SIM_CUDA} ad_cuda=${AD_CUDA}"
@@ -103,21 +169,7 @@ echo "include_privileged_pipe=${INCLUDE_PRIVILEGED_PIPE}"
 echo "ld_library_path=${LD_LIBRARY_PATH:-unset}"
 
 if ! "${HUGSIM_PYTHON_BIN}" -c "from simple_knn._C import distCUDA2" >/dev/null 2>&1; then
-    echo "simple_knn missing in ${HUGSIM_PYTHON_BIN}; bootstrapping local CUDA extension"
-    SIMPLE_KNN_LOCK_DIR="${TMPDIR:-/tmp}/hugsim-simple-knn-install.lock"
-    until mkdir "${SIMPLE_KNN_LOCK_DIR}" 2>/dev/null; do
-        echo "waiting for simple_knn install lock: ${SIMPLE_KNN_LOCK_DIR}"
-        sleep 5
-    done
-
-    if ! "${HUGSIM_PYTHON_BIN}" -c "from simple_knn._C import distCUDA2" >/dev/null 2>&1; then
-        if ! "${HUGSIM_PYTHON_BIN}" -m pip --version >/dev/null 2>&1; then
-            echo "pip missing in ${HUGSIM_PYTHON_BIN}; bootstrapping pip with ensurepip"
-            "${HUGSIM_PYTHON_BIN}" -m ensurepip --upgrade
-        fi
-        "${HUGSIM_PYTHON_BIN}" -m pip install --no-build-isolation ./submodules/simple-knn
-    fi
-    rmdir "${SIMPLE_KNN_LOCK_DIR}" >/dev/null 2>&1 || true
+    echo "warning: simple_knn import check failed in ${HUGSIM_PYTHON_BIN}; skipping auto-bootstrap"
 fi
 
 if [[ "${SIM_CUDA}" == "inherit" ]]; then

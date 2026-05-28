@@ -31,6 +31,7 @@ import numpy as np
 import cv2
 from moviepy import ImageSequenceClip
 from planners.common.candidate_visuals import get_candidate_visual_style
+from planners.common.task_overlay import draw_task_target_overlay
 from planners.common.vlm_env import build_prefixed_vlm_env
 from planners.common.rule_based_env import build_prefixed_rule_based_env
 
@@ -69,11 +70,15 @@ def _resolve_output_model_slug(ad_name, planner_config):
     if vlm_cfg.get('enabled', False):
         explicit_slug = vlm_cfg.get('output_model_slug', '')
         if explicit_slug:
+            if str(explicit_slug).strip().lower() in {'none', 'disable', 'disabled', 'off'}:
+                return ''
             return _slugify_model_name(explicit_slug)
         return _slugify_model_name(vlm_cfg.get('model_id', 'vlm'))
 
     explicit_slug = planner_cfg.get('output_model_slug', '')
     if explicit_slug:
+        if str(explicit_slug).strip().lower() in {'none', 'disable', 'disabled', 'off'}:
+            return ''
         return _slugify_model_name(explicit_slug)
     checkpoint = planner_cfg.get('checkpoint', '')
     return _slugify_model_name(checkpoint, default=planner_key)
@@ -91,6 +96,29 @@ def _prefix_output_dir_with_model(output_dir, model_slug):
     if name.startswith(f'{model_slug}_'):
         return output_dir
     return os.path.join(parent, f'{model_slug}_{name}')
+
+
+def _resolve_scene_model_path(model_base, scene_name):
+    direct_path = os.path.join(model_base, scene_name)
+    if os.path.isfile(os.path.join(direct_path, 'cfg.yaml')):
+        return direct_path
+
+    matches = []
+    for root, dirs, _files in os.walk(model_base):
+        if scene_name in dirs:
+            candidate = os.path.join(root, scene_name)
+            if os.path.isfile(os.path.join(candidate, 'cfg.yaml')):
+                matches.append(candidate)
+
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise FileNotFoundError(
+            f"multiple processed scene directories found for {scene_name!r} under {model_base!r}: {matches}"
+        )
+    raise FileNotFoundError(
+        f"processed scene directory for {scene_name!r} not found under {model_base!r}"
+    )
 
 def _resize_for_video(image, target_height):
     if image.shape[0] == target_height:
@@ -536,6 +564,113 @@ def _trajectory_path_length(points_xy):
     return float(np.linalg.norm(np.diff(points_xy, axis=0), axis=1).sum())
 
 
+def _summarize_demo_overlay(task_records, task_info, final_goal_status):
+    if not task_info:
+        return {}
+
+    projection_states = [str(record.get('projection_state', 'inactive')) for record in task_records]
+    visible_frames = [int(record['frame_idx']) for record in task_records if record.get('visible')]
+    return {
+        'task_active': True,
+        'task_type': task_info.get('task_type'),
+        'task_instruction': task_info.get('task_instruction'),
+        'task_target_pose_local': task_info.get('task_target_pose_local'),
+        'task_target_world': task_info.get('task_target_world'),
+        'projection_states': projection_states,
+        'marker_visible_frame_count': int(len(visible_frames)),
+        'first_visible_frame': None if not visible_frames else int(visible_frames[0]),
+        'last_visible_frame': None if not visible_frames else int(visible_frames[-1]),
+        'final_goal_status': final_goal_status,
+        'task_completion_reason': task_info.get('task_completion_reason'),
+    }
+
+
+def _is_stop_task_complete(info):
+    if not isinstance(info, dict):
+        return False
+    if str(info.get('task_type', '')).strip() != 'stop_at_target':
+        return False
+    goal_status = info.get('task_goal_status')
+    if not isinstance(goal_status, dict) or not bool(goal_status.get('reached')):
+        return False
+    try:
+        ego_speed_mps = abs(float(info.get('ego_velo', 0.0)))
+    except (TypeError, ValueError):
+        return False
+    try:
+        stop_speed_threshold_mps = float(info.get('task_stop_speed_threshold_mps', 0.5))
+    except (TypeError, ValueError):
+        stop_speed_threshold_mps = 0.5
+    return ego_speed_mps <= stop_speed_threshold_mps
+
+
+def _is_park_task_complete(info):
+    if not isinstance(info, dict):
+        return False
+    if str(info.get('task_type', '')).strip() != 'park_at_target':
+        return False
+    goal_status = info.get('task_goal_status')
+    if not isinstance(goal_status, dict) or not bool(goal_status.get('reached')):
+        return False
+    try:
+        ego_speed_mps = abs(float(info.get('ego_velo', 0.0)))
+    except (TypeError, ValueError):
+        return False
+    try:
+        park_speed_threshold_mps = float(info.get('task_park_speed_threshold_mps', 0.75))
+    except (TypeError, ValueError):
+        park_speed_threshold_mps = 0.75
+    return ego_speed_mps <= park_speed_threshold_mps
+
+
+def _apply_demo_task_action_override(action, info):
+    if not isinstance(info, dict):
+        return action
+    if str(info.get('task_type', '')).strip() != 'park_at_target':
+        return action
+    goal_status = info.get('task_goal_status')
+    if not isinstance(goal_status, dict):
+        return action
+    try:
+        position_error_m = float(goal_status.get('position_error_m', 1e9))
+    except (TypeError, ValueError):
+        return action
+    try:
+        brake_distance_m = float(info.get('task_park_brake_distance_m', 10.0))
+    except (TypeError, ValueError):
+        brake_distance_m = 10.0
+    if position_error_m > brake_distance_m:
+        return action
+
+    overridden = dict(action)
+    try:
+        ego_speed_mps = abs(float(info.get('ego_velo', 0.0)))
+    except (TypeError, ValueError):
+        ego_speed_mps = None
+    try:
+        park_speed_threshold_mps = float(info.get('task_park_speed_threshold_mps', 0.75))
+    except (TypeError, ValueError):
+        park_speed_threshold_mps = 0.75
+    try:
+        brake_accel_mps2 = float(info.get('task_park_brake_accel_mps2', -2.0))
+    except (TypeError, ValueError):
+        brake_accel_mps2 = -2.0
+    if ego_speed_mps is not None and ego_speed_mps <= park_speed_threshold_mps:
+        overridden['acc'] = 0.0
+        overridden['steer_rate'] = 0.0
+        return overridden
+
+    overridden['acc'] = min(float(overridden.get('acc', 0.0)), brake_accel_mps2)
+
+    try:
+        position_tolerance_m = float(info.get('task_position_tolerance_m', 3.0))
+    except (TypeError, ValueError):
+        position_tolerance_m = 3.0
+    if position_error_m <= max(position_tolerance_m * 1.5, 4.0):
+        overridden['steer_rate'] = 0.0
+    return overridden
+
+
 def _build_reference_worldline(reference_poses, ground_height_fn, forward_offset=REFERENCE_FORWARD_OFFSET_M):
     if reference_poses is None or len(reference_poses) == 0:
         return np.zeros((0, 3), dtype=np.float32)
@@ -630,7 +765,14 @@ def _render_front_overlay(front_image, current_obs, current_info, env, plan_traj
     elif plan_traj is not None and len(plan_traj) > 0:
         draw_candidate(plan_traj, PLAN_COLOR, 4, label=0)
 
-    return overlay
+    task_overlay_state = draw_task_target_overlay(
+        overlay,
+        current_info,
+        intrinsic,
+        front_c2w,
+        draw_status_badge=bool(current_info.get('task_active')),
+    )
+    return overlay, task_overlay_state
 
 
 def _select_overlay_plan(plan_traj, plan_path_length, last_valid_plan, stale_frames):
@@ -724,6 +866,9 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     for name in os.listdir(overlay_front_dir):
         if name.endswith('.jpg'):
             os.remove(os.path.join(overlay_front_dir, name))
+    demo_overlay_records = []
+    demo_task_info = None
+    demo_completion_reason = None
     while not done:
 
         if obs is None or info is None:
@@ -731,6 +876,14 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
             privileged_info = _get_privileged_info(env) if include_privileged_pipe else None
         current_obs, current_info = obs, info
         infos_save.append(current_info)
+        if _is_stop_task_complete(current_info):
+            demo_completion_reason = 'stop_reached'
+            done = True
+            break
+        if _is_park_task_complete(current_info):
+            demo_completion_reason = 'park_reached'
+            done = True
+            break
 
         print('ego pose', current_info['ego_pos'])
 
@@ -940,7 +1093,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
             overlay_info = dict(current_info)
             overlay_info['overlay_candidate_plans'] = current_candidate_pool_plans if current_candidate_pool_plans is not None else current_topk_plans
             overlay_info['overlay_candidate_sources'] = current_candidate_pool_sources
-            vis_rgb[FRONT_CAM_NAME] = _render_front_overlay(
+            vis_rgb[FRONT_CAM_NAME], task_overlay_state = _render_front_overlay(
                 current_obs['rgb'][FRONT_CAM_NAME],
                 current_obs,
                 overlay_info,
@@ -948,6 +1101,18 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
                 overlay_plan,
                 overlay_plan_origin_pose,
             )
+            if current_info.get('task_active'):
+                demo_task_info = {
+                    'task_type': current_info.get('task_type'),
+                    'task_instruction': current_info.get('task_instruction'),
+                    'task_target_pose_local': current_info.get('task_target_pose_local'),
+                    'task_target_world': current_info.get('task_target_world'),
+                    'task_completion_reason': demo_completion_reason,
+                }
+                demo_overlay_records.append({
+                    'frame_idx': int(len(observations_save)),
+                    **task_overlay_state,
+                })
             observations_save.append(vis_rgb)
             cv2.imwrite(
                 os.path.join(overlay_front_dir, f'{len(observations_save) - 1:04d}.jpg'),
@@ -955,6 +1120,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
             )
 
             action = {'acc': acc, 'steer_rate': steer_rate}
+            action = _apply_demo_task_action_override(action, current_info)
             obs, reward, terminated, truncated, info = env.step(action)
             if include_privileged_pipe:
                 privileged_info = _get_privileged_info(env)
@@ -993,6 +1159,20 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
         print(f"Skipping front video export due to error: {exc}")
     with open(os.path.join(output, 'infos.pkl'), 'wb') as wf:
         pickle.dump(infos_save, wf)
+    if demo_task_info:
+        final_goal_status = None
+        if infos_save:
+            last_info = infos_save[-1]
+            if isinstance(last_info, dict):
+                final_goal_status = last_info.get('task_goal_status')
+                if demo_completion_reason:
+                    demo_task_info['task_completion_reason'] = demo_completion_reason
+        with open(os.path.join(output, 'demo_summary.json'), 'w') as wf:
+            json.dump(
+                _summarize_demo_overlay(demo_overlay_records, demo_task_info, final_goal_status),
+                wf,
+                indent=2,
+            )
     
     ground_xyz = np.asarray(o3d.io.read_point_cloud(os.path.join(output, 'ground.ply')).points)
     scene_xyz = np.asarray(o3d.io.read_point_cloud(os.path.join(output, 'scene.ply')).points)
@@ -1041,9 +1221,12 @@ if __name__ == "__main__":
     cfg.base.output_dir = _prefix_output_dir_with_model(cfg.base.output_dir, output_model_slug)
     cfg.base.output_dir = cfg.base.output_dir + planner_output_suffix
 
-    model_path = os.path.join(cfg.base.model_base, cfg.scenario.scene_name)
+    model_path = _resolve_scene_model_path(cfg.base.model_base, cfg.scenario.scene_name)
     model_config = OmegaConf.load(os.path.join(model_path, 'cfg.yaml'))
     cfg.update(model_config)
+    # Keep the resolved shared-cluster scene directory even if the scene-local cfg
+    # still contains stale absolute paths from the machine that created it.
+    cfg.model_path = model_path
     
     output = os.path.join(cfg.base.output_dir, cfg.scenario.scene_name+"_"+cfg.scenario.mode)
     os.makedirs(output, exist_ok=True)

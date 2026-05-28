@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import sys
 
 import cv2
 import numpy as np
@@ -20,16 +21,65 @@ def pose2rt(pose, degrees=False):
     r = SCR.from_matrix(pose[:3, :3]).as_euler('XYZ', degrees=degrees)
     t = pose[:3, 3]
     return r, t
+
+
+def _extract_raw_camera_name(rgb_path):
+    parts = rgb_path.replace("\\", "/").split("/")
+    if len(parts) >= 2:
+        return parts[-2]
+    return rgb_path
+
+
+def _infer_scene_camera_name_map(raw_camera_names):
+    ordered_raw_camera_names = list(dict.fromkeys(raw_camera_names))
+    raw_camera_names = set(ordered_raw_camera_names)
+
+    if "CAM_FRONT" in raw_camera_names:
+        return {name: name for name in raw_camera_names}
+
+    # Waymo processed scenes on this cluster expose three camera folders.
+    # `cam_1` is the front camera; `cam_2`/`cam_3` are the lateral front views.
+    if {"cam_1", "cam_2", "cam_3"}.issubset(raw_camera_names):
+        return {
+            "cam_1": "CAM_FRONT",
+            "cam_2": "CAM_FRONT_LEFT",
+            "cam_3": "CAM_FRONT_RIGHT",
+        }
+
+    # KITTI-360 processed scenes use `cam_0` as the front view. The remaining
+    # folders are kept on the static rig fallback unless we later add a
+    # validated semantic mapping for them.
+    if "cam_0" in raw_camera_names:
+        return {
+            "cam_0": "CAM_FRONT",
+        }
+
+    if ordered_raw_camera_names:
+        return {
+            ordered_raw_camera_names[0]: "CAM_FRONT",
+        }
+
+    return {}
     
 def _load_scene_camera_rig(scene_meta_path, camera_names):
     with open(scene_meta_path, "r") as f:
         meta_data = json.load(f)
 
+    camera_names = {str(name) for name in camera_names}
+    raw_camera_names = []
+    seen_raw = set()
+    for frame in meta_data["frames"]:
+        raw_cam_name = _extract_raw_camera_name(frame["rgb_path"])
+        if raw_cam_name not in seen_raw:
+            raw_camera_names.append(raw_cam_name)
+            seen_raw.add(raw_cam_name)
+    raw_to_semantic = _infer_scene_camera_name_map(raw_camera_names)
+
     first_frame_poses = {}
     first_frame_intrinsics = {}
     for frame in meta_data["frames"]:
-        rgb_path = frame["rgb_path"].replace("\\", "/")
-        cam_name = rgb_path.split("/")[2]
+        raw_cam_name = _extract_raw_camera_name(frame["rgb_path"])
+        cam_name = raw_to_semantic.get(raw_cam_name)
         if cam_name in camera_names and cam_name not in first_frame_poses:
             first_frame_poses[cam_name] = np.array(frame["camtoworld"])
             K = np.array(frame["intrinsics"])
@@ -45,15 +95,15 @@ def _load_scene_camera_rig(scene_meta_path, camera_names):
             break
 
     if "CAM_FRONT" not in first_frame_poses:
-        raise KeyError("Scene metadata does not include CAM_FRONT pose")
-
-    missing = [cam_name for cam_name in camera_names if cam_name not in first_frame_poses]
-    if missing:
-        raise KeyError(f"Scene metadata missing cameras: {missing}")
+        available_raw = ", ".join(raw_camera_names) if raw_camera_names else "<none>"
+        raise KeyError(
+            f"Scene metadata does not include CAM_FRONT pose. "
+            f"raw_cameras={available_raw} semantic_map={raw_to_semantic}"
+        )
 
     front_pose = first_frame_poses["CAM_FRONT"]
     cam_params = {}
-    for cam_name in camera_names:
+    for cam_name in first_frame_poses.keys():
         cam_params[cam_name] = {
             "intrinsic": first_frame_intrinsics[cam_name],
             # Simulation state is anchored to the front-camera trajectory in ground_param.pkl.
@@ -77,10 +127,18 @@ def load_camera_cfg(cfg, model_path=None):
     if model_path is not None:
         scene_meta_path = os.path.join(model_path, "meta_data.json")
         if os.path.exists(scene_meta_path):
-            scene_cam_params = _load_scene_camera_rig(scene_meta_path, camera_names)
-            for cam_name, params in scene_cam_params.items():
-                cam_params[cam_name]['intrinsic'] = params['intrinsic']
-                cam_params[cam_name]['front2cam'] = params['front2cam']
+            try:
+                scene_cam_params = _load_scene_camera_rig(scene_meta_path, camera_names)
+            except Exception as exc:
+                print(
+                    f"[camera-rig] warning: failed to infer scene camera rig from "
+                    f"{scene_meta_path}: {exc}. Falling back to static config.",
+                    file=sys.stderr,
+                )
+            else:
+                for cam_name, params in scene_cam_params.items():
+                    cam_params[cam_name]['intrinsic'] = params['intrinsic']
+                    cam_params[cam_name]['front2cam'] = params['front2cam']
         
     rect_mat = np.eye(4)
     if 'cam_rect' in cfg:

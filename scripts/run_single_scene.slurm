@@ -11,7 +11,8 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-/bigdata/aidan/HUGSIM}"
 PLANNER_NAME="${PLANNER_NAME:-rap}"
 SCENARIO_PATH="${SCENARIO_PATH:-configs/benchmark/nuscenes/scene-0383-easy-00.yaml}"
-BASE_PATH="${BASE_PATH:-configs/sim/nuscenes_base_local.yaml}"
+BASE_PATH="${BASE_PATH:-}"
+CAMERA_PATH="${CAMERA_PATH:-}"
 SIM_CUDA="${SIM_CUDA:-inherit}"
 AD_CUDA="${AD_CUDA:-inherit}"
 SETUP_VLM_ENV="${SETUP_VLM_ENV:-0}"
@@ -34,6 +35,7 @@ echo "node=${SLURMD_NODENAME:-unknown}"
 echo "planner=${PLANNER_NAME}"
 echo "scenario=${SCENARIO_PATH}"
 echo "base=${BASE_PATH}"
+echo "camera=${CAMERA_PATH}"
 echo "sim_cuda=${SIM_CUDA}"
 echo "ad_cuda=${AD_CUDA}"
 echo "cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
@@ -80,9 +82,16 @@ if [[ "${SETUP_VLM_ENV}" == "1" && "${PLANNER_NAME}" == "rap_vlm" ]]; then
     bash scripts/setup_vlm_env.sh
 fi
 
+if [[ "${PLANNER_NAME}" == "rap_vlm" && "${MODEL_ID:-}" == *"Qwen/Qwen3.6-"* ]]; then
+    export VLM_ENV_DIR="${VLM_ENV_DIR:-/bigdata/aidan/.home/envs/vlm_qwen36}"
+    export PLANNER_VLM_PYTHON_BIN="${PLANNER_VLM_PYTHON_BIN:-${VLM_ENV_DIR}/bin/python}"
+    echo "planner_vlm_python_bin=${PLANNER_VLM_PYTHON_BIN}"
+fi
+
 export RAP_DEVICE_OVERRIDE
 export DRIVOR_DEVICE_OVERRIDE
 export PLANNER_VLM_DEVICE_OVERRIDE
 
 BASE_PATH="${BASE_PATH}" \
+CAMERA_PATH="${CAMERA_PATH}" \
 bash scripts/run_single_nuscenes_scene.sh "${PLANNER_NAME}" "${SCENARIO_PATH}" "${SIM_CUDA}" "${AD_CUDA}"
