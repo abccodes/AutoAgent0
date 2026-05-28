@@ -180,6 +180,14 @@ def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: D
       cam_params[cam_name]["intrinsic"] with W,H,cx,cy,fovx,fovy
       cam_params[cam_name]["l2c_rot"] (3 angles deg) and l2c_trans (3 floats) OR cam_params[cam_name]['l2c'] a 4x4 matrix
     """
+    # Ensure image is a numpy array (PIL Image or other types may appear)
+    if rgb_image is not None and not isinstance(rgb_image, np.ndarray):
+        try:
+            rgb_image = np.asarray(rgb_image)
+        except Exception:
+            LOG.exception("Failed to convert image for %s to numpy array; falling back to blank frame", cam_name)
+            rgb_image = None
+
     # intrinsics -> 3x3 matrix
     intr = cam_params.get("intrinsic", {})
     W = float(intr.get("W", cam_params.get("W", 800)))
@@ -570,6 +578,76 @@ def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
             return obj
 
         features = _normalize_paths(features)
+        # Sanitize list-like feature entries so np.stack in SparseDrive data_adapter
+        # does not encounter object-dtype arrays (e.g., mixed None, PIL, Path).
+        import numbers
+
+        def _sanitize(obj, path="root"):
+            if isinstance(obj, dict):
+                for k, v in list(obj.items()):
+                    obj[k] = _sanitize(v, f"{path}.{k}")
+                return obj
+            if isinstance(obj, list):
+                # find first element that can be converted to numeric ndarray
+                first_valid = None
+                for x in obj:
+                    if x is not None:
+                        try:
+                            arr = np.asarray(x)
+                            if arr.dtype != object:
+                                first_valid = arr
+                                break
+                        except Exception:
+                            continue
+                if first_valid is None:
+                    return obj
+                target_shape = getattr(first_valid, "shape", None)
+                target_dtype = first_valid.dtype
+                new_list = []
+                for i, item in enumerate(obj):
+                    if item is None:
+                        try:
+                            new_list.append(np.zeros(target_shape, dtype=target_dtype))
+                        except Exception:
+                            new_list.append(np.zeros((), dtype=target_dtype))
+                        LOG.warning("Sanitized None element in features at %s[%d]", path, i)
+                        continue
+                    try:
+                        arr = np.asarray(item)
+                        if arr.dtype == object:
+                            # Try element-wise conversion if this is an array-of-objects
+                            try:
+                                arr = np.stack([np.asarray(e) for e in item])
+                            except Exception:
+                                LOG.warning("Failed to stack object-array at %s[%d]; replacing with zeros", path, i)
+                                arr = np.zeros(target_shape, dtype=target_dtype)
+                        # cast to target dtype when possible
+                        try:
+                            arr = arr.astype(target_dtype)
+                        except Exception:
+                            pass
+                        # If shape mismatches, try to broadcast or replace with zeros
+                        if target_shape is not None and getattr(arr, "shape", None) != target_shape:
+                            try:
+                                arr = np.broadcast_to(arr, target_shape).astype(target_dtype)
+                            except Exception:
+                                LOG.warning("Feature element at %s[%d] has mismatched shape; replacing with zeros", path, i)
+                                arr = np.zeros(target_shape, dtype=target_dtype)
+                        new_list.append(arr)
+                    except Exception:
+                        LOG.exception("Failed sanitizing feature element at %s[%d]; replacing with zeros", path, i)
+                        try:
+                            new_list.append(np.zeros(target_shape, dtype=target_dtype))
+                        except Exception:
+                            new_list.append(np.zeros((), dtype=target_dtype))
+                return new_list
+            # other scalar or array-like types
+            return obj
+
+        try:
+            features = _sanitize(features)
+        except Exception:
+            LOG.exception("Feature sanitization failed; proceeding with original features")
         # Keep `image_path` present; SparseDrive feature builder expects it.
         features, targets, token = feature_builder.pipeline(features, targets, token, test_mode=True, vis=False)
         return features, targets, token
