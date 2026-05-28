@@ -27,10 +27,10 @@ rap:
     device: auto
     python_bin: /bigdata/aidan/.home/envs/vlm/bin/python
     max_new_tokens: 300
-    intervention_max_new_tokens: 120
+    intervention_max_new_tokens: 256
     candidate_limit: 10
-    timeout_sec: 300.0
-    intervention_timeout_sec: 300.0
+    timeout_sec: 1200.0
+    intervention_timeout_sec: 1200.0
     save_debug_artifacts: true
     debug_dir_name: vlm_debug
     carry_previous_enabled: true

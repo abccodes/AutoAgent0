@@ -22,10 +22,10 @@ drivor:
     device: auto
     python_bin: /bigdata/aidan/.home/envs/vlm/bin/python
     max_new_tokens: 300
-    intervention_max_new_tokens: 120
+    intervention_max_new_tokens: 256
     candidate_limit: 10
-    timeout_sec: 180.0
-    intervention_timeout_sec: 180.0
+    timeout_sec: 1200.0
+    intervention_timeout_sec: 1200.0
     save_debug_artifacts: true
     debug_dir_name: vlm_debug
     carry_previous_enabled: true
@@ -43,3 +43,13 @@ drivor:
     q_carry_score_decay: 0.0
     display_default_trajectories: false
     include_default_candidates: false
+
+  rule_based_merge:
+    enabled: false
+    repo_root: /bigdata/aidan/HUGSIM/.external/Rule-Planner
+    python_bin: /bigdata/aidan/.home/envs/drivor/bin/python3.8
+    config: /bigdata/aidan/HUGSIM/.external/Rule-Planner/config_example.yaml
+    device: cpu
+    topk: 3
+    include_privileged_info: true
+    source_name: rule_based

@@ -17,6 +17,7 @@ from PIL import Image
 from scipy.spatial.transform import Rotation as SCR
 
 from planners.common.candidate_visuals import get_candidate_visual_style
+from planners.common.task_overlay import draw_task_target_overlay
 
 LOG = logging.getLogger(__name__)
 PLAN_DT_SEC = 0.5
@@ -58,6 +59,12 @@ class VLMSelectorConfig:
     carry_previous_enabled: bool = True
     carry_previous_min_path_m: float = 0.5
     carry_previous_min_points: int = 2
+    planner_gate_enabled: bool = False
+    planner_gate_camera_mode: str = ""
+    planner_gate_max_new_tokens: int = 120
+    planner_gate_timeout_sec: float = 10.0
+    planner_gate_default_planner: str = "learned"
+    planner_gate_save_debug_artifacts: bool = True
     adaptive_replan_mode: str = "log_only"
     latency_tracking_mode: str = "full_timeline"
     q_enabled: bool = True
@@ -293,6 +300,14 @@ def render_candidate_overlay(
                     1,
                     cv2.LINE_AA,
                 )
+
+    draw_task_target_overlay(
+        overlay,
+        info,
+        intrinsic,
+        camera_c2w,
+        draw_status_badge=False,
+    )
     return overlay
 
 
@@ -440,6 +455,7 @@ def resolve_stage_camera_order(cfg: VLMSelectorConfig, stage: str) -> Tuple[str,
 def build_scoring_prompt(
     candidate_rows: Sequence[Dict[str, object]],
     route_instruction: str,
+    task_target_hint: Optional[str] = None,
     intervention_corrective_action: Optional[str] = None,
     current_ego_speed_mps: Optional[float] = None,
     current_ego_accel_mps2: Optional[float] = None,
@@ -474,6 +490,13 @@ def build_scoring_prompt(
 - Treat that corrective action as advisory context about the immediate correction, not as a replacement for the route instruction.
 - You should still score candidates against the original route instruction and the visible scene.
 - The corrective action and the route instruction may differ; use the images and candidate metadata to decide what is best in this frame.
+""".strip()
+    task_target_guidance = ""
+    if task_target_hint:
+        task_target_guidance = f"""
+- A task target marker is rendered only in the front view.
+- The target marker indicates the intended goal location for the instruction: "{task_target_hint}".
+- Prefer candidates that move toward that marked target when it is safe and consistent with the scene.
 """.strip()
     return f"""
 You are an autonomous-driving trajectory scorer performing the final action-selection stage.
@@ -511,6 +534,7 @@ Scoring principles:
 - Respect lane rules and avoid unnecessary lane changes.
 - If all candidates are imperfect, prefer the least risky one.
 {default_candidate_guidance}
+{task_target_guidance}
 {corrective_action_guidance}
 
 Important:
@@ -536,6 +560,7 @@ Return ONLY valid JSON in this exact schema:
 def build_intervention_prompt(
     baseline_candidate_row: Dict[str, object],
     route_instruction: str,
+    task_target_hint: Optional[str] = None,
     camera_order: Sequence[str] = ("CAM_FRONT",),
 ) -> str:
     candidate_text = format_candidate_text([baseline_candidate_row])
@@ -548,8 +573,15 @@ def build_intervention_prompt(
 - Do not treat side or rear clutter alone as a reason to intervene unless it indicates a real conflict relevant to the next maneuver.
 - Because only the front image contains the overlaid trajectory, judge where the path goes from the front view and use the other views only to decide whether surrounding context makes intervention necessary.
 """.strip()
+    task_target_guidance = ""
+    if task_target_hint:
+        task_target_guidance = f"""
+- A task target marker is rendered only in the front view.
+- The target marker indicates the intended goal location for the instruction: "{task_target_hint}".
+- Use it as route context, but do not force motion toward it when immediate safety says otherwise.
+""".strip()
     return f"""
-You are an autonomous-driving self-reflective intervention module deciding whether the current baseline action should be revised before execution.
+You are an autonomous-driving self-reflective intervention gate deciding whether the current baseline action should be revised before execution.
 
 Inputs:
 - Visual context: {camera_line_1}
@@ -561,6 +593,7 @@ Task:
 - Treat the baseline trajectory as a proposed action.
 - Perform counterfactual reasoning about what is likely to happen over the next short horizon if this exact baseline action is executed.
 - Then decide whether revision is needed before execution.
+- Return JSON only. Do not describe the images. Do not answer any other question. Do not include markdown, code fences, or extra prose.
 
 Decision policy:
 - Use counterfactual reasoning to judge whether revising the baseline is necessary before the next replan, not merely whether some alternative might be cleaner.
@@ -571,11 +604,13 @@ Decision policy:
 - Borderline or low-margin cases may still be marked as intervention-worthy, but they should usually receive low severity only when the issue is minor enough that no corrective override is needed yet.
 - In multiview mode, use extra camera views to judge surrounding safety context, not to reinterpret the path geometry shown on the front image.
 {multiview_guidance}
+{task_target_guidance}
 
 Corrective action:
 - If intervention is needed, provide one short-horizon corrective action.
 - The corrective action must be exactly one of: "left", "right", or "straight".
 - The corrective action is an advisory revision intent for the next maneuver, not a guaranteed final decision.
+- If "should_intervene" is false, set "corrective_action" to "straight".
 
 Reasoning style:
 - Use concise counterfactual reasoning rather than loose description.
@@ -606,7 +641,90 @@ Return ONLY valid JSON in this exact schema:
   "should_intervene": <true or false>,
   "severity_score": <float between 0.0 and 1.0>,
   "corrective_action": "<left or right or straight>",
+  "confidence": <float between 0.0 and 1.0>,
   "reasoning": "<short causal explanation for why intervention is or is not needed>"
+}}
+""".strip()
+
+
+def _summarize_gate_candidates(
+    candidate_rows: Sequence[Dict[str, object]],
+    *,
+    label: str,
+    limit: int = 3,
+) -> str:
+    if not candidate_rows:
+        return f"{label}: none"
+
+    lines = [f"{label}:"]
+    for idx, row in enumerate(candidate_rows[: max(1, int(limit))]):
+        plan = np.asarray(row.get("local_plan", []), dtype=np.float32)
+        summary = summarize_candidate(plan.tolist())
+        lines.append(
+            (
+                f"- option_{idx} | source={row.get('source','unknown')} | "
+                f"score={float(row.get('proposal_score', 0.0)):.3f} | "
+                f"path_length_m={summary['path_length_m']} | "
+                f"forward_progress_m={summary['forward_progress_m']} | "
+                f"end={summary['end']} | "
+                f"x_range=[{summary['min_x']},{summary['max_x']}] | "
+                f"y_range=[{summary['min_y']},{summary['max_y']}]"
+            )
+        )
+    return "\n".join(lines)
+
+
+def build_planner_gate_prompt(
+    *,
+    learned_candidate_rows: Sequence[Dict[str, object]],
+    rule_based_candidate_rows: Sequence[Dict[str, object]],
+    route_instruction: str,
+    task_target_hint: Optional[str] = None,
+    camera_order: Sequence[str] = ("CAM_FRONT",),
+) -> str:
+    camera_line_1, camera_line_2 = describe_vlm_camera_inputs(camera_order)
+    learned_text = _summarize_gate_candidates(learned_candidate_rows, label="Learned planner candidates")
+    rule_text = _summarize_gate_candidates(rule_based_candidate_rows, label="Rule-based planner candidates")
+    task_target_guidance = ""
+    if task_target_hint:
+        task_target_guidance = f"""
+- A task target marker is rendered only in the front view.
+- The target marker indicates the intended goal location for the instruction: "{task_target_hint}".
+""".strip()
+    return f"""
+You are an autonomous-driving planner gate.
+
+Inputs:
+- Visual context: {camera_line_1}
+- Camera interpretation: {camera_line_2}
+- Route objective: "{route_instruction}"
+- Two planner families are available for the next short horizon:
+  - learned planner
+  - rule-based planner
+
+Task:
+- Decide which planner family should be trusted for the next decision step.
+- Do NOT pick a trajectory index.
+- Return only one planner family: "learned" or "rule_based".
+- Keep the response compact and return only valid JSON.
+
+Decision principles:
+- Choose the planner family whose candidate set looks more likely to be safe, route-consistent, lane-aligned, and useful for short-horizon progress.
+- Prefer the learned planner when it already has good route-consistent options and no obvious need for recovery.
+- Prefer the rule-based planner when the scene looks like it needs conservative recovery, stronger boundary respect, or a safer correction than the learned options provide.
+- This is a short-horizon decision only; judge which planner is more appropriate for the next step, not the entire mission.
+{task_target_guidance}
+
+Planner candidate summaries:
+{learned_text}
+
+{rule_text}
+
+Return ONLY valid JSON in this exact schema:
+{{
+  "selected_planner": "<learned or rule_based>",
+  "confidence": <float between 0 and 1>,
+  "reasoning": "<short causal explanation for why this planner family is better for the next step>"
 }}
 """.strip()
 
@@ -646,6 +764,24 @@ def command_to_route_instruction(command: object) -> str:
         return "Drive safely and choose the most reasonable trajectory."
 
 
+def resolve_route_instruction(info: Dict[str, object]) -> str:
+    task_instruction = info.get("task_instruction")
+    if isinstance(task_instruction, str) and task_instruction.strip():
+        return task_instruction.strip()
+    return command_to_route_instruction(info.get("command"))
+
+
+def describe_task_target_hint(info: Dict[str, object]) -> Optional[str]:
+    task_type = str(info.get("task_type", "")).strip()
+    if not task_type:
+        return None
+    if task_type == "park_at_target":
+        return "park target"
+    if task_type == "stop_at_target":
+        return "stop target"
+    return "goal target"
+
+
 def normalize_corrective_action(value: object) -> Optional[str]:
     if value is None:
         return None
@@ -676,6 +812,13 @@ def normalize_corrective_action(value: object) -> Optional[str]:
     if "right" in text:
         return "right"
     return None
+
+
+def extract_current_ego_speed_mps(info: Dict[str, object]) -> Optional[float]:
+    try:
+        return float(info["ego_velo"])
+    except Exception:
+        return None
 
 
 class Qwen3TrajectorySelector:
@@ -1214,7 +1357,8 @@ class VLMPlanSelector:
         default_selected_index: int,
         default_selected_source: str,
     ) -> Dict[str, object]:
-        route_instruction = command_to_route_instruction(info.get("command"))
+        route_instruction = resolve_route_instruction(info)
+        task_target_hint = describe_task_target_hint(info)
         scoring_camera_order = resolve_stage_camera_order(self.cfg, "scoring")
         intervention_camera_order = resolve_stage_camera_order(self.cfg, "intervention")
         timestamp = float(info.get("timestamp", 0.0))
@@ -1346,6 +1490,7 @@ class VLMPlanSelector:
             intervention_prompt = build_intervention_prompt(
                 candidate_rows[default_selected_index],
                 route_instruction,
+                task_target_hint=task_target_hint,
                 camera_order=intervention_camera_order,
             )
             try:
@@ -1522,6 +1667,7 @@ class VLMPlanSelector:
             scoring_prompt = build_scoring_prompt(
                 candidate_rows,
                 scoring_route_instruction,
+                task_target_hint=task_target_hint,
                 intervention_corrective_action=(
                     intervention_action_for_scoring
                 ),
@@ -1763,6 +1909,172 @@ class VLMPlanSelector:
             "intervention_reasoning": intervention_reasoning,
             "intervention_elapsed_sec": intervention_elapsed_sec,
             "intervention_error": intervention_error,
+        }
+
+    def maybe_select_planner(
+        self,
+        *,
+        frame_index: int,
+        camera_images: Dict[str, np.ndarray],
+        info: Dict[str, object],
+        learned_candidate_rows: Sequence[Dict[str, object]],
+        rule_based_candidate_rows: Sequence[Dict[str, object]],
+    ) -> Dict[str, object]:
+        route_instruction = resolve_route_instruction(info)
+        task_target_hint = describe_task_target_hint(info)
+        default_planner = str(self.cfg.planner_gate_default_planner or "learned").strip().lower()
+        if default_planner not in {"learned", "rule_based"}:
+            default_planner = "learned"
+
+        if not self.cfg.enabled or not self.cfg.planner_gate_enabled:
+            return {
+                "selected_planner": default_planner,
+                "confidence": None,
+                "reasoning": "planner_gate_disabled",
+                "elapsed_sec": 0.0,
+                "error": "planner_gate_disabled",
+                "timed_out": False,
+                "prompt_char_count": 0,
+                "image_count": 0,
+            }
+
+        if not learned_candidate_rows:
+            return {
+                "selected_planner": "rule_based" if rule_based_candidate_rows else default_planner,
+                "confidence": None,
+                "reasoning": "missing_learned_candidates",
+                "elapsed_sec": 0.0,
+                "error": "missing_learned_candidates",
+                "timed_out": False,
+                "prompt_char_count": 0,
+                "image_count": 0,
+            }
+        if not rule_based_candidate_rows:
+            return {
+                "selected_planner": default_planner,
+                "confidence": None,
+                "reasoning": "missing_rule_based_candidates",
+                "elapsed_sec": 0.0,
+                "error": "missing_rule_based_candidates",
+                "timed_out": False,
+                "prompt_char_count": 0,
+                "image_count": 0,
+            }
+
+        selector = self._ensure_selector()
+        if selector is None:
+            return {
+                "selected_planner": default_planner,
+                "confidence": None,
+                "reasoning": "selector_unavailable",
+                "elapsed_sec": 0.0,
+                "error": self._disabled_reason or "selector_unavailable",
+                "timed_out": False,
+                "prompt_char_count": 0,
+                "image_count": 0,
+            }
+
+        camera_order = resolve_vlm_camera_order(self.cfg.planner_gate_camera_mode or self.cfg.camera_mode)
+        gate_candidate_rows = build_candidate_rows(
+            list(learned_candidate_rows) + list(rule_based_candidate_rows),
+            current_ego_speed_mps=extract_current_ego_speed_mps(info),
+        )
+        overlays = render_candidate_overlays(
+            camera_images,
+            info,
+            gate_candidate_rows,
+            camera_order=camera_order,
+        )
+        frame_stem = f"frame_{frame_index:04d}"
+        image_paths: List[Path] = []
+        temp_paths: List[Path] = []
+        for cam_name in camera_order:
+            overlay = overlays.get(cam_name)
+            if overlay is None:
+                continue
+            if self.cfg.planner_gate_save_debug_artifacts and self.cfg.save_debug_artifacts:
+                image_path = self.debug_dir / f"{frame_stem}_planner_gate_{cam_name}.jpg"
+            else:
+                image_path = self.output_dir / f"{frame_stem}_planner_gate_{cam_name}_tmp.jpg"
+                temp_paths.append(image_path)
+            cv2.imwrite(str(image_path), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+            image_paths.append(image_path)
+
+        prompt = build_planner_gate_prompt(
+            learned_candidate_rows=learned_candidate_rows,
+            rule_based_candidate_rows=rule_based_candidate_rows,
+            route_instruction=route_instruction,
+            task_target_hint=task_target_hint,
+            camera_order=camera_order,
+        )
+        elapsed_sec = 0.0
+        parsed = None
+        error = None
+        try:
+            result = selector.infer_prompt(
+                image_paths=image_paths,
+                prompt=prompt,
+                max_new_tokens=self.cfg.planner_gate_max_new_tokens,
+                timeout_sec=self.cfg.planner_gate_timeout_sec,
+            )
+            elapsed_sec = float(result.get("elapsed_sec", 0.0))
+            parsed = result.get("parsed_output")
+            if not isinstance(parsed, dict):
+                error = str(result.get("error") or "invalid_planner_gate_output")
+        except Exception as exc:
+            LOG.exception("Planner gate inference failed, falling back to %s", default_planner)
+            error = str(exc)
+            result = None
+
+        selected_planner = default_planner
+        confidence = None
+        reasoning = None
+        timed_out = elapsed_sec > float(self.cfg.planner_gate_timeout_sec)
+        if isinstance(parsed, dict):
+            raw_planner = str(parsed.get("selected_planner", "")).strip().lower()
+            if raw_planner in {"learned", "rule_based"}:
+                selected_planner = raw_planner
+            else:
+                error = error or f"invalid_planner_choice:{raw_planner}"
+            try:
+                confidence = float(parsed.get("confidence", 0.0))
+            except Exception:
+                confidence = None
+            reasoning = parsed.get("reasoning")
+        if timed_out:
+            error = error or f"planner_gate_timeout:{elapsed_sec:.3f}"
+            selected_planner = default_planner
+
+        if self.cfg.planner_gate_save_debug_artifacts and self.cfg.save_debug_artifacts:
+            gate_payload = {
+                "frame_index": frame_index,
+                "route_instruction": route_instruction,
+                "default_planner": default_planner,
+                "selected_planner": selected_planner,
+                "confidence": confidence,
+                "reasoning": reasoning,
+                "elapsed_sec": elapsed_sec,
+                "timed_out": timed_out,
+                "error": error,
+                "prompt_char_count": len(prompt),
+                "image_count": len(image_paths),
+                "learned_candidate_count": len(learned_candidate_rows),
+                "rule_based_candidate_count": len(rule_based_candidate_rows),
+            }
+            gate_result_path = self.debug_dir / f"{frame_stem}_planner_gate_result.json"
+            gate_result_path.write_text(json.dumps(gate_payload, indent=2), encoding="utf-8")
+        for temp_path in temp_paths:
+            temp_path.unlink(missing_ok=True)
+
+        return {
+            "selected_planner": selected_planner,
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "elapsed_sec": elapsed_sec,
+            "error": error,
+            "timed_out": timed_out,
+            "prompt_char_count": len(prompt),
+            "image_count": len(image_paths),
         }
 
     def finalize(self) -> None:
