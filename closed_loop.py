@@ -1090,6 +1090,12 @@ if __name__ == "__main__":
     parser.add_argument('--ad_cuda', default="1")
     parser.add_argument('--include_privileged_pipe', default=False)
     args = parser.parse_args()
+    # Coerce include_privileged_pipe to a proper boolean since CLI may pass string
+    try:
+        val = args.include_privileged_pipe
+        args.include_privileged_pipe = str(val).strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        args.include_privileged_pipe = False
 
     scenario_config = OmegaConf.load(args.scenario_path)
     base_config = OmegaConf.load(args.base_path)

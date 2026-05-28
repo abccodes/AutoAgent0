@@ -475,7 +475,10 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
             try:
                 tmp_path = save_sparsedrive_frame_to_tmp(img, info.get("timestamp", 0), hug_name)
                 if tmp_path is not None:
-                    cam_obj.image_path = tmp_path
+                    try:
+                        cam_obj.image_path = str(tmp_path)
+                    except Exception:
+                        cam_obj.image_path = tmp_path
             except Exception:
                 LOG.exception("Failed to save temp frame for camera %s", hug_name)
 
@@ -546,6 +549,23 @@ def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
     targets: Dict[str, torch.Tensor] = {}
     token = None
     try:
+        # Normalize any pathlib.Path objects (or other non-string scalars) to plain strings
+        def _normalize_paths(obj):
+            if isinstance(obj, dict):
+                return {k: _normalize_paths(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_normalize_paths(v) for v in obj]
+            if isinstance(obj, tuple):
+                return tuple(_normalize_paths(v) for v in obj)
+            try:
+                from pathlib import Path as _Path
+            except Exception:
+                _Path = None
+            if _Path is not None and isinstance(obj, _Path):
+                return str(obj)
+            return obj
+
+        features = _normalize_paths(features)
         features, targets, token = feature_builder.pipeline(features, targets, token, test_mode=True, vis=False)
         return features, targets, token
     except Exception:
