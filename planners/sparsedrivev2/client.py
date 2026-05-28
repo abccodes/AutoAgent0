@@ -514,6 +514,15 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
             cam_r2=cams_kwargs.get("cam_r2"),  # None - disabled in config
             cam_b0=cams_kwargs.get("cam_b0"),
         )
+        # Ensure every Camera object has an `image_path` attribute (string).
+        for k, cam_obj in cams_kwargs.items():
+            try:
+                if not hasattr(cam_obj, "image_path") or cam_obj.image_path is None:
+                    cam_obj.image_path = ""
+                else:
+                    cam_obj.image_path = str(cam_obj.image_path)
+            except Exception:
+                LOG.exception("Failed to normalize image_path for camera %s", k)
         cameras_list.append(cameras_dataclass)
         # no lidar provided -> push empty Lidar
         lidars_list.append(Lidar())
@@ -566,29 +575,7 @@ def prepare_sparsedrive_features(feature_builder, agent_input: AgentInput):
             return obj
 
         features = _normalize_paths(features)
-        # Remove any image_path entries from the features tree to avoid
-        # non-numeric object arrays (strings/paths) being passed into
-        # numpy.stack -> torch.tensor in the SparseDrive data_adapter.
-        def _remove_image_path(obj):
-            if isinstance(obj, dict):
-                if "image_path" in obj:
-                    try:
-                        obj.pop("image_path", None)
-                    except Exception:
-                        pass
-                for k, v in list(obj.items()):
-                    _remove_image_path(v)
-            elif isinstance(obj, list):
-                for item in obj:
-                    _remove_image_path(item)
-            elif isinstance(obj, tuple):
-                for item in obj:
-                    _remove_image_path(item)
-
-        try:
-            _remove_image_path(features)
-        except Exception:
-            LOG.exception("Failed to strip image_path from features")
+        # Keep `image_path` present; SparseDrive feature builder expects it.
         features, targets, token = feature_builder.pipeline(features, targets, token, test_mode=True, vis=False)
         return features, targets, token
     except Exception:
