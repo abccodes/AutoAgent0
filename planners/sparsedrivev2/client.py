@@ -181,7 +181,11 @@ def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: D
       cam_params[cam_name]["l2c_rot"] (3 angles deg) and l2c_trans (3 floats) OR cam_params[cam_name]['l2c'] a 4x4 matrix
     """
     # Ensure image is a numpy array (PIL Image or other types may appear)
+    if rgb_image is None:
+        LOG.error("rgb_image is None")
+
     if rgb_image is not None and not isinstance(rgb_image, np.ndarray):
+        LOG.info("rgb_image isn't none, so we will try to convert to np array: ", type(rgb_image))
         try:
             rgb_image = np.asarray(rgb_image)
         except Exception:
