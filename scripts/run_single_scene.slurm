@@ -94,4 +94,4 @@ export PLANNER_VLM_DEVICE_OVERRIDE
 
 BASE_PATH="${BASE_PATH}" \
 CAMERA_PATH="${CAMERA_PATH}" \
-bash scripts/run_single_nuscenes_scene.sh "${PLANNER_NAME}" "${SCENARIO_PATH}" "${SIM_CUDA}" "${AD_CUDA}"
+bash scripts/baselines/common/run_single_nuscenes_scene.sh "${PLANNER_NAME}" "${SCENARIO_PATH}" "${SIM_CUDA}" "${AD_CUDA}"
