@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -37,9 +38,16 @@ def _log(message: str) -> None:
     sys.stderr.flush()
 
 
+def _strip_empty_think_block(text: str) -> str:
+    return re.sub(r"<think>\s*</think>\s*", "", text, count=1, flags=re.DOTALL)
+
+
 def main() -> int:
     args = parse_args()
     started_main = time.time()
+    _log(f"python_executable={sys.executable}")
+    _log(f"python_version={sys.version.replace(chr(10), ' ')}")
+    _log(f"sys_path_head={sys.path[:5]}")
     _log(
         f"startup model_id={args.model_id} device={args.device} max_new_tokens={args.max_new_tokens} "
         f"temperature={args.temperature} top_p={args.top_p} top_k={args.top_k} enable_thinking={args.enable_thinking}"
@@ -84,6 +92,7 @@ def main() -> int:
     processor_started = time.time()
     processor = AutoProcessor.from_pretrained(args.model_id, use_fast=False)
     _log(f"processor_load_done elapsed_sec={time.time() - processor_started:.3f} total_startup_sec={time.time() - started_main:.3f}")
+    tokenizer = getattr(processor, "tokenizer", None)
     sys.stdout.write(json.dumps({"status": "ready"}) + "\n")
     sys.stdout.flush()
 
@@ -104,39 +113,46 @@ def main() -> int:
                 f"prompt_chars={len(str(payload.get('prompt', '')))}"
             )
             tokenize_started = time.time()
+            messages = [
+                {
+                    "role": "user",
+                    "content": (
+                        ([{"type": "image", "image": image} for image in images] + [{"type": "text", "text": payload["prompt"]}])
+                        if use_qwen36_loader
+                        else ([{"type": "image"} for _ in images] + [{"type": "text", "text": payload["prompt"]}])
+                    ),
+                }
+            ]
             if use_qwen36_loader:
-                # Qwen3.6 uses a Qwen3_5 model class with a VL processor.
-                # Let the processor build the full multimodal inputs directly and
-                # disable default thinking mode so the model returns direct JSON.
-                messages = [
-                    {
-                        "role": "user",
-                        "content": (
-                            [{"type": "image", "image": image} for image in images]
-                            + [{"type": "text", "text": payload["prompt"]}]
-                        ),
-                    }
-                ]
-                inputs = processor.apply_chat_template(
-                    messages,
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    return_dict=True,
-                    return_tensors="pt",
-                    enable_thinking=enable_thinking,
-                )
+                try:
+                    rendered_text = processor.apply_chat_template(
+                        messages,
+                        add_generation_prompt=True,
+                        tokenize=False,
+                        enable_thinking=enable_thinking,
+                    )
+                except TypeError:
+                    rendered_text = processor.apply_chat_template(
+                        messages,
+                        add_generation_prompt=True,
+                        tokenize=False,
+                    )
+                rendered_text = _strip_empty_think_block(rendered_text)
+                inputs = processor(text=rendered_text, images=images, return_tensors="pt")
             else:
-                messages = [
-                    {
-                        "role": "user",
-                        "content": ([{"type": "image"} for _ in images] + [{"type": "text", "text": payload["prompt"]}]),
-                    }
-                ]
-                text = processor.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
+                try:
+                    text = processor.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=enable_thinking,
+                    )
+                except TypeError:
+                    text = processor.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
                 inputs = processor(text=text, images=images, return_tensors="pt")
             _log(
                 "tokenize_done "
@@ -144,6 +160,7 @@ def main() -> int:
                 f"input_ids_len={getattr(inputs.get('input_ids'), 'shape', ['?','?'])[-1] if 'input_ids' in inputs else 'na'} "
                 f"pixel_values_shape={tuple(inputs['pixel_values'].shape) if 'pixel_values' in inputs and hasattr(inputs['pixel_values'], 'shape') else 'na'}"
             )
+            prompt_tokens = int(inputs["input_ids"].shape[-1]) if "input_ids" in inputs else 0
 
             input_device = getattr(model, "device", None)
             if input_device is None:
@@ -164,14 +181,21 @@ def main() -> int:
                 "max_new_tokens": max_new_tokens,
                 "do_sample": do_sample,
             }
-            if do_sample:
-                generate_kwargs["temperature"] = max(temperature, 1e-5)
-                generate_kwargs["top_p"] = min(max(top_p, 0.0), 1.0)
-                if top_k > 0:
-                    generate_kwargs["top_k"] = top_k
-            tokenizer = getattr(processor, "tokenizer", None)
+            if use_qwen36_loader and tokenizer is not None:
+                bad_words_ids = []
+                for phrase in ("<think>", "</think>"):
+                    token_ids = tokenizer.encode(phrase, add_special_tokens=False)
+                    if token_ids:
+                        bad_words_ids.append(token_ids)
+                if bad_words_ids:
+                    generate_kwargs["bad_words_ids"] = bad_words_ids
+                if do_sample:
+                    generate_kwargs["temperature"] = max(temperature, 1e-5)
+                    generate_kwargs["top_p"] = min(max(top_p, 0.0), 1.0)
+                    if top_k > 0:
+                        generate_kwargs["top_k"] = top_k
             streamer = None
-            if tokenizer is not None:
+            if tokenizer is not None and not use_qwen36_loader:
                 streamer = TextIteratorStreamer(
                     tokenizer,
                     skip_prompt=True,
@@ -253,22 +277,79 @@ def main() -> int:
                 f"elapsed_sec={time.time() - generate_started:.3f} "
                 f"stream_chunks={len(stream_parts)} stream_chars={sum(len(part) for part in stream_parts)}"
             )
+            trimmed_ids = []
             if stream_parts:
                 raw_output = "".join(stream_parts)
+                if tokenizer is not None and raw_output:
+                    try:
+                        trimmed_ids = [tokenizer.encode(raw_output, add_special_tokens=False)]
+                    except Exception as exc:
+                        _log(f"completion_token_estimate_error {repr(exc)}")
             else:
-                trimmed_ids = []
                 for in_ids, out_ids in zip(inputs["input_ids"], generated_ids):
                     trimmed_ids.append(out_ids[len(in_ids):])
+                if use_qwen36_loader:
+                    try:
+                        first_in_len = int(len(inputs["input_ids"][0]))
+                        first_out_len = int(len(generated_ids[0]))
+                        first_trimmed = trimmed_ids[0]
+                        first_trimmed_list = [int(tok) for tok in first_trimmed[:64].tolist()]
+                        tokenizer = getattr(processor, "tokenizer", None)
+                        tokenizer_decode = ""
+                        if tokenizer is not None:
+                            try:
+                                tokenizer_decode = tokenizer.decode(
+                                    first_trimmed,
+                                    skip_special_tokens=True,
+                                    clean_up_tokenization_spaces=False,
+                                )
+                            except Exception as exc:
+                                tokenizer_decode = f"<tokenizer_decode_error:{exc}>"
+                        batch_preview = ""
+                        try:
+                            batch_preview = processor.batch_decode(
+                                [first_trimmed],
+                                skip_special_tokens=True,
+                                clean_up_tokenization_spaces=False,
+                            )[0]
+                        except Exception as exc:
+                            batch_preview = f"<batch_decode_error:{exc}>"
+                        _log(
+                            "decode_debug "
+                            f"input_ids_len={first_in_len} generated_ids_len={first_out_len} "
+                            f"trimmed_ids_len={int(len(first_trimmed))} "
+                            f"first_trimmed_token_ids={first_trimmed_list}"
+                        )
+                        _log(
+                            "decode_debug_preview "
+                            f"batch_decode_preview={batch_preview[:200]!r} "
+                            f"tokenizer_decode_preview={tokenizer_decode[:200]!r}"
+                        )
+                    except Exception as exc:
+                        _log(f"decode_debug_error {repr(exc)}")
                 raw_output = processor.batch_decode(
                     trimmed_ids,
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=False,
                 )[0]
+            completion_tokens = int(len(trimmed_ids[0])) if trimmed_ids else 0
             _log(
                 "decode_done "
                 f"request_elapsed_sec={time.time() - request_started:.3f} raw_output_chars={len(raw_output)}"
             )
-            sys.stdout.write(json.dumps({"raw_output": raw_output}) + "\n")
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "raw_output": raw_output,
+                        "token_usage": {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens,
+                        },
+                    }
+                )
+                + "\n"
+            )
             sys.stdout.flush()
         except Exception as exc:
             _log(f"request_error {repr(exc)}")

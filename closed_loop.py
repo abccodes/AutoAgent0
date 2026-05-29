@@ -23,6 +23,7 @@ import struct
 import logging
 import re
 import time
+from typing import Dict
 from sim.utils.launch_ad import launch, check_alive
 from omegaconf import OmegaConf
 import open3d as o3d
@@ -119,6 +120,209 @@ def _resolve_scene_model_path(model_base, scene_name):
     raise FileNotFoundError(
         f"processed scene directory for {scene_name!r} not found under {model_base!r}"
     )
+
+
+def _safe_get_planner_cfg(cfg, ad_name):
+    try:
+        planner_cfg = cfg.planner.get(ad_name, {})
+        return planner_cfg or {}
+    except Exception:
+        return {}
+
+
+def _empty_performance_summary() -> Dict[str, object]:
+    return {
+        "num_records": 0,
+        "planner_gate_records": 0,
+        "latency_mean_sec": 0.0,
+        "latency_p50_sec": 0.0,
+        "latency_p95_sec": 0.0,
+        "latency_max_sec": 0.0,
+        "intervention_latency_mean_sec": 0.0,
+        "intervention_latency_p50_sec": 0.0,
+        "intervention_latency_p95_sec": 0.0,
+        "intervention_latency_max_sec": 0.0,
+        "total_vlm_latency_mean_sec": 0.0,
+        "total_vlm_latency_p50_sec": 0.0,
+        "total_vlm_latency_p95_sec": 0.0,
+        "total_vlm_latency_max_sec": 0.0,
+        "planner_gate_latency_mean_sec": 0.0,
+        "planner_gate_latency_p50_sec": 0.0,
+        "planner_gate_latency_p95_sec": 0.0,
+        "planner_gate_latency_max_sec": 0.0,
+        "latency_equivalent_steps_mean": 0.0,
+        "carry_reuse_rate": 0.0,
+        "switch_to_current_rate": 0.0,
+        "fallback_rate": 0.0,
+        "intervention_trigger_rate": 0.0,
+        "intervention_low_rate": 0.0,
+        "intervention_medium_rate": 0.0,
+        "intervention_high_rate": 0.0,
+        "intervention_action_applied_rate": 0.0,
+        "intervention_action_threshold": 0.0,
+        "intervention_high_threshold": 0.0,
+        "intervention_severity_score_mean": 0.0,
+        "intervention_severity_score_p50": 0.0,
+        "intervention_severity_score_p95": 0.0,
+        "gate_skip_rate": 0.0,
+        "scoring_invoked_rate": 0.0,
+        "vlm_q_valid_rate": 0.0,
+        "counts": {
+            "intervention_invoked": 0,
+            "intervention_valid": 0,
+            "intervention_invalid": 0,
+            "intervention_timeout": 0,
+            "intervention_error": 0,
+            "scoring_invoked": 0,
+            "scoring_valid": 0,
+            "scoring_timeout": 0,
+            "scoring_error": 0,
+            "planner_gate_invoked": 0,
+            "planner_gate_valid": 0,
+            "planner_gate_timeout": 0,
+            "planner_gate_error": 0,
+            "base_policy_no_intervention": 0,
+            "gate_failed_base_policy_fallback": 0,
+            "intervention_triggered_scoring": 0,
+            "planner_gate_selected_learned": 0,
+            "planner_gate_selected_rule_based": 0,
+            "planner_gate_failed_base_policy_fallback": 0,
+        },
+        "branch_breakdown": {
+            "solo_or_merge": {
+                "base_policy_no_intervention": {
+                    "count": 0,
+                    "latency_mean_sec": 0.0,
+                    "latency_p50_sec": 0.0,
+                    "latency_p95_sec": 0.0,
+                    "latency_max_sec": 0.0,
+                    "tokens": {
+                        "prompt_tokens_total": 0,
+                        "completion_tokens_total": 0,
+                        "total_tokens_total": 0,
+                    },
+                },
+                "gate_failed_base_policy_fallback": {
+                    "count": 0,
+                    "latency_mean_sec": 0.0,
+                    "latency_p50_sec": 0.0,
+                    "latency_p95_sec": 0.0,
+                    "latency_max_sec": 0.0,
+                    "tokens": {
+                        "prompt_tokens_total": 0,
+                        "completion_tokens_total": 0,
+                        "total_tokens_total": 0,
+                    },
+                },
+                "intervention_triggered_scoring": {
+                    "count": 0,
+                    "latency_mean_sec": 0.0,
+                    "latency_p50_sec": 0.0,
+                    "latency_p95_sec": 0.0,
+                    "latency_max_sec": 0.0,
+                    "tokens": {
+                        "intervention": {
+                            "prompt_tokens_total": 0,
+                            "completion_tokens_total": 0,
+                            "total_tokens_total": 0,
+                        },
+                        "scoring": {
+                            "prompt_tokens_total": 0,
+                            "completion_tokens_total": 0,
+                            "total_tokens_total": 0,
+                        },
+                    },
+                },
+            },
+            "planner_gate": {
+                "selected_learned": {
+                    "count": 0,
+                    "latency_mean_sec": 0.0,
+                    "latency_p50_sec": 0.0,
+                    "latency_p95_sec": 0.0,
+                    "latency_max_sec": 0.0,
+                    "tokens": {
+                        "prompt_tokens_total": 0,
+                        "completion_tokens_total": 0,
+                        "total_tokens_total": 0,
+                    },
+                },
+                "selected_rule_based": {
+                    "count": 0,
+                    "latency_mean_sec": 0.0,
+                    "latency_p50_sec": 0.0,
+                    "latency_p95_sec": 0.0,
+                    "latency_max_sec": 0.0,
+                    "tokens": {
+                        "prompt_tokens_total": 0,
+                        "completion_tokens_total": 0,
+                        "total_tokens_total": 0,
+                    },
+                },
+                "failed_base_policy_fallback": {
+                    "count": 0,
+                    "latency_mean_sec": 0.0,
+                    "latency_p50_sec": 0.0,
+                    "latency_p95_sec": 0.0,
+                    "latency_max_sec": 0.0,
+                    "tokens": {
+                        "prompt_tokens_total": 0,
+                        "completion_tokens_total": 0,
+                        "total_tokens_total": 0,
+                    },
+                },
+            },
+        },
+        "tokens": {
+            "prompt_tokens_total": 0,
+            "completion_tokens_total": 0,
+            "total_tokens_total": 0,
+            "by_stage": {
+                "intervention": {"prompt_tokens_total": 0, "completion_tokens_total": 0, "total_tokens_total": 0},
+                "scoring": {"prompt_tokens_total": 0, "completion_tokens_total": 0, "total_tokens_total": 0},
+                "planner_gate": {"prompt_tokens_total": 0, "completion_tokens_total": 0, "total_tokens_total": 0},
+            },
+        },
+    }
+
+
+def _build_run_performance(output_dir, cfg, ad_name, frame_count):
+    planner_cfg = _safe_get_planner_cfg(cfg, ad_name)
+    vlm_cfg = planner_cfg.get("vlm", {}) if planner_cfg else {}
+    summary_path = os.path.join(output_dir, "vlm_debug", "latency_summary.json")
+    summary = _empty_performance_summary()
+    if os.path.isfile(summary_path):
+        try:
+            with open(summary_path, "r", encoding="utf-8") as rf:
+                loaded = json.load(rf)
+            if isinstance(loaded, dict):
+                summary.update({k: v for k, v in loaded.items() if k not in {"counts", "tokens", "branch_breakdown"}})
+                if isinstance(loaded.get("counts"), dict):
+                    summary["counts"].update(loaded["counts"])
+                if isinstance(loaded.get("branch_breakdown"), dict):
+                    summary["branch_breakdown"] = loaded["branch_breakdown"]
+                if isinstance(loaded.get("tokens"), dict):
+                    summary_tokens = summary["tokens"]
+                    summary_tokens.update({k: v for k, v in loaded["tokens"].items() if k != "by_stage"})
+                    if isinstance(loaded["tokens"].get("by_stage"), dict):
+                        for stage_name, stage_usage in loaded["tokens"]["by_stage"].items():
+                            if stage_name in summary_tokens["by_stage"] and isinstance(stage_usage, dict):
+                                summary_tokens["by_stage"][stage_name].update(stage_usage)
+        except Exception:
+            logging.exception("Failed to load latency summary from %s", summary_path)
+
+    return {
+        "frame_count": int(frame_count),
+        "planner_backend": str(ad_name),
+        "vlm_enabled": bool(vlm_cfg.get("enabled", False)) if vlm_cfg else False,
+        "intervention_enabled": bool(vlm_cfg.get("intervention_enabled", False)) if vlm_cfg else False,
+        "planner_gate_enabled": bool(vlm_cfg.get("planner_gate_enabled", False)) if vlm_cfg else False,
+        "latency_tracking_mode": str(vlm_cfg.get("latency_tracking_mode", "")) if vlm_cfg else "",
+        "counts": summary.get("counts", {}),
+        "tokens": summary.get("tokens", {}),
+        "branch_breakdown": summary.get("branch_breakdown", {}),
+        "summary": summary,
+    }
 
 def _resize_for_video(image, target_height):
     if image.shape[0] == target_height:
@@ -1177,6 +1381,13 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     ground_xyz = np.asarray(o3d.io.read_point_cloud(os.path.join(output, 'ground.ply')).points)
     scene_xyz = np.asarray(o3d.io.read_point_cloud(os.path.join(output, 'scene.ply')).points)
     results = hugsim_evaluate([save_data], ground_xyz, scene_xyz)
+    if isinstance(results, dict):
+        results["performance"] = _build_run_performance(
+            output_dir=output,
+            cfg=cfg,
+            ad_name=args.ad,
+            frame_count=len(save_data.get("frames", [])),
+        )
     with open(os.path.join(output, 'eval.json'), 'w') as f:
         json.dump(results, f)
 
@@ -1217,9 +1428,13 @@ if __name__ == "__main__":
         planner_output_suffix = planner_config.get('drivor', {}).get('output_suffix', 'drivor_vlm')
     if args.ad == 'rule_based' and planner_config.get('rule_based', {}).get('vlm', {}).get('enabled', False):
         planner_output_suffix = planner_config.get('rule_based', {}).get('output_suffix', 'rule_based_vlm')
-    output_model_slug = _resolve_output_model_slug(args.ad, planner_config)
-    cfg.base.output_dir = _prefix_output_dir_with_model(cfg.base.output_dir, output_model_slug)
-    cfg.base.output_dir = cfg.base.output_dir + planner_output_suffix
+    output_root_override = os.environ.get("BENCHMARK_OUTPUT_ROOT_OVERRIDE", "").strip()
+    if output_root_override:
+        cfg.base.output_dir = output_root_override
+    else:
+        output_model_slug = _resolve_output_model_slug(args.ad, planner_config)
+        cfg.base.output_dir = _prefix_output_dir_with_model(cfg.base.output_dir, output_model_slug)
+        cfg.base.output_dir = cfg.base.output_dir + planner_output_suffix
 
     model_path = _resolve_scene_model_path(cfg.base.model_base, cfg.scenario.scene_name)
     model_config = OmegaConf.load(os.path.join(model_path, 'cfg.yaml'))

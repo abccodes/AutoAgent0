@@ -1245,11 +1245,28 @@ def main() -> int:
                     LOG.info("Received shutdown signal")
                     break
 
+                if isinstance(message, dict) and message.get("message_type") == "hugsim_preflight":
+                    LOG.info(
+                        "Received HUGSIM preflight diagnostic: output_dir=%s obs_pipe=%s plan_pipe=%s include_privileged_pipe=%s camera_count=%s timestamp=%s",
+                        message.get("output_dir"),
+                        message.get("obs_pipe"),
+                        message.get("plan_pipe"),
+                        message.get("include_privileged_pipe"),
+                        message.get("camera_count"),
+                        message.get("timestamp"),
+                    )
+                    continue
+
                 privileged_info = None
-                if isinstance(message, tuple) and len(message) == 3:
-                    obs, info, privileged_info = message
+                if isinstance(message, (list, tuple)):
+                    if len(message) >= 3:
+                        obs, info, privileged_info = message[:3]
+                    elif len(message) == 2:
+                        obs, info = message
+                    else:
+                        raise ValueError(f"Unexpected DrivoR message length: {len(message)}")
                 else:
-                    obs, info = message
+                    raise ValueError(f"Unexpected DrivoR message type: {type(message)}")
                 # info_history append and pad
                 info_history.append(dict(info))
                 while len(info_history) < EGO_HISTORY_FRAMES:
@@ -1328,10 +1345,10 @@ def main() -> int:
                 try:
                     reserved_candidate_slots = (
                         max(0, int(rule_based_merge_cfg.topk))
-                        if rule_based_merge_cfg.enabled
+                        if rule_based_merge_cfg.enabled and not getattr(vlm_cfg, "planner_gate_enabled", False)
                         else 0
                     )
-                    candidate_rows, allow_carry_prev = build_drivor_candidate_rows(
+                    learned_candidate_rows, allow_carry_prev = build_drivor_candidate_rows(
                         proposals=proposals,
                         scores=scores,
                         output_num_poses=output_num_poses,
@@ -1344,6 +1361,7 @@ def main() -> int:
                         previous_selected_source=previous_selected_source,
                         reserved_candidate_slots=reserved_candidate_slots,
                     )
+                    rule_based_candidate_rows = []
                     if rule_based_merge_cfg.enabled:
                         try:
                             rb_proposals, rb_scores, _ = get_rule_based_proposals_and_scores(
@@ -1355,21 +1373,51 @@ def main() -> int:
                                 output_num_poses=output_num_poses,
                                 topk=rule_based_merge_cfg.topk,
                             )
-                            candidate_rows.extend(
-                                build_rule_based_candidate_rows(
-                                    rb_proposals,
-                                    rb_scores,
-                                    output_num_poses=output_num_poses,
-                                    source_name=rule_based_merge_cfg.source_name,
-                                    topk=rule_based_merge_cfg.topk,
-                                )
+                            rule_based_candidate_rows = build_rule_based_candidate_rows(
+                                rb_proposals,
+                                rb_scores,
+                                output_num_poses=output_num_poses,
+                                source_name=rule_based_merge_cfg.source_name,
+                                topk=rule_based_merge_cfg.topk,
                             )
                         except Exception as e:
                             LOG.exception("Failed to append rule-based DrivoR merge candidates: %s", e)
+                    planner_gate_result = {
+                        "selected_planner": "learned",
+                        "confidence": None,
+                        "reasoning": "planner_gate_disabled",
+                        "elapsed_sec": 0.0,
+                        "error": None,
+                        "timed_out": False,
+                        "prompt_char_count": 0,
+                        "image_count": 0,
+                    }
+                    selected_planner = "learned"
+                    candidate_rows = learned_candidate_rows
+                    if rule_based_merge_cfg.enabled and not getattr(vlm_cfg, "planner_gate_enabled", False) and rule_based_candidate_rows:
+                        candidate_rows = list(learned_candidate_rows) + list(rule_based_candidate_rows)
+                    if getattr(vlm_cfg, "planner_gate_enabled", False):
+                        planner_gate_result = vlm_selector.maybe_select_planner(
+                            frame_index=frame_index,
+                            camera_images=obs.get("rgb", {}) if isinstance(obs, dict) else {},
+                            info=info,
+                            learned_candidate_rows=learned_candidate_rows,
+                            rule_based_candidate_rows=rule_based_candidate_rows,
+                        )
+                        selected_planner = str(planner_gate_result.get("selected_planner", "learned"))
+                        if selected_planner == "rule_based" and rule_based_candidate_rows:
+                            candidate_rows = rule_based_candidate_rows
+                        else:
+                            selected_planner = "learned"
+                            candidate_rows = learned_candidate_rows
                     candidate_sources = [str(row.get("source", "unknown")) for row in candidate_rows]
                     LOG.info(
-                        "DrivoR candidate pool frame=%s size=%d sources=%s",
+                        "DrivoR planner gate frame=%s planner=%s confidence=%s error=%s timed_out=%s chosen_size=%d sources=%s",
                         frame_index,
+                        selected_planner,
+                        planner_gate_result.get("confidence"),
+                        planner_gate_result.get("error"),
+                        planner_gate_result.get("timed_out"),
                         len(candidate_rows),
                         candidate_sources,
                     )
@@ -1381,15 +1429,24 @@ def main() -> int:
                 # Determine default selection for VLM fallback
                 # Find the index of the model's best candidate (argmax by score)
                 try:
-                    best_idx = int(np.argmax(scores))
-                    default_selected_index = None
-                    for idx, row in enumerate(candidate_rows):
-                        if row.get("proposal_index") is not None and int(row.get("proposal_index")) == best_idx:
-                            default_selected_index = idx
-                            break
-                    if default_selected_index is None:
-                        default_selected_index = 0  # Fallback to first candidate
-                    default_selected_source = "drivor_argmax"
+                    if selected_planner == "rule_based":
+                        default_selected_index = int(
+                            max(
+                                range(len(candidate_rows)),
+                                key=lambda idx: float(candidate_rows[idx].get("proposal_score", 0.0)),
+                            )
+                        )
+                        default_selected_source = "fallback_rule_based_argmax"
+                    else:
+                        best_idx = int(np.argmax(scores))
+                        default_selected_index = None
+                        for idx, row in enumerate(candidate_rows):
+                            if row.get("proposal_index") is not None and int(row.get("proposal_index")) == best_idx:
+                                default_selected_index = idx
+                                break
+                        if default_selected_index is None:
+                            default_selected_index = 0  # Fallback to first candidate
+                        default_selected_source = "drivor_argmax"
                 except Exception as e:
                     LOG.exception("Failed to determine default selection: %s", e)
                     default_selected_index = 0
@@ -1409,66 +1466,128 @@ def main() -> int:
                             "vlm_invoked": False,
                             "fallback_selected_idx": int(default_selected_index),
                             "fallback_selected_source": default_selected_source,
+                            "planner_gate_selected_planner": selected_planner,
+                            "planner_gate_confidence": planner_gate_result.get("confidence"),
+                            "planner_gate_reasoning": planner_gate_result.get("reasoning"),
+                            "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
+                            "planner_gate_error": planner_gate_result.get("error"),
+                            "planner_gate_timed_out": planner_gate_result.get("timed_out"),
+                            "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
+                            "planner_gate_image_count": planner_gate_result.get("image_count"),
                             "display_default_trajectories": bool(getattr(vlm_cfg, "display_default_trajectories", False)),
                             "include_default_candidates": bool(getattr(vlm_cfg, "include_default_candidates", False)),
                         }
-                        
+
                     else:
-                        camera_images = obs.get("rgb", {}) if isinstance(obs, dict) else {}
-                        selection_result = vlm_selector.maybe_select(
-                            frame_index=frame_index,
-                            camera_images=camera_images,
-                            info=info,
-                            candidate_rows=candidate_rows,
-                            default_selected_index=default_selected_index,
-                            default_selected_source=default_selected_source,
-                        )
-                        frame_index += 1
+                        if getattr(vlm_cfg, "planner_gate_enabled", False):
+                            selected_row = dict(candidate_rows[default_selected_index])
+                            selected_plan = np.asarray(
+                                selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32
+                            )
+                            selected_idx = selected_row.get("proposal_index")
+                            selected_score = float(selected_row.get("proposal_score", 0.0))
+                            selected_score_raw = (
+                                float(selected_row.get("origin_selected_score_raw"))
+                                if selected_row.get("origin_selected_score_raw") is not None
+                                else float(selected_score)
+                            )
+                            selected_source = (
+                                "planner_gate_rule_based_base_policy"
+                                if selected_planner == "rule_based"
+                                else "planner_gate_learned_base_policy"
+                            )
+                            if planner_gate_result.get("error") is not None:
+                                selected_source = "planner_gate_failed_base_policy_fallback"
+                            selection_debug = {
+                                "vlm_invoked": False,
+                                "scoring_invoked": False,
+                                "execution_mode": (
+                                    "planner_gate_failed_base_policy_fallback"
+                                    if planner_gate_result.get("error") is not None
+                                    else f"planner_gate_selected_{selected_planner}"
+                                ),
+                                "fallback_selected_idx": int(default_selected_index),
+                                "fallback_selected_source": default_selected_source,
+                                "planner_gate_selected_planner": selected_planner,
+                                "planner_gate_confidence": planner_gate_result.get("confidence"),
+                                "planner_gate_reasoning": planner_gate_result.get("reasoning"),
+                                "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
+                                "planner_gate_error": planner_gate_result.get("error"),
+                                "planner_gate_timed_out": planner_gate_result.get("timed_out"),
+                                "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
+                                "planner_gate_image_count": planner_gate_result.get("image_count"),
+                                "planner_gate_token_usage": planner_gate_result.get("token_usage"),
+                                "display_default_trajectories": bool(getattr(vlm_cfg, "display_default_trajectories", False)),
+                                "include_default_candidates": bool(getattr(vlm_cfg, "include_default_candidates", False)),
+                                "carry_previous_allowed": bool(allow_carry_prev),
+                                "previous_selected_source": previous_selected_source,
+                                "selected_score_raw": float(selected_score_raw),
+                                "vlm_failed": planner_gate_result.get("error") is not None,
+                            }
+                        else:
+                            camera_images = obs.get("rgb", {}) if isinstance(obs, dict) else {}
+                            selection_result = vlm_selector.maybe_select(
+                                frame_index=frame_index,
+                                camera_images=camera_images,
+                                info=info,
+                                candidate_rows=candidate_rows,
+                                default_selected_index=default_selected_index,
+                                default_selected_source=default_selected_source,
+                            )
 
-                        selected_row = selection_result["selected_candidate_row"]
-                        selected_plan = np.asarray(
-                            selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32
-                        )
-                        selected_idx = selected_row.get("proposal_index")
-                        selected_score = float(selected_row.get("proposal_score", 0.0))
-                        # origin_selected_score_raw if present preserves raw value for carry logic
-                        selected_score_raw = (
-                            float(selected_row.get("origin_selected_score_raw"))
-                            if selected_row.get("origin_selected_score_raw") is not None
-                            else float(selected_score)
-                        )
-                        selected_source = str(selection_result.get("selected_source", "drivor_vlm"))
+                            selected_row = selection_result["selected_candidate_row"]
+                            selected_plan = np.asarray(
+                                selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32
+                            )
+                            selected_idx = selected_row.get("proposal_index")
+                            selected_score = float(selected_row.get("proposal_score", 0.0))
+                            selected_score_raw = (
+                                float(selected_row.get("origin_selected_score_raw"))
+                                if selected_row.get("origin_selected_score_raw") is not None
+                                else float(selected_score)
+                            )
+                            selected_source = str(selection_result.get("selected_source", "drivor_vlm"))
 
-                        # Build VLM selection debug metadata (non-Q fields only)
-                        selection_debug = {
-                            "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
-                            "vlm_confidence": selection_result.get("vlm_confidence"),
-                            "vlm_reasoning": selection_result.get("vlm_reasoning"),
-                            "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
-                            "vlm_error": selection_result.get("vlm_error"),
-                            "scoring_invoked": selection_result.get("scoring_invoked"),
-                            "intervention_invoked": selection_result.get("intervention_invoked"),
-                            "intervention_should_intervene": selection_result.get("intervention_should_intervene"),
-                            "intervention_severity_score": selection_result.get("intervention_severity_score"),
-                            "intervention_severity_band": selection_result.get("intervention_severity_band"),
-                            "intervention_corrective_action": selection_result.get("intervention_corrective_action"),
-                            "intervention_confidence": selection_result.get("intervention_confidence"),
-                            "intervention_reasoning": selection_result.get("intervention_reasoning"),
-                            "intervention_elapsed_sec": selection_result.get("intervention_elapsed_sec"),
-                            "intervention_error": selection_result.get("intervention_error"),
-                            "adaptive_replan_decision": selection_result.get("adaptive_replan_decision"),
-                            "carry_previous_valid": selection_result.get("carry_previous_valid"),
-                            "latency_timeline_record": selection_result.get("latency_timeline_record"),
-                            "vlm_failed": selection_result.get("vlm_failed"),
-                            "fallback_selected_idx": int(default_selected_index),
-                            "fallback_selected_source": default_selected_source,
-                            "display_default_trajectories": bool(getattr(vlm_cfg, "display_default_trajectories", False)),
-                            "include_default_candidates": bool(getattr(vlm_cfg, "include_default_candidates", False)),
-                            "carry_previous_allowed": bool(allow_carry_prev),
-                            "previous_selected_source": previous_selected_source,
-                            "selected_score_raw": float(selected_score_raw),
-                        }
+                            selection_debug = {
+                                "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
+                                "vlm_confidence": selection_result.get("vlm_confidence"),
+                                "vlm_reasoning": selection_result.get("vlm_reasoning"),
+                                "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
+                                "vlm_error": selection_result.get("vlm_error"),
+                                "scoring_invoked": selection_result.get("scoring_invoked"),
+                                "intervention_invoked": selection_result.get("intervention_invoked"),
+                                "intervention_should_intervene": selection_result.get("intervention_should_intervene"),
+                                "intervention_severity_score": selection_result.get("intervention_severity_score"),
+                                "intervention_severity_band": selection_result.get("intervention_severity_band"),
+                                "intervention_corrective_action": selection_result.get("intervention_corrective_action"),
+                                "intervention_confidence": selection_result.get("intervention_confidence"),
+                                "intervention_reasoning": selection_result.get("intervention_reasoning"),
+                                "intervention_elapsed_sec": selection_result.get("intervention_elapsed_sec"),
+                                "intervention_error": selection_result.get("intervention_error"),
+                                "adaptive_replan_decision": selection_result.get("adaptive_replan_decision"),
+                                "carry_previous_valid": selection_result.get("carry_previous_valid"),
+                                "latency_timeline_record": selection_result.get("latency_timeline_record"),
+                                "execution_mode": selection_result.get("execution_mode"),
+                                "vlm_failed": selection_result.get("vlm_failed"),
+                                "fallback_selected_idx": int(default_selected_index),
+                                "fallback_selected_source": default_selected_source,
+                                "planner_gate_selected_planner": selected_planner,
+                                "planner_gate_confidence": planner_gate_result.get("confidence"),
+                                "planner_gate_reasoning": planner_gate_result.get("reasoning"),
+                                "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
+                                "planner_gate_error": planner_gate_result.get("error"),
+                                "planner_gate_timed_out": planner_gate_result.get("timed_out"),
+                                "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
+                                "planner_gate_image_count": planner_gate_result.get("image_count"),
+                                "planner_gate_token_usage": planner_gate_result.get("token_usage"),
+                                "display_default_trajectories": bool(getattr(vlm_cfg, "display_default_trajectories", False)),
+                                "include_default_candidates": bool(getattr(vlm_cfg, "include_default_candidates", False)),
+                                "carry_previous_allowed": bool(allow_carry_prev),
+                                "previous_selected_source": previous_selected_source,
+                                "selected_score_raw": float(selected_score_raw),
+                            }
                         # Build final payload below (outside this block)
+                    frame_index += 1
                 except Exception as e:
                     LOG.exception("VLM selection failed: %s", e)
                     # Fallback to model selection
@@ -1483,6 +1602,14 @@ def main() -> int:
                         "vlm_error": str(e),
                         "fallback_selected_idx": int(default_selected_index),
                         "fallback_selected_source": default_selected_source,
+                        "planner_gate_selected_planner": selected_planner,
+                        "planner_gate_confidence": planner_gate_result.get("confidence"),
+                        "planner_gate_reasoning": planner_gate_result.get("reasoning"),
+                        "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
+                        "planner_gate_error": planner_gate_result.get("error"),
+                        "planner_gate_timed_out": planner_gate_result.get("timed_out"),
+                        "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
+                        "planner_gate_image_count": planner_gate_result.get("image_count"),
                     }
 
                 # Build final payload with VLM-selected plan and candidate pool metadata

@@ -1021,6 +1021,8 @@ def main() -> int:
                     }
                     selected_planner = "learned"
                     candidate_rows = learned_candidate_rows
+                    if cfg.rule_based_merge.enabled and not cfg.vlm.planner_gate_enabled and rule_based_candidate_rows:
+                        candidate_rows = list(learned_candidate_rows) + list(rule_based_candidate_rows)
                     if cfg.vlm.planner_gate_enabled:
                         planner_gate_result = vlm_selector.maybe_select_planner(
                             frame_index=frame_index,
@@ -1064,90 +1066,139 @@ def main() -> int:
                         )
                         default_selected_source = "fallback_rap_argmax"
 
-                    selection_result = vlm_selector.maybe_select(
-                        frame_index=frame_index,
-                        camera_images=obs["rgb"],
-                        info=info,
-                        candidate_rows=candidate_rows,
-                        default_selected_index=default_selected_index,
-                        default_selected_source=default_selected_source,
-                    )
+                    if cfg.vlm.planner_gate_enabled:
+                        selected_row = dict(candidate_rows[default_selected_index])
+                        selected_plan = np.asarray(selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32)
+                        selected_idx = selected_row.get("proposal_index")
+                        selected_score_value = selected_row.get("proposal_score")
+                        if selected_score_value is None:
+                            selected_score_value = selected_row.get("rap_score", 0.0)
+                        selected_score = float(selected_score_value)
+                        selected_score_raw_value = selected_row.get("origin_selected_score_raw")
+                        if selected_score_raw_value is None:
+                            selected_score_raw_value = selected_score
+                        selected_score_raw = float(selected_score_raw_value)
+                        selected_source = (
+                            "planner_gate_rule_based_base_policy"
+                            if selected_planner == "rule_based"
+                            else "planner_gate_learned_base_policy"
+                        )
+                        if planner_gate_result.get("error") is not None:
+                            selected_source = "planner_gate_failed_base_policy_fallback"
+                        selection_debug = {
+                            "q_invoked_vlm": False,
+                            "scoring_invoked": False,
+                            "execution_mode": (
+                                "planner_gate_failed_base_policy_fallback"
+                                if planner_gate_result.get("error") is not None
+                                else f"planner_gate_selected_{selected_planner}"
+                            ),
+                            "fallback_selected_idx": int(default_selected_index),
+                            "fallback_selected_source": default_selected_source,
+                            "planner_gate_selected_planner": selected_planner,
+                            "planner_gate_confidence": planner_gate_result.get("confidence"),
+                            "planner_gate_reasoning": planner_gate_result.get("reasoning"),
+                            "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
+                            "planner_gate_error": planner_gate_result.get("error"),
+                            "planner_gate_timed_out": planner_gate_result.get("timed_out"),
+                            "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
+                            "planner_gate_image_count": planner_gate_result.get("image_count"),
+                            "planner_gate_token_usage": planner_gate_result.get("token_usage"),
+                            "display_default_trajectories": bool(cfg.vlm.display_default_trajectories),
+                            "include_default_candidates": bool(cfg.vlm.include_default_candidates),
+                            "carry_previous_allowed": bool(allow_carry_previous),
+                            "previous_selected_source": previous_selected_source,
+                            "selected_score_raw": selected_score_raw,
+                            "vlm_failed": planner_gate_result.get("error") is not None,
+                        }
+                    else:
+                        selection_result = vlm_selector.maybe_select(
+                            frame_index=frame_index,
+                            camera_images=obs["rgb"],
+                            info=info,
+                            candidate_rows=candidate_rows,
+                            default_selected_index=default_selected_index,
+                            default_selected_source=default_selected_source,
+                        )
+
+                        selected_row = selection_result["selected_candidate_row"]
+                        selected_plan = np.asarray(selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32)
+                        selected_idx = selected_row.get("proposal_index")
+                        selected_score_value = selected_row.get("proposal_score")
+                        if selected_score_value is None:
+                            selected_score_value = selected_row.get("rap_score", 0.0)
+                        selected_score = float(selected_score_value)
+
+                        selected_score_raw_value = selected_row.get("origin_selected_score_raw")
+                        if selected_score_raw_value is None:
+                            selected_score_raw_value = selected_score
+                        selected_score_raw = float(selected_score_raw_value)
+
+                        selection_debug = {
+                            "q_selected_idx": None,
+                            "q_selected_source": None,
+                            "q_candidate_scores": None,
+                            "q_carry_score": None,
+                            "q_best_current_score": None,
+                            "q_score_gap": None,
+                            "q_switch_margin": None,
+                            "q_selected_path_length": None,
+                            "q_best_current_path_length": None,
+                            "fallback_selected_idx": int(default_selected_index),
+                            "fallback_selected_source": default_selected_source,
+                            "planner_gate_selected_planner": selected_planner,
+                            "planner_gate_confidence": planner_gate_result.get("confidence"),
+                            "planner_gate_reasoning": planner_gate_result.get("reasoning"),
+                            "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
+                            "planner_gate_error": planner_gate_result.get("error"),
+                            "planner_gate_timed_out": planner_gate_result.get("timed_out"),
+                            "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
+                            "planner_gate_image_count": planner_gate_result.get("image_count"),
+                            "planner_gate_token_usage": planner_gate_result.get("token_usage"),
+                            "display_default_trajectories": bool(cfg.vlm.display_default_trajectories),
+                            "include_default_candidates": bool(cfg.vlm.include_default_candidates),
+                            "q_invoked_vlm": bool(cfg.vlm.enabled),
+                            "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
+                            "vlm_confidence": selection_result.get("vlm_confidence"),
+                            "vlm_reasoning": selection_result.get("vlm_reasoning"),
+                            "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
+                            "vlm_error": selection_result.get("vlm_error"),
+                            "vlm_candidate_count": selection_result.get("vlm_candidate_count"),
+                            "scoring_invoked": selection_result.get("scoring_invoked"),
+                            "intervention_invoked": selection_result.get("intervention_invoked"),
+                            "intervention_should_intervene": selection_result.get("intervention_should_intervene"),
+                            "intervention_severity_score": selection_result.get("intervention_severity_score"),
+                            "intervention_severity_band": selection_result.get("intervention_severity_band"),
+                            "intervention_corrective_action": selection_result.get("intervention_corrective_action"),
+                            "intervention_confidence": selection_result.get("intervention_confidence"),
+                            "intervention_reasoning": selection_result.get("intervention_reasoning"),
+                            "intervention_elapsed_sec": selection_result.get("intervention_elapsed_sec"),
+                            "intervention_error": selection_result.get("intervention_error"),
+                            "vlm_q_valid": selection_result.get("vlm_q_valid"),
+                            "vlm_timed_out": selection_result.get("vlm_timed_out"),
+                            "vlm_q_candidate_scores": selection_result.get("vlm_q_candidate_scores"),
+                            "vlm_q_best_candidate_index": selection_result.get("vlm_q_best_candidate_index"),
+                            "vlm_q_score_gap_to_carry": selection_result.get("vlm_q_score_gap_to_carry"),
+                            "vlm_q_score_gap_top2": selection_result.get("vlm_q_score_gap_top2"),
+                            "vlm_q_best_current_score": selection_result.get("vlm_q_best_current_score"),
+                            "vlm_q_carry_score": selection_result.get("vlm_q_carry_score"),
+                            "adaptive_replan_decision": selection_result.get("adaptive_replan_decision"),
+                            "carry_previous_valid": selection_result.get("carry_previous_valid"),
+                            "carry_previous_allowed": bool(allow_carry_previous),
+                            "previous_selected_source": previous_selected_source,
+                            "selected_score_raw": selected_score_raw,
+                            "latency_timeline_record": selection_result.get("latency_timeline_record"),
+                            "execution_mode": selection_result.get("execution_mode"),
+                            "vlm_failed": selection_result.get("vlm_failed"),
+                        }
+                        selected_source = str(selection_result["selected_source"])
                     frame_index += 1
-
-                    selected_row = selection_result["selected_candidate_row"]
-                    selected_plan = np.asarray(selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32)
-                    selected_idx = selected_row.get("proposal_index")
-                    selected_score_value = selected_row.get("proposal_score")
-                    if selected_score_value is None:
-                        selected_score_value = selected_row.get("rap_score", 0.0)
-                    selected_score = float(selected_score_value)
-
-                    selected_score_raw_value = selected_row.get("origin_selected_score_raw")
-                    if selected_score_raw_value is None:
-                        selected_score_raw_value = selected_score
-                    selected_score_raw = float(selected_score_raw_value)
-
-                    selection_debug = {
-                        "q_selected_idx": None,
-                        "q_selected_source": None,
-                        "q_candidate_scores": None,
-                        "q_carry_score": None,
-                        "q_best_current_score": None,
-                        "q_score_gap": None,
-                        "q_switch_margin": None,
-                        "q_selected_path_length": None,
-                        "q_best_current_path_length": None,
-                        "fallback_selected_idx": int(default_selected_index),
-                        "fallback_selected_source": default_selected_source,
-                        "planner_gate_selected_planner": selected_planner,
-                        "planner_gate_confidence": planner_gate_result.get("confidence"),
-                        "planner_gate_reasoning": planner_gate_result.get("reasoning"),
-                        "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
-                        "planner_gate_error": planner_gate_result.get("error"),
-                        "planner_gate_timed_out": planner_gate_result.get("timed_out"),
-                        "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
-                        "planner_gate_image_count": planner_gate_result.get("image_count"),
-                        "display_default_trajectories": bool(cfg.vlm.display_default_trajectories),
-                        "include_default_candidates": bool(cfg.vlm.include_default_candidates),
-                        "q_invoked_vlm": bool(cfg.vlm.enabled),
-                        "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
-                        "vlm_confidence": selection_result.get("vlm_confidence"),
-                        "vlm_reasoning": selection_result.get("vlm_reasoning"),
-                        "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
-                        "vlm_error": selection_result.get("vlm_error"),
-                        "vlm_candidate_count": selection_result.get("vlm_candidate_count"),
-                        "scoring_invoked": selection_result.get("scoring_invoked"),
-                        "intervention_invoked": selection_result.get("intervention_invoked"),
-                        "intervention_should_intervene": selection_result.get("intervention_should_intervene"),
-                        "intervention_severity_score": selection_result.get("intervention_severity_score"),
-                        "intervention_severity_band": selection_result.get("intervention_severity_band"),
-                        "intervention_corrective_action": selection_result.get("intervention_corrective_action"),
-                        "intervention_confidence": selection_result.get("intervention_confidence"),
-                        "intervention_reasoning": selection_result.get("intervention_reasoning"),
-                        "intervention_elapsed_sec": selection_result.get("intervention_elapsed_sec"),
-                        "intervention_error": selection_result.get("intervention_error"),
-                        "vlm_q_valid": selection_result.get("vlm_q_valid"),
-                        "vlm_timed_out": selection_result.get("vlm_timed_out"),
-                        "vlm_q_candidate_scores": selection_result.get("vlm_q_candidate_scores"),
-                        "vlm_q_best_candidate_index": selection_result.get("vlm_q_best_candidate_index"),
-                        "vlm_q_score_gap_to_carry": selection_result.get("vlm_q_score_gap_to_carry"),
-                        "vlm_q_score_gap_top2": selection_result.get("vlm_q_score_gap_top2"),
-                        "vlm_q_best_current_score": selection_result.get("vlm_q_best_current_score"),
-                        "vlm_q_carry_score": selection_result.get("vlm_q_carry_score"),
-                        "adaptive_replan_decision": selection_result.get("adaptive_replan_decision"),
-                        "carry_previous_valid": selection_result.get("carry_previous_valid"),
-                        "carry_previous_allowed": bool(allow_carry_previous),
-                        "previous_selected_source": previous_selected_source,
-                        "selected_score_raw": selected_score_raw,
-                        "latency_timeline_record": selection_result.get("latency_timeline_record"),
-                        "vlm_failed": selection_result.get("vlm_failed"),
-                    }
                     plan_payload = build_plan_payload(
                         proposals,
                         scores,
                         output_num_poses=cfg.output_num_poses,
                         selected_idx=None if selected_idx is None else int(selected_idx),
-                        selected_source=str(selection_result["selected_source"]),
+                        selected_source=selected_source,
                         selection_debug=selection_debug,
                         selected_plan_override=selected_plan,
                         selected_score_override=selected_score,

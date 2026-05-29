@@ -651,7 +651,7 @@ def _summarize_gate_candidates(
     candidate_rows: Sequence[Dict[str, object]],
     *,
     label: str,
-    limit: int = 3,
+    limit: int = 10,
 ) -> str:
     if not candidate_rows:
         return f"{label}: none"
@@ -842,7 +842,7 @@ class Qwen3TrajectorySelector:
         self.device = requested_device
         self._torch = torch
 
-    def _run_inference(self, image_paths: Sequence[Path], prompt: str) -> str:
+    def _run_inference(self, image_paths: Sequence[Path], prompt: str) -> Dict[str, object]:
         images = [Image.open(image_path).convert("RGB") for image_path in image_paths]
         messages = [
             {
@@ -865,6 +865,7 @@ class Qwen3TrajectorySelector:
             key: value.to(self.model.device) if hasattr(value, "to") else value
             for key, value in inputs.items()
         }
+        prompt_tokens = int(inputs["input_ids"].shape[-1]) if "input_ids" in inputs else 0
 
         with self._torch.inference_mode():
             generated_ids = self.model.generate(
@@ -875,11 +876,20 @@ class Qwen3TrajectorySelector:
         trimmed_ids = []
         for in_ids, out_ids in zip(inputs["input_ids"], generated_ids):
             trimmed_ids.append(out_ids[len(in_ids):])
-        return self.processor.batch_decode(
+        raw_output = self.processor.batch_decode(
             trimmed_ids,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )[0]
+        completion_tokens = int(len(trimmed_ids[0])) if trimmed_ids else 0
+        return {
+            "raw_output": raw_output,
+            "token_usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+        }
 
     def infer_prompt(
         self,
@@ -887,23 +897,50 @@ class Qwen3TrajectorySelector:
         prompt: str,
         *,
         max_new_tokens: Optional[int] = None,
+        timeout_sec: Optional[float] = None,
     ) -> Dict[str, object]:
+        del timeout_sec
         started = time.time()
         prev_max_new_tokens = self.max_new_tokens
         try:
             if max_new_tokens is not None:
                 self.max_new_tokens = int(max_new_tokens)
-            raw_output = self._run_inference(image_paths, prompt)
+            inference_result = self._run_inference(image_paths, prompt)
         finally:
             if max_new_tokens is not None:
                 self.max_new_tokens = prev_max_new_tokens
+        raw_output = str(inference_result.get("raw_output", ""))
         parsed = try_parse_json(raw_output)
         return {
             "raw_output": raw_output,
             "parsed_output": parsed,
             "elapsed_sec": time.time() - started,
             "prompt": prompt,
+            "token_usage": _normalize_token_usage(inference_result.get("token_usage")),
         }
+
+
+def _empty_token_usage() -> Dict[str, int]:
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+
+
+def _normalize_token_usage(token_usage: Optional[object]) -> Dict[str, int]:
+    if not isinstance(token_usage, dict):
+        return _empty_token_usage()
+    prompt_tokens = int(token_usage.get("prompt_tokens", 0) or 0)
+    completion_tokens = int(token_usage.get("completion_tokens", 0) or 0)
+    total_tokens = int(token_usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
+    if total_tokens <= 0:
+        total_tokens = prompt_tokens + completion_tokens
+    return {
+        "prompt_tokens": max(0, prompt_tokens),
+        "completion_tokens": max(0, completion_tokens),
+        "total_tokens": max(0, total_tokens),
+    }
 
 
 class SubprocessQwen3TrajectorySelector:
@@ -1060,6 +1097,7 @@ class SubprocessQwen3TrajectorySelector:
             "parsed_output": try_parse_json(raw_output),
             "elapsed_sec": time.time() - started,
             "prompt": prompt,
+            "token_usage": _normalize_token_usage(response.get("token_usage")),
         }
 
     def close(self) -> None:
@@ -1259,6 +1297,7 @@ class VLMPlanSelector:
         self._selector: Optional[object] = None
         self._disabled_reason: Optional[str] = None
         self._timeline_records: List[Dict[str, object]] = []
+        self._planner_gate_records: List[Dict[str, object]] = []
 
         if cfg.save_debug_artifacts:
             self.debug_dir.mkdir(parents=True, exist_ok=True)
@@ -1278,6 +1317,9 @@ class VLMPlanSelector:
         if self.cfg.save_debug_artifacts:
             with self.timeline_path.open("a", encoding="utf-8") as wf:
                 wf.write(json.dumps(record) + "\n")
+
+    def _record_planner_gate(self, record: Dict[str, object]) -> None:
+        self._planner_gate_records.append(record)
 
     def _normalized_backend(self) -> str:
         backend = str(self.cfg.backend or "").strip()
@@ -1385,14 +1427,17 @@ class VLMPlanSelector:
         intervention_reasoning = None
         intervention_elapsed_sec = 0.0
         intervention_error = None
+        intervention_token_usage = _empty_token_usage()
 
         def _fallback_result(error: Optional[str] = None) -> Dict[str, object]:
             selected_row = dict(candidate_rows[default_selected_index])
             adaptive_replan_decision = "vlm_failed_fallback_rap"
+            execution_mode = "base_policy_vlm_unavailable"
             timeline_record = {
                 "frame_index": frame_index,
                 "timestamp": timestamp,
                 "route_instruction": route_instruction,
+                "execution_mode": execution_mode,
                 "candidate_count": len(candidate_rows),
                 "carry_previous_valid": carry_previous_valid,
                 "selected_source": default_selected_source,
@@ -1406,7 +1451,13 @@ class VLMPlanSelector:
                 "intervention_corrective_action": None,
                 "intervention_confidence": None,
                 "intervention_elapsed_sec": 0.0,
+                "intervention_prompt_tokens": 0,
+                "intervention_completion_tokens": 0,
+                "intervention_total_tokens": 0,
                 "vlm_elapsed_sec": 0.0,
+                "scoring_prompt_tokens": 0,
+                "scoring_completion_tokens": 0,
+                "scoring_total_tokens": 0,
                 "scoring_invoked": False,
                 "latency_equivalent_steps": 0.0,
                 "latency_equivalent_steps_ceil": 0,
@@ -1421,6 +1472,7 @@ class VLMPlanSelector:
                 "selected_candidate_row": selected_row,
                 "selected_source": default_selected_source,
                 "adaptive_replan_decision": adaptive_replan_decision,
+                "execution_mode": execution_mode,
                 "carry_previous_valid": carry_previous_valid,
                 "latency_timeline_record": timeline_record,
                 "vlm_q_valid": False,
@@ -1434,6 +1486,8 @@ class VLMPlanSelector:
                 "intervention_confidence": None,
                 "intervention_reasoning": None,
                 "intervention_elapsed_sec": 0.0,
+                "intervention_token_usage": _empty_token_usage(),
+                "scoring_token_usage": _empty_token_usage(),
             }
             if error is not None:
                 result["error"] = error
@@ -1508,9 +1562,11 @@ class VLMPlanSelector:
                     "elapsed_sec": 0.0,
                     "prompt": intervention_prompt,
                     "error": str(exc),
+                    "token_usage": _empty_token_usage(),
                 }
 
             intervention_elapsed_sec = float(intervention_result.get("elapsed_sec", 0.0))
+            intervention_token_usage = _normalize_token_usage(intervention_result.get("token_usage"))
             intervention_should_intervene, intervention_severity_score, intervention_corrective_action, intervention_confidence, intervention_reasoning, intervention_parse_error = (
                 _coerce_intervention_decision(intervention_result.get("parsed_output"))
             )
@@ -1530,6 +1586,7 @@ class VLMPlanSelector:
                 selected_row = dict(candidate_rows[default_selected_index])
                 selected_source = "gate_failed_fallback_rap"
                 adaptive_replan_decision = "gate_failed_fallback_rap"
+                execution_mode = "gate_failed_base_policy_fallback"
                 selected_path_reasoning = (
                     intervention_reasoning.strip()
                     if isinstance(intervention_reasoning, str) and intervention_reasoning.strip()
@@ -1539,6 +1596,7 @@ class VLMPlanSelector:
                     "frame_index": frame_index,
                     "timestamp": timestamp,
                     "route_instruction": route_instruction,
+                    "execution_mode": execution_mode,
                     "candidate_count": len(candidate_rows),
                     "carry_previous_valid": carry_previous_valid,
                     "carry_previous_remaining_path_m": next(
@@ -1556,7 +1614,13 @@ class VLMPlanSelector:
                     "intervention_corrective_action": intervention_corrective_action,
                     "intervention_confidence": intervention_confidence,
                     "intervention_elapsed_sec": intervention_elapsed_sec,
+                    "intervention_prompt_tokens": intervention_token_usage["prompt_tokens"],
+                    "intervention_completion_tokens": intervention_token_usage["completion_tokens"],
+                    "intervention_total_tokens": intervention_token_usage["total_tokens"],
                     "vlm_elapsed_sec": 0.0,
+                    "scoring_prompt_tokens": 0,
+                    "scoring_completion_tokens": 0,
+                    "scoring_total_tokens": 0,
                     "scoring_invoked": False,
                     "vlm_q_valid": False,
                     "vlm_timed_out": False,
@@ -1580,6 +1644,7 @@ class VLMPlanSelector:
                     "selected_index": int(default_selected_index),
                     "selected_source": selected_source,
                     "selected_path_reasoning": selected_path_reasoning,
+                    "execution_mode": execution_mode,
                     "intervention_invoked": True,
                     "intervention_should_intervene": intervention_should_intervene,
                     "intervention_severity_score": intervention_severity_score,
@@ -1589,6 +1654,8 @@ class VLMPlanSelector:
                     "intervention_reasoning": intervention_reasoning,
                     "intervention_elapsed_sec": intervention_elapsed_sec,
                     "intervention_error": intervention_error,
+                    "intervention_token_usage": intervention_token_usage,
+                    "scoring_token_usage": _empty_token_usage(),
                     "vlm_candidate_index": None,
                     "vlm_confidence": None,
                     "vlm_q_valid": False,
@@ -1614,6 +1681,7 @@ class VLMPlanSelector:
                     "selected_candidate_row": selected_row,
                     "selected_source": selected_source,
                     "selected_path_reasoning": selected_path_reasoning,
+                    "execution_mode": execution_mode,
                     "vlm_candidate_index": None,
                     "vlm_confidence": None,
                     "vlm_reasoning": None,
@@ -1641,6 +1709,140 @@ class VLMPlanSelector:
                     "intervention_confidence": intervention_confidence,
                     "intervention_reasoning": intervention_reasoning,
                     "intervention_elapsed_sec": intervention_elapsed_sec,
+                    "intervention_token_usage": intervention_token_usage,
+                    "scoring_token_usage": _empty_token_usage(),
+                }
+
+            if intervention_should_intervene is False:
+                selected_row = dict(candidate_rows[default_selected_index])
+                selected_source = default_selected_source
+                adaptive_replan_decision = "gate_no_intervention_use_rap"
+                execution_mode = "base_policy_no_intervention"
+                selected_path_reasoning = (
+                    intervention_reasoning.strip()
+                    if isinstance(intervention_reasoning, str) and intervention_reasoning.strip()
+                    else "Intervention gate judged the baseline trajectory sufficient; keeping base policy."
+                )
+                timeline_record = {
+                    "frame_index": frame_index,
+                    "timestamp": timestamp,
+                    "route_instruction": route_instruction,
+                    "execution_mode": execution_mode,
+                    "candidate_count": len(candidate_rows),
+                    "carry_previous_valid": carry_previous_valid,
+                    "carry_previous_remaining_path_m": next(
+                        (path_length(np.asarray(row["local_plan"], dtype=np.float32)) for row in candidate_rows if row.get("source") == "carry_prev"),
+                        0.0,
+                    ),
+                    "selected_source": selected_source,
+                    "selected_candidate_index": default_selected_index,
+                    "selected_candidate_source": selected_row.get("source"),
+                    "selected_proposal_index": selected_row.get("proposal_index"),
+                    "intervention_invoked": True,
+                    "intervention_should_intervene": intervention_should_intervene,
+                    "intervention_severity_score": intervention_severity_score,
+                    "intervention_severity_band": intervention_severity_band,
+                    "intervention_corrective_action": intervention_corrective_action,
+                    "intervention_confidence": intervention_confidence,
+                    "intervention_elapsed_sec": intervention_elapsed_sec,
+                    "intervention_prompt_tokens": intervention_token_usage["prompt_tokens"],
+                    "intervention_completion_tokens": intervention_token_usage["completion_tokens"],
+                    "intervention_total_tokens": intervention_token_usage["total_tokens"],
+                    "vlm_elapsed_sec": 0.0,
+                    "scoring_prompt_tokens": 0,
+                    "scoring_completion_tokens": 0,
+                    "scoring_total_tokens": 0,
+                    "scoring_invoked": False,
+                    "vlm_q_valid": False,
+                    "vlm_timed_out": False,
+                    "latency_equivalent_steps": 0.0,
+                    "latency_equivalent_steps_ceil": 0,
+                    "adaptive_replan_decision": adaptive_replan_decision,
+                    "error": None,
+                    "q_invoked_vlm": False,
+                    "vlm_failed": False,
+                }
+                self._record_timeline(timeline_record)
+                debug_payload = {
+                    "frame_index": frame_index,
+                    "route_instruction": route_instruction,
+                    "default_selected_index": int(default_selected_index),
+                    "default_selected_source": default_selected_source,
+                    "candidate_rows": candidate_rows,
+                    "intervention_result": intervention_result,
+                    "scoring_result": None,
+                    "scoring_invoked": False,
+                    "selected_index": int(default_selected_index),
+                    "selected_source": selected_source,
+                    "selected_path_reasoning": selected_path_reasoning,
+                    "execution_mode": execution_mode,
+                    "intervention_invoked": True,
+                    "intervention_should_intervene": intervention_should_intervene,
+                    "intervention_severity_score": intervention_severity_score,
+                    "intervention_severity_band": intervention_severity_band,
+                    "intervention_corrective_action": intervention_corrective_action,
+                    "intervention_confidence": intervention_confidence,
+                    "intervention_reasoning": intervention_reasoning,
+                    "intervention_elapsed_sec": intervention_elapsed_sec,
+                    "intervention_error": None,
+                    "intervention_token_usage": intervention_token_usage,
+                    "scoring_token_usage": _empty_token_usage(),
+                    "vlm_candidate_index": None,
+                    "vlm_confidence": None,
+                    "vlm_q_valid": False,
+                    "vlm_timed_out": False,
+                    "vlm_q_candidate_scores": None,
+                    "vlm_q_best_candidate_index": None,
+                    "vlm_q_score_gap_to_carry": None,
+                    "vlm_q_score_gap_top2": None,
+                    "vlm_q_best_current_score": None,
+                    "vlm_q_carry_score": None,
+                    "adaptive_replan_decision": adaptive_replan_decision,
+                    "carry_previous_valid": carry_previous_valid,
+                    "latency_timeline_record": timeline_record,
+                    "error": None,
+                    "vlm_failed": False,
+                }
+                if self.cfg.save_debug_artifacts:
+                    result_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+                if not self.cfg.save_debug_artifacts:
+                    for temp_path in temp_paths:
+                        temp_path.unlink(missing_ok=True)
+                return {
+                    "selected_candidate_row": selected_row,
+                    "selected_source": selected_source,
+                    "selected_path_reasoning": selected_path_reasoning,
+                    "execution_mode": execution_mode,
+                    "vlm_candidate_index": None,
+                    "vlm_confidence": None,
+                    "vlm_reasoning": None,
+                    "vlm_elapsed_sec": 0.0,
+                    "vlm_error": None,
+                    "vlm_candidate_count": len(candidate_rows),
+                    "vlm_q_valid": False,
+                    "vlm_timed_out": False,
+                    "vlm_q_candidate_scores": None,
+                    "vlm_q_best_candidate_index": None,
+                    "vlm_q_score_gap_to_carry": None,
+                    "vlm_q_score_gap_top2": None,
+                    "vlm_q_best_current_score": None,
+                    "vlm_q_carry_score": None,
+                    "adaptive_replan_decision": adaptive_replan_decision,
+                    "carry_previous_valid": carry_previous_valid,
+                    "latency_timeline_record": timeline_record,
+                    "vlm_failed": False,
+                    "scoring_invoked": False,
+                    "intervention_invoked": True,
+                    "intervention_should_intervene": intervention_should_intervene,
+                    "intervention_severity_score": intervention_severity_score,
+                    "intervention_severity_band": intervention_severity_band,
+                    "intervention_corrective_action": intervention_corrective_action,
+                    "intervention_confidence": intervention_confidence,
+                    "intervention_reasoning": intervention_reasoning,
+                    "intervention_elapsed_sec": intervention_elapsed_sec,
+                    "intervention_error": None,
+                    "intervention_token_usage": intervention_token_usage,
+                    "scoring_token_usage": _empty_token_usage(),
                 }
 
         scoring_route_instruction = route_instruction
@@ -1697,10 +1899,12 @@ class VLMPlanSelector:
                 "elapsed_sec": 0.0,
                 "prompt": scoring_prompt if 'scoring_prompt' in locals() else "",
                 "error": str(exc),
+                "token_usage": _empty_token_usage(),
             }
 
         parsed = result.get("parsed_output")
         elapsed_sec = float(result.get("elapsed_sec", 0.0))
+        scoring_token_usage = _normalize_token_usage(result.get("token_usage"))
         selected_candidate_index = int(default_selected_index)
         selected_row = dict(candidate_rows[default_selected_index])
         selected_source = default_selected_source
@@ -1783,12 +1987,14 @@ class VLMPlanSelector:
                 else "vlm_selected_current"
             )
         )
+        execution_mode = "intervention_triggered_scoring"
 
         timeline_record = {
             "frame_index": frame_index,
             "timestamp": timestamp,
             "route_instruction": route_instruction,
             "scoring_route_instruction": scoring_route_instruction,
+            "execution_mode": execution_mode,
             "candidate_count": len(candidate_rows),
             "carry_previous_valid": carry_previous_valid,
             "carry_previous_remaining_path_m": next(
@@ -1806,7 +2012,13 @@ class VLMPlanSelector:
             "intervention_corrective_action": intervention_corrective_action,
             "intervention_confidence": intervention_confidence,
             "intervention_elapsed_sec": intervention_elapsed_sec,
+            "intervention_prompt_tokens": intervention_token_usage["prompt_tokens"],
+            "intervention_completion_tokens": intervention_token_usage["completion_tokens"],
+            "intervention_total_tokens": intervention_token_usage["total_tokens"],
             "vlm_elapsed_sec": elapsed_sec,
+            "scoring_prompt_tokens": scoring_token_usage["prompt_tokens"],
+            "scoring_completion_tokens": scoring_token_usage["completion_tokens"],
+            "scoring_total_tokens": scoring_token_usage["total_tokens"],
             "scoring_invoked": scoring_invoked,
             "vlm_q_valid": vlm_q_valid,
             "vlm_timed_out": vlm_timed_out,
@@ -1836,6 +2048,7 @@ class VLMPlanSelector:
             "selected_index": int(selected_candidate_index),
             "selected_source": selected_source,
             "selected_path_reasoning": selected_path_reasoning,
+            "execution_mode": execution_mode,
             "intervention_invoked": intervention_invoked,
             "intervention_should_intervene": intervention_should_intervene,
             "intervention_severity_score": intervention_severity_score,
@@ -1845,6 +2058,8 @@ class VLMPlanSelector:
             "intervention_reasoning": intervention_reasoning,
             "intervention_elapsed_sec": intervention_elapsed_sec,
             "intervention_error": intervention_error,
+            "intervention_token_usage": intervention_token_usage,
+            "scoring_token_usage": scoring_token_usage,
             "vlm_candidate_index": vlm_candidate_index,
             "vlm_confidence": vlm_confidence,
             "vlm_q_valid": vlm_q_valid,
@@ -1880,6 +2095,7 @@ class VLMPlanSelector:
         return {
             "selected_candidate_row": selected_row,
             "selected_source": selected_source,
+            "execution_mode": execution_mode,
             "selected_path_reasoning": selected_path_reasoning,
             "vlm_candidate_index": vlm_candidate_index,
             "vlm_confidence": vlm_confidence,
@@ -1909,6 +2125,8 @@ class VLMPlanSelector:
             "intervention_reasoning": intervention_reasoning,
             "intervention_elapsed_sec": intervention_elapsed_sec,
             "intervention_error": intervention_error,
+            "intervention_token_usage": intervention_token_usage,
+            "scoring_token_usage": scoring_token_usage,
         }
 
     def maybe_select_planner(
@@ -1936,6 +2154,7 @@ class VLMPlanSelector:
                 "timed_out": False,
                 "prompt_char_count": 0,
                 "image_count": 0,
+                "token_usage": _empty_token_usage(),
             }
 
         if not learned_candidate_rows:
@@ -1948,6 +2167,7 @@ class VLMPlanSelector:
                 "timed_out": False,
                 "prompt_char_count": 0,
                 "image_count": 0,
+                "token_usage": _empty_token_usage(),
             }
         if not rule_based_candidate_rows:
             return {
@@ -1959,6 +2179,7 @@ class VLMPlanSelector:
                 "timed_out": False,
                 "prompt_char_count": 0,
                 "image_count": 0,
+                "token_usage": _empty_token_usage(),
             }
 
         selector = self._ensure_selector()
@@ -1972,6 +2193,7 @@ class VLMPlanSelector:
                 "timed_out": False,
                 "prompt_char_count": 0,
                 "image_count": 0,
+                "token_usage": _empty_token_usage(),
             }
 
         camera_order = resolve_vlm_camera_order(self.cfg.planner_gate_camera_mode or self.cfg.camera_mode)
@@ -2010,6 +2232,7 @@ class VLMPlanSelector:
         elapsed_sec = 0.0
         parsed = None
         error = None
+        token_usage = _empty_token_usage()
         try:
             result = selector.infer_prompt(
                 image_paths=image_paths,
@@ -2019,6 +2242,7 @@ class VLMPlanSelector:
             )
             elapsed_sec = float(result.get("elapsed_sec", 0.0))
             parsed = result.get("parsed_output")
+            token_usage = _normalize_token_usage(result.get("token_usage"))
             if not isinstance(parsed, dict):
                 error = str(result.get("error") or "invalid_planner_gate_output")
         except Exception as exc:
@@ -2045,12 +2269,32 @@ class VLMPlanSelector:
             error = error or f"planner_gate_timeout:{elapsed_sec:.3f}"
             selected_planner = default_planner
 
+        planner_gate_record = {
+            "frame_index": frame_index,
+            "selected_planner": selected_planner,
+            "execution_mode": (
+                "planner_gate_failed_base_policy_fallback"
+                if error is not None
+                else f"planner_gate_selected_{selected_planner}"
+            ),
+            "elapsed_sec": elapsed_sec,
+            "timed_out": timed_out,
+            "error": error,
+            "prompt_char_count": len(prompt),
+            "image_count": len(image_paths),
+            "prompt_tokens": token_usage["prompt_tokens"],
+            "completion_tokens": token_usage["completion_tokens"],
+            "total_tokens": token_usage["total_tokens"],
+        }
+        self._record_planner_gate(planner_gate_record)
+
         if self.cfg.planner_gate_save_debug_artifacts and self.cfg.save_debug_artifacts:
             gate_payload = {
                 "frame_index": frame_index,
                 "route_instruction": route_instruction,
                 "default_planner": default_planner,
                 "selected_planner": selected_planner,
+                "execution_mode": planner_gate_record["execution_mode"],
                 "confidence": confidence,
                 "reasoning": reasoning,
                 "elapsed_sec": elapsed_sec,
@@ -2058,6 +2302,7 @@ class VLMPlanSelector:
                 "error": error,
                 "prompt_char_count": len(prompt),
                 "image_count": len(image_paths),
+                "token_usage": token_usage,
                 "learned_candidate_count": len(learned_candidate_rows),
                 "rule_based_candidate_count": len(rule_based_candidate_rows),
             }
@@ -2075,6 +2320,7 @@ class VLMPlanSelector:
             "timed_out": timed_out,
             "prompt_char_count": len(prompt),
             "image_count": len(image_paths),
+            "token_usage": token_usage,
         }
 
     def finalize(self) -> None:
@@ -2083,83 +2329,216 @@ class VLMPlanSelector:
                 self._selector.close()
             except Exception:
                 LOG.exception("Failed to close VLM selector")
-        if not self._timeline_records or not self.cfg.save_debug_artifacts:
+        if not self.cfg.save_debug_artifacts:
+            return
+        if not self._timeline_records and not self._planner_gate_records:
             return
 
+        def _sum_token_usage(records: Sequence[Dict[str, object]], prefix: str) -> Dict[str, int]:
+            prompt = sum(int(record.get(f"{prefix}_prompt_tokens", 0) or 0) for record in records)
+            completion = sum(int(record.get(f"{prefix}_completion_tokens", 0) or 0) for record in records)
+            total = sum(int(record.get(f"{prefix}_total_tokens", 0) or 0) for record in records)
+            return {
+                "prompt_tokens_total": int(prompt),
+                "completion_tokens_total": int(completion),
+                "total_tokens_total": int(total if total > 0 else prompt + completion),
+            }
+
+        def _planner_gate_token_usage(records: Sequence[Dict[str, object]]) -> Dict[str, int]:
+            prompt = sum(int(record.get("prompt_tokens", 0) or 0) for record in records)
+            completion = sum(int(record.get("completion_tokens", 0) or 0) for record in records)
+            total = sum(int(record.get("total_tokens", 0) or 0) for record in records)
+            return {
+                "prompt_tokens_total": int(prompt),
+                "completion_tokens_total": int(completion),
+                "total_tokens_total": int(total if total > 0 else prompt + completion),
+            }
+
+        def _safe_latency_summary(values: Sequence[float], prefix: str) -> Dict[str, float]:
+            if not values:
+                return {
+                    f"{prefix}_mean_sec": 0.0,
+                    f"{prefix}_p50_sec": 0.0,
+                    f"{prefix}_p95_sec": 0.0,
+                    f"{prefix}_max_sec": 0.0,
+                }
+            return {
+                f"{prefix}_mean_sec": float(np.mean(values)),
+                f"{prefix}_p50_sec": float(np.percentile(values, 50)),
+                f"{prefix}_p95_sec": float(np.percentile(values, 95)),
+                f"{prefix}_max_sec": float(np.max(values)),
+            }
+
+        def _records_for_mode(records: Sequence[Dict[str, object]], mode: str) -> List[Dict[str, object]]:
+            return [record for record in records if str(record.get("execution_mode", "")) == mode]
+
+        def _branch_summary(
+            *,
+            records: Sequence[Dict[str, object]],
+            latency_field: str,
+            token_prefix: Optional[str],
+        ) -> Dict[str, object]:
+            values = [float(record.get(latency_field, 0.0) or 0.0) for record in records]
+            summary = {
+                "count": int(len(records)),
+                **_safe_latency_summary(values, "latency"),
+            }
+            if token_prefix is not None:
+                summary["tokens"] = _sum_token_usage(records, token_prefix)
+            return summary
+
+        record_count = len(self._timeline_records)
         elapsed = [float(record["vlm_elapsed_sec"]) for record in self._timeline_records]
         intervention_elapsed = [float(record.get("intervention_elapsed_sec", 0.0)) for record in self._timeline_records]
         total_elapsed = [float(v) + float(g) for v, g in zip(elapsed, intervention_elapsed)]
-        carry_reuse_rate = sum(
-            record["adaptive_replan_decision"] in {"reuse_prev", "vlm_q_reuse_prev", "q_reuse_prev"}
-            for record in self._timeline_records
-        ) / len(self._timeline_records)
-        switch_rate = sum(
-            record["adaptive_replan_decision"] in {"switch_to_current", "vlm_q_switch_to_current", "q_switch_to_current"}
-            for record in self._timeline_records
-        ) / len(self._timeline_records)
-        fallback_rate = sum(
-            record.get("adaptive_replan_decision") in {"vlm_failed_fallback_rap", "vlm_timeout_fallback_rap", "gate_failed_fallback_rap"}
-            for record in self._timeline_records
-        ) / len(self._timeline_records)
-        intervention_trigger_rate = sum(
-            1.0
-            for record in self._timeline_records
-            if record.get("intervention_invoked") and record.get("intervention_should_intervene") is True
-        ) / len(self._timeline_records)
+        planner_gate_elapsed = [float(record.get("elapsed_sec", 0.0)) for record in self._planner_gate_records]
+        carry_reuse_rate = (
+            sum(
+                record["adaptive_replan_decision"] in {"reuse_prev", "vlm_q_reuse_prev", "q_reuse_prev"}
+                for record in self._timeline_records
+            ) / record_count
+            if record_count else 0.0
+        )
+        switch_rate = (
+            sum(
+                record["adaptive_replan_decision"] in {"switch_to_current", "vlm_q_switch_to_current", "q_switch_to_current"}
+                for record in self._timeline_records
+            ) / record_count
+            if record_count else 0.0
+        )
+        fallback_rate = (
+            sum(
+                record.get("adaptive_replan_decision") in {"vlm_failed_fallback_rap", "vlm_timeout_fallback_rap", "gate_failed_fallback_rap"}
+                for record in self._timeline_records
+            ) / record_count
+            if record_count else 0.0
+        )
+        intervention_trigger_rate = (
+            sum(
+                1.0
+                for record in self._timeline_records
+                if record.get("intervention_invoked") and record.get("intervention_should_intervene") is True
+            ) / record_count
+            if record_count else 0.0
+        )
         intervention_scores = [
             float(record["intervention_severity_score"])
             for record in self._timeline_records
             if record.get("intervention_severity_score") is not None
         ]
-        intervention_low_rate = sum(
-            1.0
+        intervention_low_rate = (
+            sum(
+                1.0
+                for record in self._timeline_records
+                if record.get("intervention_invoked") and record.get("intervention_severity_band") == "low"
+            ) / record_count
+            if record_count else 0.0
+        )
+        intervention_medium_rate = (
+            sum(
+                1.0
+                for record in self._timeline_records
+                if record.get("intervention_invoked") and record.get("intervention_severity_band") == "medium"
+            ) / record_count
+            if record_count else 0.0
+        )
+        intervention_high_rate = (
+            sum(
+                1.0
+                for record in self._timeline_records
+                if record.get("intervention_invoked") and record.get("intervention_severity_band") == "high"
+            ) / record_count
+            if record_count else 0.0
+        )
+        intervention_action_applied_rate = (
+            sum(
+                1.0
+                for record in self._timeline_records
+                if record.get("intervention_invoked")
+                and record.get("intervention_should_intervene") is True
+                and record.get("intervention_severity_score") is not None
+                and float(record.get("intervention_severity_score")) >= float(self.cfg.intervention_action_threshold)
+            ) / record_count
+            if record_count else 0.0
+        )
+        gate_skip_rate = (
+            sum(
+                1.0
+                for record in self._timeline_records
+                if record.get("intervention_invoked") and record.get("intervention_should_intervene") is False
+            ) / record_count
+            if record_count else 0.0
+        )
+        scoring_invoked_rate = (
+            sum(
+                1.0 if record.get("scoring_invoked") else 0.0
+                for record in self._timeline_records
+            ) / record_count
+            if record_count else 0.0
+        )
+        intervention_invoked_count = sum(1 for record in self._timeline_records if record.get("intervention_invoked"))
+        intervention_timeout_count = sum(
+            1
             for record in self._timeline_records
-            if record.get("intervention_invoked") and record.get("intervention_severity_band") == "low"
-        ) / len(self._timeline_records)
-        intervention_medium_rate = sum(
-            1.0
+            if str(record.get("error") or "").startswith("intervention_timeout")
+        )
+        intervention_invalid_count = sum(
+            1
             for record in self._timeline_records
-            if record.get("intervention_invoked") and record.get("intervention_severity_band") == "medium"
-        ) / len(self._timeline_records)
-        intervention_high_rate = sum(
-            1.0
+            if str(record.get("error") or "") == "intervention_output_invalid"
+        )
+        intervention_error_count = sum(
+            1
             for record in self._timeline_records
-            if record.get("intervention_invoked") and record.get("intervention_severity_band") == "high"
-        ) / len(self._timeline_records)
-        intervention_action_applied_rate = sum(
-            1.0
+            if record.get("intervention_invoked") and record.get("error") is not None
+        )
+        intervention_valid_count = max(0, intervention_invoked_count - intervention_error_count)
+        scoring_invoked_count = sum(1 for record in self._timeline_records if record.get("scoring_invoked"))
+        scoring_timeout_count = sum(1 for record in self._timeline_records if record.get("vlm_timed_out"))
+        scoring_error_count = sum(
+            1
             for record in self._timeline_records
-            if record.get("intervention_invoked")
-            and record.get("intervention_should_intervene") is True
-            and record.get("intervention_severity_score") is not None
-            and float(record.get("intervention_severity_score")) >= float(self.cfg.intervention_action_threshold)
-        ) / len(self._timeline_records)
-        gate_skip_rate = sum(
-            1.0
-            for record in self._timeline_records
-            if record.get("intervention_invoked") and record.get("intervention_should_intervene") is False
-        ) / len(self._timeline_records)
-        scoring_invoked_rate = sum(
-            1.0 if record.get("scoring_invoked") else 0.0
-            for record in self._timeline_records
-        ) / len(self._timeline_records)
+            if record.get("scoring_invoked") and record.get("error") is not None
+        )
+        scoring_valid_count = max(0, sum(1 for record in self._timeline_records if record.get("vlm_q_valid")) - scoring_timeout_count)
+        planner_gate_invoked_count = len(self._planner_gate_records)
+        planner_gate_timeout_count = sum(1 for record in self._planner_gate_records if record.get("timed_out"))
+        planner_gate_error_count = sum(1 for record in self._planner_gate_records if record.get("error") is not None)
+        planner_gate_valid_count = sum(1 for record in self._planner_gate_records if record.get("error") is None)
+        base_policy_no_intervention_records = _records_for_mode(self._timeline_records, "base_policy_no_intervention")
+        gate_failed_base_policy_records = _records_for_mode(self._timeline_records, "gate_failed_base_policy_fallback")
+        intervention_scoring_records = _records_for_mode(self._timeline_records, "intervention_triggered_scoring")
+        planner_gate_learned_records = _records_for_mode(self._planner_gate_records, "planner_gate_selected_learned")
+        planner_gate_rule_based_records = _records_for_mode(self._planner_gate_records, "planner_gate_selected_rule_based")
+        planner_gate_failed_records = _records_for_mode(self._planner_gate_records, "planner_gate_failed_base_policy_fallback")
+        scoring_token_usage = _sum_token_usage(self._timeline_records, "scoring")
+        intervention_token_usage = _sum_token_usage(self._timeline_records, "intervention")
+        planner_gate_token_usage = _planner_gate_token_usage(self._planner_gate_records)
+        total_prompt_tokens = (
+            scoring_token_usage["prompt_tokens_total"]
+            + intervention_token_usage["prompt_tokens_total"]
+            + planner_gate_token_usage["prompt_tokens_total"]
+        )
+        total_completion_tokens = (
+            scoring_token_usage["completion_tokens_total"]
+            + intervention_token_usage["completion_tokens_total"]
+            + planner_gate_token_usage["completion_tokens_total"]
+        )
+        total_tokens = (
+            scoring_token_usage["total_tokens_total"]
+            + intervention_token_usage["total_tokens_total"]
+            + planner_gate_token_usage["total_tokens_total"]
+        )
         summary = {
-            "num_records": len(self._timeline_records),
-            "latency_mean_sec": float(np.mean(elapsed)),
-            "latency_p50_sec": float(np.percentile(elapsed, 50)),
-            "latency_p95_sec": float(np.percentile(elapsed, 95)),
-            "latency_max_sec": float(np.max(elapsed)),
-            "intervention_latency_mean_sec": float(np.mean(intervention_elapsed)),
-            "intervention_latency_p50_sec": float(np.percentile(intervention_elapsed, 50)),
-            "intervention_latency_p95_sec": float(np.percentile(intervention_elapsed, 95)),
-            "intervention_latency_max_sec": float(np.max(intervention_elapsed)),
-            "total_vlm_latency_mean_sec": float(np.mean(total_elapsed)),
-            "total_vlm_latency_p50_sec": float(np.percentile(total_elapsed, 50)),
-            "total_vlm_latency_p95_sec": float(np.percentile(total_elapsed, 95)),
-            "total_vlm_latency_max_sec": float(np.max(total_elapsed)),
+            "num_records": record_count,
+            "planner_gate_records": planner_gate_invoked_count,
+            **_safe_latency_summary(elapsed, "latency"),
+            **_safe_latency_summary(intervention_elapsed, "intervention_latency"),
+            **_safe_latency_summary(total_elapsed, "total_vlm_latency"),
+            **_safe_latency_summary(planner_gate_elapsed, "planner_gate_latency"),
             "latency_equivalent_steps_mean": float(
                 np.mean([record["latency_equivalent_steps"] for record in self._timeline_records])
-            ),
+            ) if record_count else 0.0,
             "carry_reuse_rate": float(carry_reuse_rate),
             "switch_to_current_rate": float(switch_rate),
             "fallback_rate": float(fallback_rate),
@@ -2177,6 +2556,91 @@ class VLMPlanSelector:
             "scoring_invoked_rate": float(scoring_invoked_rate),
             "vlm_q_valid_rate": float(
                 np.mean([1.0 if record.get("vlm_q_valid") else 0.0 for record in self._timeline_records])
-            ),
+            ) if record_count else 0.0,
+            "counts": {
+                "intervention_invoked": int(intervention_invoked_count),
+                "intervention_valid": int(intervention_valid_count),
+                "intervention_invalid": int(intervention_invalid_count),
+                "intervention_timeout": int(intervention_timeout_count),
+                "intervention_error": int(intervention_error_count),
+                "scoring_invoked": int(scoring_invoked_count),
+                "scoring_valid": int(scoring_valid_count),
+                "scoring_timeout": int(scoring_timeout_count),
+                "scoring_error": int(scoring_error_count),
+                "planner_gate_invoked": int(planner_gate_invoked_count),
+                "planner_gate_valid": int(planner_gate_valid_count),
+                "planner_gate_timeout": int(planner_gate_timeout_count),
+                "planner_gate_error": int(planner_gate_error_count),
+                "base_policy_no_intervention": int(len(base_policy_no_intervention_records)),
+                "gate_failed_base_policy_fallback": int(len(gate_failed_base_policy_records)),
+                "intervention_triggered_scoring": int(len(intervention_scoring_records)),
+                "planner_gate_selected_learned": int(len(planner_gate_learned_records)),
+                "planner_gate_selected_rule_based": int(len(planner_gate_rule_based_records)),
+                "planner_gate_failed_base_policy_fallback": int(len(planner_gate_failed_records)),
+            },
+            "branch_breakdown": {
+                "solo_or_merge": {
+                    "base_policy_no_intervention": _branch_summary(
+                        records=base_policy_no_intervention_records,
+                        latency_field="intervention_elapsed_sec",
+                        token_prefix="intervention",
+                    ),
+                    "gate_failed_base_policy_fallback": _branch_summary(
+                        records=gate_failed_base_policy_records,
+                        latency_field="intervention_elapsed_sec",
+                        token_prefix="intervention",
+                    ),
+                    "intervention_triggered_scoring": {
+                        **_safe_latency_summary(
+                            [
+                                float(record.get("intervention_elapsed_sec", 0.0) or 0.0) + float(record.get("vlm_elapsed_sec", 0.0) or 0.0)
+                                for record in intervention_scoring_records
+                            ],
+                            "latency",
+                        ),
+                        "count": int(len(intervention_scoring_records)),
+                        "tokens": {
+                            "intervention": _sum_token_usage(intervention_scoring_records, "intervention"),
+                            "scoring": _sum_token_usage(intervention_scoring_records, "scoring"),
+                        },
+                    },
+                },
+                "planner_gate": {
+                    "selected_learned": {
+                        **_safe_latency_summary(
+                            [float(record.get("elapsed_sec", 0.0) or 0.0) for record in planner_gate_learned_records],
+                            "latency",
+                        ),
+                        "count": int(len(planner_gate_learned_records)),
+                        "tokens": _planner_gate_token_usage(planner_gate_learned_records),
+                    },
+                    "selected_rule_based": {
+                        **_safe_latency_summary(
+                            [float(record.get("elapsed_sec", 0.0) or 0.0) for record in planner_gate_rule_based_records],
+                            "latency",
+                        ),
+                        "count": int(len(planner_gate_rule_based_records)),
+                        "tokens": _planner_gate_token_usage(planner_gate_rule_based_records),
+                    },
+                    "failed_base_policy_fallback": {
+                        **_safe_latency_summary(
+                            [float(record.get("elapsed_sec", 0.0) or 0.0) for record in planner_gate_failed_records],
+                            "latency",
+                        ),
+                        "count": int(len(planner_gate_failed_records)),
+                        "tokens": _planner_gate_token_usage(planner_gate_failed_records),
+                    },
+                },
+            },
+            "tokens": {
+                "prompt_tokens_total": int(total_prompt_tokens),
+                "completion_tokens_total": int(total_completion_tokens),
+                "total_tokens_total": int(total_tokens),
+                "by_stage": {
+                    "intervention": intervention_token_usage,
+                    "scoring": scoring_token_usage,
+                    "planner_gate": planner_gate_token_usage,
+                },
+            },
         }
         self.summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
