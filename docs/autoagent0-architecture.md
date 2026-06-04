@@ -12,20 +12,37 @@ ranking, VLM prompts, scoring, or fallback behavior.
   debug traces.
 - `autoagent0/experts/` names RAP, DrivoR, and rule-based planners as expert
   backends. The actual model/client code remains in `planners/`.
-- `autoagent0/adapters/hugsim/` contains HUGSIM conversion helpers. HUGSIM is
-  the current evaluation backend, not the long-term core abstraction.
+- `autoagent0/adapters/hugsim/` contains HUGSIM conversion, runtime, video,
+  demo-task, output/result, and visualization helpers. HUGSIM is the current
+  evaluation backend, not the long-term core abstraction.
 - `autoagent0/prompts/` contains prompt builders used by the current
   intervention scorer and planner gate.
+- `autoagent0/vlm/` contains shared VLM backend, parsing, and debug utilities
+  used by the current selector paths.
 
 The first shared-code migration is intentionally narrow:
 - `autoagent0/core/candidates.py` owns candidate summarization, candidate-row
   formatting, path-length helpers, and planner-gate candidate filtering.
+- `autoagent0/core/payloads.py` owns normalized plan payload construction used
+  by RAP, DrivoR, and rule-based client adapters.
+- `autoagent0/core/planner_flow.py` owns shared planner-flow extraction helpers
+  for method A/B and base-policy paths.
 - `autoagent0/adapters/hugsim/context.py` owns current route/task/camera/ego
   context extraction helpers.
+- `autoagent0/adapters/hugsim/defaults.py`, `geometry.py`, `io.py`, and
+  `overlays.py` own HUGSIM default-trajectory, geometry, filesystem/image, and
+  overlay helpers shared across planner clients.
+- `autoagent0/adapters/hugsim/runtime.py` owns open-FIFO message IO and planner
+  process liveness checks for the HUGSIM runner.
+- `autoagent0/adapters/hugsim/video.py`, `demo_tasks.py`, and `results.py` own
+  front/video rendering, curated demo task completion/overrides, and eval
+  performance summary/output naming helpers.
 - `autoagent0/prompts/orchestrator.py` owns current scoring, intervention, and
   planner-gate prompt builders.
 - `autoagent0/core/orchestrator.py` owns current VLM output coercion and
   selection helpers.
+- `autoagent0/vlm/backends.py`, `parsing.py`, and `debug.py` own shared VLM
+  model-call, JSON parsing, and debug artifact helpers.
 - `autoagent0/experts/rule_based.py` is the normalized wrapper around the
   existing Rule-Planner provider.
 
@@ -33,6 +50,16 @@ The first shared-code migration is intentionally narrow:
 and compatibility facade. Existing code should continue importing from it where
 needed, but new shared helper edits should go into `autoagent0/` first and be
 re-exported through the facade only when required for compatibility.
+
+`closed_loop.py` remains the active HUGSIM rollout entrypoint. It now delegates
+runtime pipe IO, video writing, demo task handling, and result/performance
+summary construction to `autoagent0/adapters/hugsim/`, but it still owns the
+HUGSIM environment loop and scene loading.
+
+`planners/rap/client.py`, `planners/drivor/client.py`, and
+`planners/rule_based/client.py` remain the active planner backend adapters.
+They still own planner-specific launch/config/model integration; shared payload,
+image, geometry, and default-trajectory helpers are imported from `autoagent0/`.
 
 ## Mapping From Existing Methods
 
@@ -74,3 +101,17 @@ Frame-level VLM debug JSON now includes `agent_trace`. This records:
 
 The trace is diagnostic only. It is not used by `eval.json` scoring and should
 not affect plan payloads or selected trajectories.
+
+## Verification when making large changes
+
+After the phase-1 refactor, the one-scene all-method smoke suite passed on
+NuScenes scene `scene-0010-easy-00` for all nine canonical methods:
+`rap_vlm`, `drivor_vlm`, `rap_intervention_4cam`,
+`drivor_intervention_4cam`, `rule_based`, `rap_impl_a`, `drivor_impl_a`,
+`rap_impl_b`, and `drivor_impl_b`.
+
+Use this command after future large refactors:
+
+```bash
+bash scripts/baselines/smoke/submit_method_smoke.sh
+```
