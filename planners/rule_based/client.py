@@ -17,23 +17,27 @@ Assumptions (review before running):
 """
 import argparse
 import logging
-import math
 import os
-import pickle
-import struct
 import sys
 import time
 import traceback
-import select
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-import fcntl
 
-from scipy.spatial.transform import Rotation as SCR
+from autoagent0.adapters.hugsim.defaults import get_default_trajectories
+from autoagent0.adapters.hugsim.geometry import (
+    info_to_pose,
+    local_plan_to_world,
+    path_length,
+    truncate_plan,
+    world_points_to_current_local,
+)
+from autoagent0.adapters.hugsim.io import read_obs_file, write_plan_file
+from autoagent0.core.payloads import build_hugsim_plan_payload
 from planners.common.vlm_selector import VLMPlanSelector, VLMSelectorConfig
 from planners.common.vlm_env import (
     VLM_ENV_DEFAULTS,
@@ -163,70 +167,6 @@ def make_command_one_hot(command: int) -> np.ndarray:
 
 # no need for preprocess_image because rule-based planner handles its own preprocessing
 
-def forward_left_basis(yaw: float):
-        forward_dir = np.array([math.sin(yaw), math.cos(yaw)], dtype=np.float32)
-        left_dir = np.array([-math.cos(yaw), math.sin(yaw)], dtype=np.float32)
-        return forward_dir, left_dir
-
-def world_delta_to_local_components(delta_world: np.ndarray, yaw: float) -> np.ndarray:
-    fwd, left = forward_left_basis(yaw)
-    return np.array([float(np.dot(delta_world, fwd)), float(np.dot(delta_world, left))], dtype=np.float32)
-
-
-#need to figure out what this does
-def timestamp_delta_seconds(prev_info: Dict[str, object], next_info: Dict[str, object], default_dt: float = 0.25) -> float:
-    dt = float(next_info["timestamp"]) - float(prev_info["timestamp"])
-    if dt <= 1e-6:
-        return default_dt
-    return dt
-
-def compute_local_velocity(info_history: Sequence[Dict[str, object]], index: int) -> np.ndarray:
-    """Compute local velocity (forward, left) using RAP's approach (finite differences)"""
-    if len(info_history) <= 1:
-        return np.zeros(2, dtype=np.float32)
-
-    curr_info = info_history[index]
-    curr_pos = np.asarray(curr_info["ego_pos"], dtype=np.float32)
-    curr_yaw = float(np.asarray(curr_info["ego_rot"], dtype=np.float32)[1])
-
-    if index > 0:
-        prev_info = info_history[index - 1]
-        prev_pos = np.asarray(prev_info["ego_pos"], dtype=np.float32)
-        dt = timestamp_delta_seconds(prev_info, curr_info)
-        delta_world = np.array(
-            [curr_pos[0] - prev_pos[0], curr_pos[2] - prev_pos[2]],
-            dtype=np.float32)
-        return world_delta_to_local_components(delta_world, curr_yaw) / dt
-
-    # forward diff
-    next_info = info_history[index + 1]
-    next_pos = np.asarray(next_info["ego_pos"], dtype=np.float32)
-    dt = timestamp_delta_seconds(curr_info, next_info)
-    delta_world = np.array(
-        [next_pos[0] - curr_pos[0], next_pos[2] - curr_pos[2]], 
-        dtype=np.float32,
-    )
-    return world_delta_to_local_components(delta_world, curr_yaw) / dt
-
-
-def compute_local_acceleration(info_history: Sequence[Dict], index: int) -> np.ndarray:
-    if len(info_history) <= 2:
-        return np.zeros(2, dtype=np.float32)
-    curr_vel = compute_local_velocity(info_history, index)
-    if index > 0:
-        prev_vel = compute_local_velocity(info_history, index - 1)
-        dt = float(info_history[index]["timestamp"]) - float(info_history[index - 1]["timestamp"])
-        if dt <= 1e-6:
-            return np.zeros(2, dtype=np.float32)
-        return (curr_vel - prev_vel) / dt
-    next_vel = compute_local_velocity(info_history, index + 1)
-    dt = float(info_history[index + 1]["timestamp"]) - float(info_history[index]["timestamp"])
-    if dt <= 1e-6:
-        return np.zeros(2, dtype=np.float32)
-    return (next_vel - curr_vel) / dt
-
-
-
 # comparable to rap_to_hugsim_plan
 def rule_based_to_hugsim_plan(trajectory: np.ndarray) -> np.ndarray:
     # NAVSIM predictions: [x_forward, y_left, heading] -> HUGSIM expects [x_right, y_forward]
@@ -313,93 +253,6 @@ def trajectory_to_scores(selected: Any, debug_info: Optional[Dict[str, Any]] = N
     # Unknown: return a single zero score
     return np.array([0.0], dtype=np.float32)
 
-#gotta figure out what the functions up to world_points_to_current_local do
-
-def info_to_pose(info: Dict[str, object]) -> np.ndarray:
-    pose = np.eye(4, dtype=np.float32)
-    pose[:3, :3] = SCR.from_euler(
-        "XYZ",
-        np.asarray(info["ego_rot"], dtype=np.float32),
-        degrees=False,
-    ).as_matrix().astype(np.float32)
-    pose[:3, 3] = np.asarray(info["ego_pos"], dtype=np.float32)
-    return pose
-
-
-def local_plan_to_world(plan_traj: np.ndarray, ego_pose: np.ndarray) -> np.ndarray:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if len(plan_traj) == 0:
-        return np.zeros((0, 3), dtype=np.float32)
-
-    origin = ego_pose[:3, 3]
-    right_dir = ego_pose[:3, 0]
-    forward_dir = ego_pose[:3, 2]
-    points_world = [
-        origin + float(right) * right_dir + float(forward) * forward_dir
-        for right, forward in plan_traj
-    ]
-    return np.asarray(points_world, dtype=np.float32)
-
-
-def world_points_to_current_local(points_world: np.ndarray, ego_pose: np.ndarray) -> np.ndarray:
-    if len(points_world) == 0:
-        return np.zeros((0, 2), dtype=np.float32)
-
-    homogeneous = np.concatenate(
-        [np.asarray(points_world, dtype=np.float32), np.ones((len(points_world), 1), dtype=np.float32)],
-        axis=1,
-    )
-    ego_points = (np.linalg.inv(ego_pose) @ homogeneous.T).T[:, :3]
-    return np.stack([ego_points[:, 0], ego_points[:, 2]], axis=1).astype(np.float32)
-
-
-def path_length(plan_traj: np.ndarray) -> float:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if len(plan_traj) < 2:
-        return 0.0
-    return float(np.linalg.norm(np.diff(plan_traj, axis=0), axis=1).sum())
-
-
-
-def curvature_cost(plan_traj: np.ndarray) -> float:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if len(plan_traj) < 3:
-        return 0.0
-    diffs = np.diff(plan_traj, axis=0)
-    headings = np.arctan2(diffs[:, 0], np.clip(diffs[:, 1], 1e-6, None))
-    heading_deltas = np.diff(headings)
-    heading_deltas = np.arctan2(np.sin(heading_deltas), np.cos(heading_deltas))
-    return float(np.mean(np.abs(heading_deltas)))
-
-
-# def compute_q_score(
-#     plan_traj: np.ndarray,
-#     proposal_score_norm: float,
-#     vlm_cfg: VLMSelectorConfig,
-#     is_carry: bool,
-# ) -> float:
-#     plan_traj = np.asarray(plan_traj, dtype=np.float32)
-#     if len(plan_traj) == 0:
-#         return -1e6
-
-#     path = path_length(plan_traj)
-#     endpoint = plan_endpoint(plan_traj)
-#     progress = max(0.0, float(endpoint[1]))
-#     offcenter = abs(float(endpoint[0]))
-#     curvature = curvature_cost(plan_traj)
-#     shortfall = max(0.0, 1.0 - path)
-
-#     score = 0.0
-#     score += vlm_cfg.q_weight_rap_score * float(proposal_score_norm)
-#     score += vlm_cfg.q_weight_progress * progress
-#     score -= vlm_cfg.q_weight_offcenter * offcenter
-#     score -= vlm_cfg.q_weight_curvature * curvature
-#     score -= vlm_cfg.q_weight_shortplan * shortfall
-#     if is_carry and vlm_cfg.q_carry_score_decay > 0.0:
-#         score -= vlm_cfg.q_carry_score_decay
-#     return float(score)
-
-
 def build_carry_plan_candidate(
     previous_plan: Optional[np.ndarray],
     previous_pose: Optional[np.ndarray],
@@ -447,115 +300,6 @@ def build_carry_plan_candidate(
         "carry_elapsed_pose_steps": elapsed_pose_steps,
     }
 
-
-def truncate_plan(plan_traj: np.ndarray, num_poses: int) -> np.ndarray:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if num_poses <= 0:
-        return np.zeros((0, 2), dtype=np.float32)
-    return np.asarray(plan_traj[: min(len(plan_traj), int(num_poses))], dtype=np.float32)
-
-def plan_endpoint(plan_traj: np.ndarray) -> np.ndarray:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if len(plan_traj) == 0:
-        return np.zeros(2, dtype=np.float32)
-    return np.asarray(plan_traj[-1], dtype=np.float32)
-
-
-def normalize_scores(scores: np.ndarray) -> np.ndarray:
-    scores = np.asarray(scores, dtype=np.float32)
-    if len(scores) == 0:
-        return np.zeros((0,), dtype=np.float32)
-    score_min = float(scores.min())
-    score_max = float(scores.max())
-    if score_max - score_min < 1e-6:
-        return np.ones_like(scores, dtype=np.float32)
-    return (scores - score_min) / (score_max - score_min)
-
-
-def get_default_trajectories(num_poses: int) -> np.ndarray:
-    num_poses = max(2, int(num_poses))
-    t = np.linspace(0.0, 1.0, num_poses, dtype=np.float32)
-    forward = np.stack([np.zeros_like(t), 40.0 * t], axis=1)
-    slight_left = np.stack([-5.0 * (t ** 2), 38.0 * t], axis=1)
-    slight_right = np.stack([5.0 * (t ** 2), 38.0 * t], axis=1)
-    sharp_left = np.stack([-25.0 * (t ** 3), 30.0 * t], axis=1)
-    sharp_right = np.stack([25.0 * (t ** 3), 30.0 * t], axis=1)
-    return np.stack([forward, slight_left, slight_right, sharp_left, sharp_right], axis=0).astype(np.float32)
-
-#reads from HUGSIM FIFO pipe
-def read_obs(obs_pipe: Path):
-    """ pickled object from pipe: 8-byte length prefix + payload"""
-    with open(obs_pipe, "rb") as pipe:
-        header = pipe.read(8)
-        if len(header) != 8:
-            raise EOFError(f"Incomplete pipe header from {obs_pipe}")
-        payload_size = struct.unpack("<Q", header)[0]
-        payload = bytearray()
-        while len(payload) < payload_size:
-            chunk = pipe.read(payload_size - len(payload))
-            if not chunk:
-                raise EOFError(f"Incomplete pipe payload from {obs_pipe}")
-            payload.extend(chunk)
-    return pickle.loads(payload)
-
-
-def read_obs_file(pipe, timeout_sec: float = 30.0):
-    # LOG.info("entered read_obs_file function %s at t=%s", pipe, time.time())
-    fd = pipe.fileno()
-    # LOG.info("select waiting on fd=%s timeout=%.1f at t=%s", fd, timeout_sec, time.time())
-    ready, _, _ = select.select([fd], [], [], timeout_sec)
-    if not ready:
-        try:
-            stat_result = os.fstat(fd)
-            LOG.error(
-                "Timeout waiting for FIFO readability after %.1fs: fd=%s inode=%s mode=%s",
-                timeout_sec,
-                fd,
-                stat_result.st_ino,
-                oct(stat_result.st_mode),
-            )
-        except Exception:
-            LOG.error("Timeout waiting for FIFO readability after %.1fs", timeout_sec)
-        raise TimeoutError(f"No obs_pipe data became readable within {timeout_sec} seconds")
-
-    # LOG.info("about to read header at t=%s", time.time())
-    header = pipe.read(8)
-    # LOG.info("read header len=%s at t=%s", len(header) if header is not None else None, time.time())
-    if len(header) != 8:
-        raise EOFError("Incomplete pipe header from open obs pipe handle")
-    payload_size = struct.unpack("<Q", header)[0]
-    payload = bytearray()
-    while len(payload) < payload_size:
-        # LOG.info("loading chunks, payload is size: %s", len(payload))
-        # LOG.info("about to read chunk remaining=%s at t=%s", payload_size - len(payload), time.time())
-        chunk = pipe.read(payload_size - len(payload))
-        if not chunk:
-            raise EOFError("Incomplete pipe payload from open obs pipe handle")
-        payload.extend(chunk)
-    return pickle.loads(payload)
-
-# writes planner plan back to HUGSIM
-def write_plan(plan_pipe: Path, plan) -> None:
-    payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
-    with open(plan_pipe, "wb") as pipe:
-        pipe.write(struct.pack("<Q", len(payload)))
-        pipe.write(payload)
-
-
-def write_plan_file(pipe, plan) -> None:
-    try:
-        payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
-        fd = pipe.fileno()
-        try:
-            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        except Exception:
-            flags = None
-        LOG.info("write_plan_file: fd=%s flags=%s bytes=%s t=%s", fd, str(flags), len(payload), time.time())
-        pipe.write(struct.pack("<Q", len(payload)))
-        pipe.write(payload)
-        pipe.flush()
-    except Exception:
-        LOG.exception("Failed writing plan to pipe")
 
 # ============================================================================
 # NEW FUNCTIONS: RAP-compatible candidate generation and payload building
@@ -669,98 +413,21 @@ def build_plan_payload(
     candidate_pool_rows: Optional[Sequence[Dict[str, object]]] = None,
     topk: int = TOPK,
 ) -> Dict[str, object]:
-    """
-    Build complete plan payload with candidate pool, defaults, and VLM metadata.
-    Mirrors RAP's build_plan_payload but adapted for rule-based planner outputs.
-    
-    Handles both direct proposal selection and VLM-selected plan override.
-    """
-    # Determine topk and extract top indices
-    topk = max(1, min(int(topk), int(len(scores))))
-    top_indices = np.argsort(scores)[-topk:][::-1]
-
-    # Determine selected_idx
-    if selected_idx is None and selected_plan_override is None:
-        selected_idx = int(top_indices[0])
-    else:
-        selected_idx = None if selected_idx is None else int(selected_idx)
-
-    # Determine selected plan and score
-    if selected_plan_override is not None:
-        selected_plan = np.asarray(selected_plan_override, dtype=np.float32)
-        selected_score = float(selected_score_override) if selected_score_override is not None else None
-    else:
-        assert selected_idx is not None
-        selected_traj = proposals[selected_idx, :output_num_poses]
-        selected_plan = rule_based_to_hugsim_plan(selected_traj)
-        selected_score = float(scores[selected_idx])
-
-    # Build candidate pool (either from provided rows or derived from top-k)
-    if candidate_pool_rows is not None:
-        candidate_pool_plans = [
-            np.asarray(row["local_plan"], dtype=np.float32).tolist()
-            for row in candidate_pool_rows
-        ]
-        candidate_pool_execution_plans = [
-            np.asarray(row.get("execution_plan", row["local_plan"]), dtype=np.float32).tolist()
-            for row in candidate_pool_rows
-        ]
-        candidate_pool_scores = [float(row.get("proposal_score", 0.0)) for row in candidate_pool_rows]
-        candidate_pool_q_scores = [
-            None if row.get("q_score") is None else float(row["q_score"])
-            for row in candidate_pool_rows
-        ]
-        candidate_pool_sources = [str(row.get("source", "current_rule_based")) for row in candidate_pool_rows]
-        candidate_pool_proposal_indices = [
-            None if row.get("proposal_index") is None else int(row["proposal_index"])
-            for row in candidate_pool_rows
-        ]
-    else:
-        # Fallback: derive candidate pool from top-k proposals
-        candidate_pool_plans = [
-            rule_based_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
-            for idx in top_indices
-        ]
-        candidate_pool_scores = [float(scores[idx]) for idx in top_indices]
-        candidate_pool_execution_plans = list(candidate_pool_plans)
-        candidate_pool_q_scores = [None for _ in top_indices]
-        candidate_pool_sources = ["rule_based_planner" for _ in top_indices]
-        candidate_pool_proposal_indices = [int(idx) for idx in top_indices]
-
-    # Build default overlay plans if requested
-    default_overlay_plans = None
-    default_overlay_sources = None
-    if bool(selection_debug and selection_debug.get("display_default_trajectories")):
-        default_overlay_plans = [traj.tolist() for traj in get_default_trajectories(output_num_poses)]
-        default_overlay_sources = [f"default_fallback_{idx}" for idx in range(len(default_overlay_plans))]
-
-    # Assemble final payload
-    payload = {
-        "selected_idx": selected_idx,
-        "selected_score": selected_score,
-        "selected_source": selected_source,
-        "selected_plan": selected_plan,
-        "topk_indices": [int(idx) for idx in top_indices],
-        "topk_scores": [float(scores[idx]) for idx in top_indices],
-        "topk_plans": [
-            rule_based_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
-            for idx in top_indices
-        ],
-        "candidate_pool_plans": candidate_pool_plans,
-        "candidate_pool_execution_plans": candidate_pool_execution_plans,
-        "candidate_pool_scores": candidate_pool_scores,
-        "candidate_pool_q_scores": candidate_pool_q_scores,
-        "candidate_pool_sources": candidate_pool_sources,
-        "candidate_pool_proposal_indices": candidate_pool_proposal_indices,
-        "default_overlay_plans": default_overlay_plans,
-        "default_overlay_sources": default_overlay_sources,
-    }
-
-    # Merge selection_debug metadata into payload
-    if selection_debug:
-        payload.update(selection_debug)
-
-    return payload
+    return build_hugsim_plan_payload(
+        proposals=proposals,
+        scores=scores,
+        output_num_poses=output_num_poses,
+        plan_converter=rule_based_to_hugsim_plan,
+        selected_idx=selected_idx,
+        selected_source=selected_source,
+        selection_debug=selection_debug,
+        selected_plan_override=selected_plan_override,
+        selected_score_override=selected_score_override,
+        candidate_pool_rows=candidate_pool_rows,
+        topk=topk,
+        default_source_name="rule_based_planner",
+        default_trajectory_provider=get_default_trajectories,
+    )
 
 
 def build_plain_rule_based_plan_result(
@@ -933,7 +600,7 @@ def main() -> int:
     try:
         LOG.info("Entering adapter read loop; waiting for observations on %s", obs_pipe)
         LOG.info("Attempting to read preflight diagnostic message")
-        message = read_obs_file(obs_pipe_reader)
+        message = read_obs_file(obs_pipe_reader, logger=LOG)
         if isinstance(message, dict) and message.get("message_type") == "hugsim_preflight":
                     LOG.info(
                         "Received HUGSIM preflight diagnostic: output_dir=%s obs_pipe=%s plan_pipe=%s include_privileged_pipe=%s camera_count=%s timestamp=%s",
@@ -950,7 +617,7 @@ def main() -> int:
         while True:
             try:
                 LOG.info("Waiting for next observation payload on %s", obs_pipe)
-                message = read_obs_file(obs_pipe_reader, timeout_sec=30.0)
+                message = read_obs_file(obs_pipe_reader, timeout_sec=30.0, logger=LOG)
                 LOG.info("Received observation payload from %s", obs_pipe)
                 if message == "Done":
                     LOG.info("Received shutdown signal")
@@ -970,7 +637,7 @@ def main() -> int:
                         )
                 except (ValueError, TypeError):
                     LOG.error("Message format error: expected (obs, info) or (obs, info, privileged_info), got %s", type(message))
-                    write_plan_file(plan_pipe_writer, None)
+                    write_plan_file(plan_pipe_writer, None, logger=LOG, log_fd_flags=True)
                     continue
                 
                 # info_history append and pad
@@ -1000,7 +667,7 @@ def main() -> int:
                     )
                 except Exception as e:
                     LOG.exception("Planner.process() failed: %s", e)
-                    write_plan_file(plan_pipe_writer, None)
+                    write_plan_file(plan_pipe_writer, None, logger=LOG, log_fd_flags=True)
                     continue
 
                 # Convert planner selected trajectories to proposals and extract scores
@@ -1016,7 +683,7 @@ def main() -> int:
                     LOG.info("score breakdown: %s", planner_debug)
                 except Exception as e:
                     LOG.exception("Failed to convert planner trajectory: %s", e)
-                    write_plan_file(plan_pipe_writer, None)
+                    write_plan_file(plan_pipe_writer, None, logger=LOG, log_fd_flags=True)
                     continue
 
                 # Build candidate rows (includes carry_prev, top-k, and optional defaults)
@@ -1035,7 +702,7 @@ def main() -> int:
                     )
                 except Exception as e:
                     LOG.exception("Failed to build candidate rows: %s", e)
-                    write_plan_file(plan_pipe_writer, None)
+                    write_plan_file(plan_pipe_writer, None, logger=LOG, log_fd_flags=True)
                     continue
 
                 # Determine default selection for VLM fallback
@@ -1161,11 +828,11 @@ def main() -> int:
                     )
                 except Exception as e:
                     LOG.exception("Failed to build plan payload: %s", e)
-                    write_plan_file(plan_pipe_writer, None)
+                    write_plan_file(plan_pipe_writer, None, logger=LOG, log_fd_flags=True)
                     continue
 
                 # Write final plan to HUGSIM
-                write_plan_file(plan_pipe_writer, plan_payload)
+                write_plan_file(plan_pipe_writer, plan_payload, logger=LOG, log_fd_flags=True)
 
                 # Save previous selection for carry-prev support
                 try:
@@ -1182,7 +849,7 @@ def main() -> int:
                 LOG.error("Adapter loop failed")
                 LOG.error(traceback.format_exc())
                 try:
-                    write_plan_file(plan_pipe_writer, None)
+                    write_plan_file(plan_pipe_writer, None, logger=LOG, log_fd_flags=True)
                 except Exception:
                     LOG.error("Failed to notify HUGSIM about adapter failure")
                 return 1

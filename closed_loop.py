@@ -19,27 +19,36 @@ from sim.utils.sim_utils import (
 )
 import pickle
 import json
-import struct
 import logging
-import re
 import time
-from typing import Dict
 from sim.utils.launch_ad import launch, check_alive
 from omegaconf import OmegaConf
 import open3d as o3d
 from sim.utils.score_calculator import hugsim_evaluate
 import numpy as np
 import cv2
-from moviepy import ImageSequenceClip
+from autoagent0.adapters.hugsim.demo_tasks import (
+    apply_demo_task_action_override,
+    is_park_task_complete,
+    is_stop_task_complete,
+    summarize_demo_overlay,
+)
+from autoagent0.adapters.hugsim.results import (
+    build_run_performance,
+    prefix_output_dir_with_model,
+    resolve_output_model_slug,
+)
+from autoagent0.adapters.hugsim.runtime import (
+    raise_if_process_exited,
+    read_pipe_message_file,
+    write_pipe_message_file,
+)
+from autoagent0.adapters.hugsim.video import to_front_video, to_video
 from planners.common.candidate_visuals import get_candidate_visual_style
 from planners.common.task_overlay import draw_task_target_overlay
 from planners.common.vlm_env import build_prefixed_vlm_env
 from planners.common.rule_based_env import build_prefixed_rule_based_env
 
-VIDEO_LAYOUT = [
-    ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT'],
-    ['CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT'],
-]
 FRONT_CAM_NAME = 'CAM_FRONT'
 REFERENCE_COLOR = (255, 230, 0)
 PLAN_COLOR = (0, 120, 255)
@@ -48,55 +57,6 @@ PLAN_VIS_FORWARD_OFFSET_M = 4.5
 VIS_PLAN_MIN_PATH_M = 0.5
 VIS_PLAN_HOLD_FRAMES = 10**9
 PLAN_REPLAN_EVERY_STEPS = 2
-
-
-def _slugify_model_name(value, default='model'):
-    value = '' if value is None else str(value).strip()
-    if not value:
-        value = default
-    value = value.rstrip('/').split('/')[-1]
-    if value.endswith('.ckpt') or value.endswith('.pth') or value.endswith('.pt'):
-        value = os.path.splitext(value)[0]
-    value = re.sub(r'[^A-Za-z0-9]+', '-', value).strip('-').lower()
-    return value or default
-
-
-def _resolve_output_model_slug(ad_name, planner_config):
-    planner_key = 'rap' if ad_name == 'rap' else 'drivor' if ad_name == 'drivor' else ''
-    if not planner_key:
-        return ''
-
-    planner_cfg = planner_config.get(planner_key, {})
-    vlm_cfg = planner_cfg.get('vlm', {})
-    if vlm_cfg.get('enabled', False):
-        explicit_slug = vlm_cfg.get('output_model_slug', '')
-        if explicit_slug:
-            if str(explicit_slug).strip().lower() in {'none', 'disable', 'disabled', 'off'}:
-                return ''
-            return _slugify_model_name(explicit_slug)
-        return _slugify_model_name(vlm_cfg.get('model_id', 'vlm'))
-
-    explicit_slug = planner_cfg.get('output_model_slug', '')
-    if explicit_slug:
-        if str(explicit_slug).strip().lower() in {'none', 'disable', 'disabled', 'off'}:
-            return ''
-        return _slugify_model_name(explicit_slug)
-    checkpoint = planner_cfg.get('checkpoint', '')
-    return _slugify_model_name(checkpoint, default=planner_key)
-
-
-def _prefix_output_dir_with_model(output_dir, model_slug):
-    output_dir = str(output_dir)
-    model_slug = str(model_slug or '').strip()
-    if not model_slug:
-        return output_dir
-
-    parent, name = os.path.split(output_dir.rstrip(os.sep))
-    if not name:
-        return os.path.join(output_dir, model_slug)
-    if name.startswith(f'{model_slug}_'):
-        return output_dir
-    return os.path.join(parent, f'{model_slug}_{name}')
 
 
 def _resolve_scene_model_path(model_base, scene_name):
@@ -120,546 +80,6 @@ def _resolve_scene_model_path(model_base, scene_name):
     raise FileNotFoundError(
         f"processed scene directory for {scene_name!r} not found under {model_base!r}"
     )
-
-
-def _safe_get_planner_cfg(cfg, ad_name):
-    try:
-        planner_cfg = cfg.planner.get(ad_name, {})
-        return planner_cfg or {}
-    except Exception:
-        return {}
-
-
-def _empty_performance_summary() -> Dict[str, object]:
-    return {
-        "num_records": 0,
-        "planner_gate_records": 0,
-        "latency_mean_sec": 0.0,
-        "latency_p50_sec": 0.0,
-        "latency_p95_sec": 0.0,
-        "latency_max_sec": 0.0,
-        "intervention_latency_mean_sec": 0.0,
-        "intervention_latency_p50_sec": 0.0,
-        "intervention_latency_p95_sec": 0.0,
-        "intervention_latency_max_sec": 0.0,
-        "total_vlm_latency_mean_sec": 0.0,
-        "total_vlm_latency_p50_sec": 0.0,
-        "total_vlm_latency_p95_sec": 0.0,
-        "total_vlm_latency_max_sec": 0.0,
-        "planner_gate_latency_mean_sec": 0.0,
-        "planner_gate_latency_p50_sec": 0.0,
-        "planner_gate_latency_p95_sec": 0.0,
-        "planner_gate_latency_max_sec": 0.0,
-        "latency_equivalent_steps_mean": 0.0,
-        "carry_reuse_rate": 0.0,
-        "switch_to_current_rate": 0.0,
-        "fallback_rate": 0.0,
-        "intervention_trigger_rate": 0.0,
-        "intervention_low_rate": 0.0,
-        "intervention_medium_rate": 0.0,
-        "intervention_high_rate": 0.0,
-        "intervention_action_applied_rate": 0.0,
-        "intervention_action_threshold": 0.0,
-        "intervention_high_threshold": 0.0,
-        "intervention_severity_score_mean": 0.0,
-        "intervention_severity_score_p50": 0.0,
-        "intervention_severity_score_p95": 0.0,
-        "gate_skip_rate": 0.0,
-        "scoring_invoked_rate": 0.0,
-        "vlm_q_valid_rate": 0.0,
-        "counts": {
-            "intervention_invoked": 0,
-            "intervention_valid": 0,
-            "intervention_invalid": 0,
-            "intervention_timeout": 0,
-            "intervention_error": 0,
-            "scoring_invoked": 0,
-            "scoring_valid": 0,
-            "scoring_timeout": 0,
-            "scoring_error": 0,
-            "planner_gate_invoked": 0,
-            "planner_gate_valid": 0,
-            "planner_gate_timeout": 0,
-            "planner_gate_error": 0,
-            "base_policy_no_intervention": 0,
-            "gate_failed_base_policy_fallback": 0,
-            "intervention_triggered_scoring": 0,
-            "planner_gate_selected_learned": 0,
-            "planner_gate_selected_rule_based": 0,
-            "planner_gate_failed_base_policy_fallback": 0,
-        },
-        "branch_breakdown": {
-            "solo_or_merge": {
-                "base_policy_no_intervention": {
-                    "count": 0,
-                    "latency_mean_sec": 0.0,
-                    "latency_p50_sec": 0.0,
-                    "latency_p95_sec": 0.0,
-                    "latency_max_sec": 0.0,
-                    "tokens": {
-                        "prompt_tokens_total": 0,
-                        "completion_tokens_total": 0,
-                        "total_tokens_total": 0,
-                    },
-                },
-                "gate_failed_base_policy_fallback": {
-                    "count": 0,
-                    "latency_mean_sec": 0.0,
-                    "latency_p50_sec": 0.0,
-                    "latency_p95_sec": 0.0,
-                    "latency_max_sec": 0.0,
-                    "tokens": {
-                        "prompt_tokens_total": 0,
-                        "completion_tokens_total": 0,
-                        "total_tokens_total": 0,
-                    },
-                },
-                "intervention_triggered_scoring": {
-                    "count": 0,
-                    "latency_mean_sec": 0.0,
-                    "latency_p50_sec": 0.0,
-                    "latency_p95_sec": 0.0,
-                    "latency_max_sec": 0.0,
-                    "tokens": {
-                        "intervention": {
-                            "prompt_tokens_total": 0,
-                            "completion_tokens_total": 0,
-                            "total_tokens_total": 0,
-                        },
-                        "scoring": {
-                            "prompt_tokens_total": 0,
-                            "completion_tokens_total": 0,
-                            "total_tokens_total": 0,
-                        },
-                    },
-                },
-            },
-            "planner_gate": {
-                "selected_learned": {
-                    "count": 0,
-                    "latency_mean_sec": 0.0,
-                    "latency_p50_sec": 0.0,
-                    "latency_p95_sec": 0.0,
-                    "latency_max_sec": 0.0,
-                    "tokens": {
-                        "prompt_tokens_total": 0,
-                        "completion_tokens_total": 0,
-                        "total_tokens_total": 0,
-                    },
-                },
-                "selected_rule_based": {
-                    "count": 0,
-                    "latency_mean_sec": 0.0,
-                    "latency_p50_sec": 0.0,
-                    "latency_p95_sec": 0.0,
-                    "latency_max_sec": 0.0,
-                    "tokens": {
-                        "prompt_tokens_total": 0,
-                        "completion_tokens_total": 0,
-                        "total_tokens_total": 0,
-                    },
-                },
-                "failed_base_policy_fallback": {
-                    "count": 0,
-                    "latency_mean_sec": 0.0,
-                    "latency_p50_sec": 0.0,
-                    "latency_p95_sec": 0.0,
-                    "latency_max_sec": 0.0,
-                    "tokens": {
-                        "prompt_tokens_total": 0,
-                        "completion_tokens_total": 0,
-                        "total_tokens_total": 0,
-                    },
-                },
-            },
-        },
-        "tokens": {
-            "prompt_tokens_total": 0,
-            "completion_tokens_total": 0,
-            "total_tokens_total": 0,
-            "by_stage": {
-                "intervention": {"prompt_tokens_total": 0, "completion_tokens_total": 0, "total_tokens_total": 0},
-                "scoring": {"prompt_tokens_total": 0, "completion_tokens_total": 0, "total_tokens_total": 0},
-                "planner_gate": {"prompt_tokens_total": 0, "completion_tokens_total": 0, "total_tokens_total": 0},
-            },
-        },
-    }
-
-
-def _build_run_performance(output_dir, cfg, ad_name, frame_count):
-    planner_cfg = _safe_get_planner_cfg(cfg, ad_name)
-    vlm_cfg = planner_cfg.get("vlm", {}) if planner_cfg else {}
-    summary_path = os.path.join(output_dir, "vlm_debug", "latency_summary.json")
-    summary = _empty_performance_summary()
-    if os.path.isfile(summary_path):
-        try:
-            with open(summary_path, "r", encoding="utf-8") as rf:
-                loaded = json.load(rf)
-            if isinstance(loaded, dict):
-                summary.update({k: v for k, v in loaded.items() if k not in {"counts", "tokens", "branch_breakdown"}})
-                if isinstance(loaded.get("counts"), dict):
-                    summary["counts"].update(loaded["counts"])
-                if isinstance(loaded.get("branch_breakdown"), dict):
-                    summary["branch_breakdown"] = loaded["branch_breakdown"]
-                if isinstance(loaded.get("tokens"), dict):
-                    summary_tokens = summary["tokens"]
-                    summary_tokens.update({k: v for k, v in loaded["tokens"].items() if k != "by_stage"})
-                    if isinstance(loaded["tokens"].get("by_stage"), dict):
-                        for stage_name, stage_usage in loaded["tokens"]["by_stage"].items():
-                            if stage_name in summary_tokens["by_stage"] and isinstance(stage_usage, dict):
-                                summary_tokens["by_stage"][stage_name].update(stage_usage)
-        except Exception:
-            logging.exception("Failed to load latency summary from %s", summary_path)
-
-    return {
-        "frame_count": int(frame_count),
-        "planner_backend": str(ad_name),
-        "vlm_enabled": bool(vlm_cfg.get("enabled", False)) if vlm_cfg else False,
-        "intervention_enabled": bool(vlm_cfg.get("intervention_enabled", False)) if vlm_cfg else False,
-        "planner_gate_enabled": bool(vlm_cfg.get("planner_gate_enabled", False)) if vlm_cfg else False,
-        "latency_tracking_mode": str(vlm_cfg.get("latency_tracking_mode", "")) if vlm_cfg else "",
-        "counts": summary.get("counts", {}),
-        "tokens": summary.get("tokens", {}),
-        "branch_breakdown": summary.get("branch_breakdown", {}),
-        "summary": summary,
-    }
-
-def _resize_for_video(image, target_height):
-    if image.shape[0] == target_height:
-        return image
-    width = max(1, int(round(image.shape[1] * (target_height / image.shape[0]))))
-    return cv2.resize(image, (width, target_height), interpolation=cv2.INTER_LINEAR)
-
-
-def _pad_row_for_video(row, target_width):
-    if row.shape[1] == target_width:
-        return row
-    pad_width = target_width - row.shape[1]
-    return np.pad(row, ((0, 0), (0, pad_width), (0, 0)), mode='constant')
-
-
-def to_video(observations, rollout_frames, output_path):
-    frames = []
-    if not observations:
-        return
-
-    target_height = max(
-        obs[cam_name].shape[0]
-        for obs in observations
-        for row in VIDEO_LAYOUT
-        for cam_name in row
-    )
-
-    for frame_idx, obs in enumerate(observations):
-        row1 = np.concatenate(
-            [_resize_for_video(obs[cam_name], target_height) for cam_name in VIDEO_LAYOUT[0]],
-            axis=1,
-        )
-        row2 = np.concatenate(
-            [_resize_for_video(obs[cam_name], target_height) for cam_name in VIDEO_LAYOUT[1]],
-            axis=1,
-        )
-        target_width = max(row1.shape[1], row2.shape[1])
-        row1 = _pad_row_for_video(row1, target_width)
-        row2 = _pad_row_for_video(row2, target_width)
-        frame = np.concatenate([row1, row2], axis=0)
-        frames.append(frame)
-    clip = ImageSequenceClip(frames, fps=4)
-    clip.write_videofile(output_path)
-
-
-def _format_overlay_value(value):
-    if value is None:
-        return "-"
-    if isinstance(value, float):
-        return f"{value:.3f}"
-    return str(value)
-
-
-def _wrap_text_to_width(text, font, font_scale, thickness, max_width):
-    text = (text or "").strip()
-    if not text:
-        return []
-    words = text.split()
-    lines = []
-    current = words[0]
-    for word in words[1:]:
-        candidate = f"{current} {word}"
-        candidate_width = cv2.getTextSize(candidate, font, font_scale, thickness)[0][0]
-        if candidate_width <= max_width:
-            current = candidate
-        else:
-            lines.append(current)
-            current = word
-    lines.append(current)
-    return lines
-
-
-def _append_wrapped_text(lines, label, text, font, font_scale, thickness, max_width):
-    if text is None:
-        return
-    label_prefix = f"{label}: "
-    label_width = cv2.getTextSize(label_prefix, font, font_scale, thickness)[0][0]
-    first_line_width = max(40, int(max_width) - int(label_width))
-    wrapped = _wrap_text_to_width(str(text), font, font_scale, thickness, first_line_width)
-    if not wrapped:
-        return
-    lines.append(f"{label_prefix}{wrapped[0]}")
-    for continuation in wrapped[1:]:
-        continuation_prefix = "  "
-        continuation_width = cv2.getTextSize(continuation_prefix, font, font_scale, thickness)[0][0]
-        continuation_max_width = max(40, int(max_width) - int(continuation_width))
-        continuation_wrapped = _wrap_text_to_width(
-            continuation,
-            font,
-            font_scale,
-            thickness,
-            continuation_max_width,
-        )
-        for chunk in continuation_wrapped:
-            lines.append(f"{continuation_prefix}{chunk}")
-
-
-def _normalize_overlay_source(selected_source):
-    if selected_source is None:
-        return None
-    source = str(selected_source)
-    if "carry_prev" in source:
-        return "carry_prev"
-    if source.startswith("default_fallback_"):
-        return source
-    return "current"
-
-
-def _resolve_selected_traj_text(frame_debug):
-    candidate_sources = frame_debug.get("overlay_candidate_sources")
-    if not candidate_sources:
-        candidate_sources = frame_debug.get("candidate_pool_sources")
-    candidate_indices = frame_debug.get("candidate_pool_proposal_indices") or []
-    selected_source = frame_debug.get("selected_source")
-    selected_idx = frame_debug.get("selected_idx")
-    selected_kind = _normalize_overlay_source(selected_source)
-    if not candidate_sources:
-        return None
-
-    current_rank = 0
-    for rank, source in enumerate(candidate_sources):
-        source_str = str(source)
-        proposal_index = candidate_indices[rank] if rank < len(candidate_indices) else None
-        is_match = False
-        if selected_kind == "carry_prev":
-            is_match = source_str == "carry_prev"
-        elif selected_kind and selected_kind.startswith("default_fallback_"):
-            is_match = source_str == selected_kind
-        else:
-            is_match = source_str != "carry_prev" and proposal_index == selected_idx
-        if source_str != "carry_prev":
-            current_rank += 1
-        if not is_match:
-            continue
-        return f"#{rank}"
-    return None
-
-
-def _build_front_overlay_lines(frame_idx, frame_debug, run_label, max_text_width):
-    lines = [
-        f"run: {run_label}",
-        f"frame: {frame_idx}",
-    ]
-    latency_record = frame_debug.get("latency_timeline_record") or {}
-    route_instruction = latency_record.get("route_instruction")
-    if route_instruction is not None:
-        lines.append(f"route: {route_instruction}")
-    scoring_route = latency_record.get("scoring_route_instruction")
-    if scoring_route is not None:
-        lines.append(f"scoring route: {scoring_route}")
-    selected_traj = _resolve_selected_traj_text(frame_debug)
-    if selected_traj is not None:
-        lines.append(f"selected traj: {selected_traj}")
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.39
-    thickness = 1
-    uses_vlm = ("vlm" in run_label) or (frame_debug.get("vlm_reasoning") is not None)
-    uses_intervention = "intervention" in run_label
-
-    if uses_intervention:
-        should_intervene = latency_record.get("intervention_should_intervene")
-        lines.append(f"intervened: {_format_overlay_value(should_intervene)}")
-        severity_score = latency_record.get("intervention_severity_score")
-        severity_band = latency_record.get("intervention_severity_band")
-        if severity_score is not None:
-            lines.append(f"intervention score: {_format_overlay_value(round(float(severity_score), 3))}")
-        if severity_band is not None:
-            lines.append(f"intervention band: {_format_overlay_value(severity_band)}")
-        confidence = latency_record.get("intervention_confidence")
-        if confidence is not None:
-            lines.append(f"intervention confidence: {_format_overlay_value(confidence)}")
-        corrective_action = latency_record.get("intervention_corrective_action")
-        if should_intervene:
-            lines.append(f"corrective action: {_format_overlay_value(corrective_action)}")
-        _append_wrapped_text(
-            lines,
-            "intervention reasoning",
-            frame_debug.get("intervention_reasoning"),
-            font,
-            font_scale,
-            thickness,
-            max_text_width,
-        )
-        _append_wrapped_text(
-            lines,
-            "scorer reasoning",
-            frame_debug.get("vlm_reasoning"),
-            font,
-            font_scale,
-            thickness,
-            max_text_width,
-        )
-    elif uses_vlm:
-        adaptive_decision = frame_debug.get("adaptive_replan_decision")
-        if adaptive_decision is not None:
-            lines.append(f"adaptive decision: {adaptive_decision}")
-        q_selected_source = frame_debug.get("q_selected_source")
-        q_selected_idx = frame_debug.get("q_selected_idx")
-        if q_selected_source is not None or q_selected_idx is not None:
-            lines.append(
-                "q selection: "
-                f"{_format_overlay_value(q_selected_source)}"
-                f" / {_format_overlay_value(q_selected_idx)}"
-            )
-        _append_wrapped_text(
-            lines,
-            "vlm reasoning",
-            frame_debug.get("vlm_reasoning"),
-            font,
-            font_scale,
-            thickness,
-            max_text_width,
-        )
-
-    return lines
-
-
-def _draw_front_overlay_text(frame, lines):
-    if not lines:
-        return frame
-
-    canvas = frame.copy()
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.39
-    thickness = 1
-    line_gap = 6
-    padding = 10
-    origin_x = 18
-    origin_y = 18
-
-    line_sizes = [cv2.getTextSize(line, font, font_scale, thickness)[0] for line in lines]
-    max_width = max((size[0] for size in line_sizes), default=0)
-    line_height = max((size[1] for size in line_sizes), default=0)
-    total_height = len(lines) * line_height + max(0, len(lines) - 1) * line_gap
-
-    box_x0 = origin_x - padding
-    box_y0 = origin_y - padding
-    box_x1 = min(canvas.shape[1] - 1, origin_x + max_width + padding)
-    box_y1 = min(canvas.shape[0] - 1, origin_y + total_height + padding)
-
-    overlay = canvas.copy()
-    cv2.rectangle(overlay, (box_x0, box_y0), (box_x1, box_y1), (0, 0, 0), thickness=-1)
-    cv2.addWeighted(overlay, 0.55, canvas, 0.45, 0, canvas)
-
-    text_y = origin_y + line_height
-    for line in lines:
-        cv2.putText(
-            canvas,
-            line,
-            (origin_x, text_y),
-            font,
-            font_scale,
-            (255, 255, 255),
-            thickness,
-            lineType=cv2.LINE_AA,
-        )
-        text_y += line_height + line_gap
-
-    return canvas
-
-
-def to_front_video(observations, rollout_frames, output_path, run_label):
-    if not observations:
-        return
-
-    frames = []
-    for frame_idx, obs in enumerate(observations):
-        front = obs[FRONT_CAM_NAME].copy()
-        frame_debug = {}
-        if frame_idx < len(rollout_frames):
-            frame_debug = rollout_frames[frame_idx].get("planner_debug", {}) or {}
-        max_text_width = max(160, int(front.shape[1]) - 18 - 10 - 18 - 10)
-        lines = _build_front_overlay_lines(frame_idx, frame_debug, run_label, max_text_width)
-        frames.append(_draw_front_overlay_text(front, lines))
-
-    clip = ImageSequenceClip(frames, fps=4)
-    clip.write_videofile(output_path)
-
-
-def write_pipe_message(pipe_path, payload_obj):
-    payload = pickle.dumps(payload_obj, protocol=pickle.HIGHEST_PROTOCOL)
-    with open(pipe_path, "wb") as pipe:
-        pipe.write(struct.pack("<Q", len(payload)))
-        pipe.write(payload)
-
-
-def read_pipe_message(pipe_path):
-    with open(pipe_path, "rb") as pipe:
-        header = pipe.read(8)
-        if len(header) != 8:
-            raise EOFError(f"Incomplete pipe header from {pipe_path}")
-        payload_size = struct.unpack("<Q", header)[0]
-        payload = bytearray()
-        while len(payload) < payload_size:
-            chunk = pipe.read(payload_size - len(payload))
-            if not chunk:
-                raise EOFError(f"Incomplete pipe payload from {pipe_path}")
-            payload.extend(chunk)
-    return pickle.loads(payload)
-
-
-def write_pipe_message_file(pipe, payload_obj):
-    payload = pickle.dumps(payload_obj, protocol=pickle.HIGHEST_PROTOCOL)
-    pipe.write(struct.pack("<Q", len(payload)))
-    pipe.write(payload)
-    pipe.flush()
-    try:
-        fd = pipe.fileno()
-        stat_result = os.fstat(fd)
-        print(
-            f"[write_pipe_message_file] fd={fd} inode={stat_result.st_ino} "
-            f"mode={oct(stat_result.st_mode)} bytes={len(payload)} t={time.time():.6f}"
-        )
-    except Exception:
-        print(f"[write_pipe_message_file] logging failed t={time.time():.6f}")
-
-
-def read_pipe_message_file(pipe):
-    try:
-        print(f"[read_pipe_message_file] waiting fd={pipe.fileno()} t={time.time():.6f}")
-    except Exception:
-        print(f"[read_pipe_message_file] waiting fd=? t={time.time():.6f}")
-    header = pipe.read(8)
-    if len(header) != 8:
-        raise EOFError("Incomplete pipe header from open pipe handle")
-    payload_size = struct.unpack("<Q", header)[0]
-    payload = bytearray()
-    while len(payload) < payload_size:
-        chunk = pipe.read(payload_size - len(payload))
-        if not chunk:
-            raise EOFError("Incomplete pipe payload from open pipe handle")
-        payload.extend(chunk)
-    try:
-        print(f"[read_pipe_message_file] received fd={pipe.fileno()} bytes={payload_size} t={time.time():.6f}")
-    except Exception:
-        print(f"[read_pipe_message_file] received fd=? bytes={payload_size} t={time.time():.6f}")
-    return pickle.loads(payload)
 
 
 def _parse_boolish(value) -> bool:
@@ -766,113 +186,6 @@ def _trajectory_path_length(points_xy):
     if len(points_xy) < 2:
         return 0.0
     return float(np.linalg.norm(np.diff(points_xy, axis=0), axis=1).sum())
-
-
-def _summarize_demo_overlay(task_records, task_info, final_goal_status):
-    if not task_info:
-        return {}
-
-    projection_states = [str(record.get('projection_state', 'inactive')) for record in task_records]
-    visible_frames = [int(record['frame_idx']) for record in task_records if record.get('visible')]
-    return {
-        'task_active': True,
-        'task_type': task_info.get('task_type'),
-        'task_instruction': task_info.get('task_instruction'),
-        'task_target_pose_local': task_info.get('task_target_pose_local'),
-        'task_target_world': task_info.get('task_target_world'),
-        'projection_states': projection_states,
-        'marker_visible_frame_count': int(len(visible_frames)),
-        'first_visible_frame': None if not visible_frames else int(visible_frames[0]),
-        'last_visible_frame': None if not visible_frames else int(visible_frames[-1]),
-        'final_goal_status': final_goal_status,
-        'task_completion_reason': task_info.get('task_completion_reason'),
-    }
-
-
-def _is_stop_task_complete(info):
-    if not isinstance(info, dict):
-        return False
-    if str(info.get('task_type', '')).strip() != 'stop_at_target':
-        return False
-    goal_status = info.get('task_goal_status')
-    if not isinstance(goal_status, dict) or not bool(goal_status.get('reached')):
-        return False
-    try:
-        ego_speed_mps = abs(float(info.get('ego_velo', 0.0)))
-    except (TypeError, ValueError):
-        return False
-    try:
-        stop_speed_threshold_mps = float(info.get('task_stop_speed_threshold_mps', 0.5))
-    except (TypeError, ValueError):
-        stop_speed_threshold_mps = 0.5
-    return ego_speed_mps <= stop_speed_threshold_mps
-
-
-def _is_park_task_complete(info):
-    if not isinstance(info, dict):
-        return False
-    if str(info.get('task_type', '')).strip() != 'park_at_target':
-        return False
-    goal_status = info.get('task_goal_status')
-    if not isinstance(goal_status, dict) or not bool(goal_status.get('reached')):
-        return False
-    try:
-        ego_speed_mps = abs(float(info.get('ego_velo', 0.0)))
-    except (TypeError, ValueError):
-        return False
-    try:
-        park_speed_threshold_mps = float(info.get('task_park_speed_threshold_mps', 0.75))
-    except (TypeError, ValueError):
-        park_speed_threshold_mps = 0.75
-    return ego_speed_mps <= park_speed_threshold_mps
-
-
-def _apply_demo_task_action_override(action, info):
-    if not isinstance(info, dict):
-        return action
-    if str(info.get('task_type', '')).strip() != 'park_at_target':
-        return action
-    goal_status = info.get('task_goal_status')
-    if not isinstance(goal_status, dict):
-        return action
-    try:
-        position_error_m = float(goal_status.get('position_error_m', 1e9))
-    except (TypeError, ValueError):
-        return action
-    try:
-        brake_distance_m = float(info.get('task_park_brake_distance_m', 10.0))
-    except (TypeError, ValueError):
-        brake_distance_m = 10.0
-    if position_error_m > brake_distance_m:
-        return action
-
-    overridden = dict(action)
-    try:
-        ego_speed_mps = abs(float(info.get('ego_velo', 0.0)))
-    except (TypeError, ValueError):
-        ego_speed_mps = None
-    try:
-        park_speed_threshold_mps = float(info.get('task_park_speed_threshold_mps', 0.75))
-    except (TypeError, ValueError):
-        park_speed_threshold_mps = 0.75
-    try:
-        brake_accel_mps2 = float(info.get('task_park_brake_accel_mps2', -2.0))
-    except (TypeError, ValueError):
-        brake_accel_mps2 = -2.0
-    if ego_speed_mps is not None and ego_speed_mps <= park_speed_threshold_mps:
-        overridden['acc'] = 0.0
-        overridden['steer_rate'] = 0.0
-        return overridden
-
-    overridden['acc'] = min(float(overridden.get('acc', 0.0)), brake_accel_mps2)
-
-    try:
-        position_tolerance_m = float(info.get('task_position_tolerance_m', 3.0))
-    except (TypeError, ValueError):
-        position_tolerance_m = 3.0
-    if position_error_m <= max(position_tolerance_m * 1.5, 4.0):
-        overridden['steer_rate'] = 0.0
-    return overridden
 
 
 def _build_reference_worldline(reference_poses, ground_height_fn, forward_offset=REFERENCE_FORWARD_OFFSET_M):
@@ -989,7 +302,7 @@ def _select_overlay_plan(plan_traj, plan_path_length, last_valid_plan, stale_fra
     return None, stale_frames, False
 
 
-def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
+def create_gym_env(cfg, output, run_label, include_privileged_pipe=False, planner_process=None):
 
     env = gymnasium.make('hugsim_env/HUGSim-v0', cfg=cfg, output=output)
 
@@ -1018,6 +331,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     plan_pipe_keepalive_fd = os.open(plan_pipe, os.O_RDWR | os.O_NONBLOCK)
     obs_pipe_writer = os.fdopen(os.open(obs_pipe, os.O_RDWR), "wb", buffering=0)
     plan_pipe_reader = os.fdopen(os.open(plan_pipe, os.O_RDWR), "rb", buffering=0)
+    plan_response_timeout_sec = float(os.environ.get("HUGSIM_PLAN_RESPONSE_TIMEOUT_SEC", "0") or 0.0)
     print('Ready for simulation')
     preflight_payload = {
         "message_type": "hugsim_preflight",
@@ -1065,6 +379,9 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     current_q_best_current_score = None
     current_q_score_gap = None
     current_q_invoked_vlm = None
+    current_planner_decision_step = None
+    current_planner_decision_frame_index = None
+    current_planner_decision_timestamp = None
     overlay_front_dir = os.path.join(output, 'overlay_front')
     os.makedirs(overlay_front_dir, exist_ok=True)
     for name in os.listdir(overlay_front_dir):
@@ -1080,11 +397,11 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
             privileged_info = _get_privileged_info(env) if include_privileged_pipe else None
         current_obs, current_info = obs, info
         infos_save.append(current_info)
-        if _is_stop_task_complete(current_info):
+        if is_stop_task_complete(current_info):
             demo_completion_reason = 'stop_reached'
             done = True
             break
-        if _is_park_task_complete(current_info):
+        if is_park_task_complete(current_info):
             demo_completion_reason = 'park_reached'
             done = True
             break
@@ -1093,6 +410,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
 
         should_replan = (cnt % PLAN_REPLAN_EVERY_STEPS == 0) or (current_plan_traj is None)
         if should_replan:
+            raise_if_process_exited(planner_process, "preparing planner request")
             # Ensure expected camera keys exist and fill missing ones with black frames
             # Added to try to debug DrivoR related issues
             try:
@@ -1132,7 +450,11 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
             )
             write_pipe_message_file(obs_pipe_writer, plan_request_payload)
             print(f"[plan_request] wrote t={time.time():.6f}")
-            plan_payload = read_pipe_message_file(plan_pipe_reader)
+            plan_payload = read_pipe_message_file(
+                plan_pipe_reader,
+                producer_process=planner_process,
+                timeout_sec=plan_response_timeout_sec,
+            )
             print(f"[plan_response] received t={time.time():.6f}")
             current_topk_plans = None
             current_topk_scores = None
@@ -1162,6 +484,8 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
             current_q_best_current_score = None
             current_q_score_gap = None
             current_q_invoked_vlm = None
+            current_planner_decision_step = cnt
+            current_planner_decision_timestamp = current_info.get('timestamp')
             if isinstance(plan_payload, dict):
                 current_plan_traj = plan_payload.get('selected_plan')
                 current_topk_plans = plan_payload.get('topk_plans')
@@ -1192,8 +516,13 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
                 current_q_best_current_score = plan_payload.get('q_best_current_score')
                 current_q_score_gap = plan_payload.get('q_score_gap')
                 current_q_invoked_vlm = plan_payload.get('q_invoked_vlm')
+                if isinstance(current_latency_timeline_record, dict):
+                    current_planner_decision_frame_index = current_latency_timeline_record.get('frame_index')
+                else:
+                    current_planner_decision_frame_index = None
             else:
                 current_plan_traj = plan_payload
+                current_planner_decision_frame_index = None
             current_plan_origin_pose = rt2pose(
                 np.asarray(current_info['ego_rot']),
                 np.asarray(current_info['ego_pos']),
@@ -1266,9 +595,21 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
                     'q_score_gap': current_q_score_gap,
                     'q_invoked_vlm': current_q_invoked_vlm,
                     'adaptive_replan_decision': current_adaptive_replan_decision,
+                    'execution_mode': current_info.get('execution_mode'),
+                    'planner_gate_selected_planner': current_info.get('planner_gate_selected_planner'),
+                    'planner_gate_confidence': current_info.get('planner_gate_confidence'),
+                    'planner_gate_reasoning': current_info.get('planner_gate_reasoning'),
+                    'planner_gate_elapsed_sec': current_info.get('planner_gate_elapsed_sec'),
+                    'planner_gate_error': current_info.get('planner_gate_error'),
+                    'planner_gate_timed_out': current_info.get('planner_gate_timed_out'),
                     'carry_previous_valid': current_carry_previous_valid,
                     'latency_timeline_record': current_latency_timeline_record,
                     'vlm_failed': current_vlm_failed,
+                    'planner_decision_fresh': bool(should_replan),
+                    'planner_decision_step': current_planner_decision_step,
+                    'planner_decision_age_steps': None if current_planner_decision_step is None else int(cnt - current_planner_decision_step),
+                    'planner_decision_frame_index': current_planner_decision_frame_index,
+                    'planner_decision_timestamp': current_planner_decision_timestamp,
                     'overlay_plan_held': bool(overlay_plan_held),
                     'overlay_plan_stale_frames': int(last_valid_overlay_plan_stale_frames),
                     'overlay_candidate_plans': None if current_candidate_pool_plans is None else [
@@ -1324,7 +665,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
             )
 
             action = {'acc': acc, 'steer_rate': steer_rate}
-            action = _apply_demo_task_action_override(action, current_info)
+            action = apply_demo_task_action_override(action, current_info)
             obs, reward, terminated, truncated, info = env.step(action)
             if include_privileged_pipe:
                 privileged_info = _get_privileged_info(env)
@@ -1373,7 +714,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
                     demo_task_info['task_completion_reason'] = demo_completion_reason
         with open(os.path.join(output, 'demo_summary.json'), 'w') as wf:
             json.dump(
-                _summarize_demo_overlay(demo_overlay_records, demo_task_info, final_goal_status),
+                summarize_demo_overlay(demo_overlay_records, demo_task_info, final_goal_status),
                 wf,
                 indent=2,
             )
@@ -1382,7 +723,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False):
     scene_xyz = np.asarray(o3d.io.read_point_cloud(os.path.join(output, 'scene.ply')).points)
     results = hugsim_evaluate([save_data], ground_xyz, scene_xyz)
     if isinstance(results, dict):
-        results["performance"] = _build_run_performance(
+        results["performance"] = build_run_performance(
             output_dir=output,
             cfg=cfg,
             ad_name=args.ad,
@@ -1432,8 +773,8 @@ if __name__ == "__main__":
     if output_root_override:
         cfg.base.output_dir = output_root_override
     else:
-        output_model_slug = _resolve_output_model_slug(args.ad, planner_config)
-        cfg.base.output_dir = _prefix_output_dir_with_model(cfg.base.output_dir, output_model_slug)
+        output_model_slug = resolve_output_model_slug(args.ad, planner_config)
+        cfg.base.output_dir = prefix_output_dir_with_model(cfg.base.output_dir, output_model_slug)
         cfg.base.output_dir = cfg.base.output_dir + planner_output_suffix
 
     model_path = _resolve_scene_model_path(cfg.base.model_base, cfg.scenario.scene_name)
@@ -1574,7 +915,13 @@ if __name__ == "__main__":
             rb_merge_cfg = cfg.planner.drivor.get('rule_based_merge', {})
             if rb_merge_cfg.get('enabled', False) and rb_merge_cfg.get('include_privileged_info', True):
                 include_privileged_pipe = True
-        create_gym_env(cfg, output, planner_output_suffix, include_privileged_pipe=include_privileged_pipe)
+        create_gym_env(
+            cfg,
+            output,
+            planner_output_suffix,
+            include_privileged_pipe=include_privileged_pipe,
+            planner_process=process,
+        )
         check_alive(process)
     except Exception as e:
         import traceback

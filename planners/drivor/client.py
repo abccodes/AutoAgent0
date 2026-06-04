@@ -19,8 +19,6 @@ import argparse
 import logging
 import math
 import os
-import pickle
-import struct
 import sys
 import time
 import traceback
@@ -55,8 +53,20 @@ try:
 except Exception:
     pass
 
-from scipy.spatial.transform import Rotation as SCR
-from planners.common.rule_based_provider import (
+from autoagent0.adapters.hugsim.defaults import get_default_trajectories
+from autoagent0.adapters.hugsim.geometry import (
+    compute_local_acceleration as shared_compute_local_acceleration,
+    compute_local_velocity,
+    info_to_pose,
+    local_plan_to_world,
+    path_length,
+    truncate_plan,
+    world_points_to_current_local,
+)
+from autoagent0.adapters.hugsim.io import read_obs_file, write_plan_file
+from autoagent0.core.payloads import build_hugsim_plan_payload
+from autoagent0.core.planner_flow import disabled_planner_gate_result, run_learned_planner_selection
+from autoagent0.experts.rule_based import (
     build_rule_based_candidate_rows,
     get_rule_based_proposals_and_scores,
     resolve_rule_based_merge_config,
@@ -298,70 +308,6 @@ def build_camera_from_hugsim(cam_name: str, rgb_image: np.ndarray, cam_params: D
     )
     return cam
 
-def forward_left_basis(yaw: float):
-        forward_dir = np.array([math.sin(yaw), math.cos(yaw)], dtype=np.float32)
-        left_dir = np.array([-math.cos(yaw), math.sin(yaw)], dtype=np.float32)
-        return forward_dir, left_dir
-
-def world_delta_to_local_components(delta_world: np.ndarray, yaw: float) -> np.ndarray:
-    fwd, left = forward_left_basis(yaw)
-    return np.array([float(np.dot(delta_world, fwd)), float(np.dot(delta_world, left))], dtype=np.float32)
-
-
-#need to figure out what this does
-def timestamp_delta_seconds(prev_info: Dict[str, object], next_info: Dict[str, object], default_dt: float = 0.25) -> float:
-    dt = float(next_info["timestamp"]) - float(prev_info["timestamp"])
-    if dt <= 1e-6:
-        return default_dt
-    return dt
-
-def compute_local_velocity(info_history: Sequence[Dict[str, object]], index: int) -> np.ndarray:
-    """Compute local velocity (forward, left) using RAP's approach (finite differences)"""
-    if len(info_history) <= 1:
-        return np.zeros(2, dtype=np.float32)
-
-    curr_info = info_history[index]
-    curr_pos = np.asarray(curr_info["ego_pos"], dtype=np.float32)
-    curr_yaw = float(np.asarray(curr_info["ego_rot"], dtype=np.float32)[1])
-
-    if index > 0:
-        prev_info = info_history[index - 1]
-        prev_pos = np.asarray(prev_info["ego_pos"], dtype=np.float32)
-        dt = timestamp_delta_seconds(prev_info, curr_info)
-        delta_world = np.array(
-            [curr_pos[0] - prev_pos[0], curr_pos[2] - prev_pos[2]],
-            dtype=np.float32)
-        return world_delta_to_local_components(delta_world, curr_yaw) / dt
-
-    # forward diff
-    next_info = info_history[index + 1]
-    next_pos = np.asarray(next_info["ego_pos"], dtype=np.float32)
-    dt = timestamp_delta_seconds(curr_info, next_info)
-    delta_world = np.array(
-        [next_pos[0] - curr_pos[0], next_pos[2] - curr_pos[2]], 
-        dtype=np.float32,
-    )
-    return world_delta_to_local_components(delta_world, curr_yaw) / dt
-
-
-def compute_local_acceleration(info_history: Sequence[Dict], index: int) -> np.ndarray:
-    if len(info_history) <= 2:
-        return np.zeros(2, dtype=np.float32)
-    curr_vel = compute_local_velocity(info_history, index)
-    if index > 0:
-        prev_vel = compute_local_velocity(info_history, index - 1)
-        dt = float(info_history[index]["timestamp"]) - float(info_history[index - 1]["timestamp"])
-        if dt <= 1e-6:
-            return np.zeros(2, dtype=np.float32)
-        return (curr_vel - prev_vel) / dt
-    next_vel = compute_local_velocity(info_history, index + 1)
-    dt = float(info_history[index + 1]["timestamp"]) - float(info_history[index]["timestamp"])
-    if dt <= 1e-6:
-        return np.zeros(2, dtype=np.float32)
-    return (next_vel - curr_vel) / dt
-
-
-
 #comparable to build_features for RAP
 def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_history: int = EGO_HISTORY_FRAMES) -> AgentInput:
     """
@@ -392,7 +338,11 @@ def build_agent_input_from_hugsim(obs: Dict, info_history: List[Dict], num_histo
         ego_pose = np.array([0.0, 0.0, 0.0], dtype=np.float64)
 
         ego_velocity = compute_local_velocity(info_history[-num_history:], idx + num_history)
-        ego_accel = compute_local_acceleration(info_history[-num_history:], idx + num_history)
+        ego_accel = shared_compute_local_acceleration(
+            info_history[-num_history:],
+            idx + num_history,
+            zero_on_nonpositive_dt=True,
+        )
         cmd = info.get("command", -1)
         driving_command = make_command_one_hot(cmd)
         ego_status = EgoStatus(ego_pose.astype(np.float64), ego_velocity.astype(np.float32), ego_accel.astype(np.float32), driving_command)
@@ -480,54 +430,6 @@ def drivor_to_hugsim_plan(trajectory: np.ndarray) -> np.ndarray:
     forward = trajectory[:, 0]
     return np.stack([right, forward], axis=-1).astype(np.float32)
 
-#gotta figure out what the functions up to world_points_to_current_local do
-
-def info_to_pose(info: Dict[str, object]) -> np.ndarray:
-    pose = np.eye(4, dtype=np.float32)
-    pose[:3, :3] = SCR.from_euler(
-        "XYZ",
-        np.asarray(info["ego_rot"], dtype=np.float32),
-        degrees=False,
-    ).as_matrix().astype(np.float32)
-    pose[:3, 3] = np.asarray(info["ego_pos"], dtype=np.float32)
-    return pose
-
-
-def local_plan_to_world(plan_traj: np.ndarray, ego_pose: np.ndarray) -> np.ndarray:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if len(plan_traj) == 0:
-        return np.zeros((0, 3), dtype=np.float32)
-
-    origin = ego_pose[:3, 3]
-    right_dir = ego_pose[:3, 0]
-    forward_dir = ego_pose[:3, 2]
-    points_world = [
-        origin + float(right) * right_dir + float(forward) * forward_dir
-        for right, forward in plan_traj
-    ]
-    return np.asarray(points_world, dtype=np.float32)
-
-
-def world_points_to_current_local(points_world: np.ndarray, ego_pose: np.ndarray) -> np.ndarray:
-    if len(points_world) == 0:
-        return np.zeros((0, 2), dtype=np.float32)
-
-    homogeneous = np.concatenate(
-        [np.asarray(points_world, dtype=np.float32), np.ones((len(points_world), 1), dtype=np.float32)],
-        axis=1,
-    )
-    ego_points = (np.linalg.inv(ego_pose) @ homogeneous.T).T[:, :3]
-    return np.stack([ego_points[:, 0], ego_points[:, 2]], axis=1).astype(np.float32)
-
-
-def path_length(plan_traj: np.ndarray) -> float:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if len(plan_traj) < 2:
-        return 0.0
-    return float(np.linalg.norm(np.diff(plan_traj, axis=0), axis=1).sum())
-
-
-
 def curvature_cost(plan_traj: np.ndarray) -> float:
     plan_traj = np.asarray(plan_traj, dtype=np.float32)
     if len(plan_traj) < 3:
@@ -614,84 +516,6 @@ def build_carry_plan_candidate(
         "carry_elapsed_pose_steps": elapsed_pose_steps,
     }
 
-
-def truncate_plan(plan_traj: np.ndarray, num_poses: int) -> np.ndarray:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if num_poses <= 0:
-        return np.zeros((0, 2), dtype=np.float32)
-    return np.asarray(plan_traj[: min(len(plan_traj), int(num_poses))], dtype=np.float32)
-
-def plan_endpoint(plan_traj: np.ndarray) -> np.ndarray:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if len(plan_traj) == 0:
-        return np.zeros(2, dtype=np.float32)
-    return np.asarray(plan_traj[-1], dtype=np.float32)
-
-
-def normalize_scores(scores: np.ndarray) -> np.ndarray:
-    scores = np.asarray(scores, dtype=np.float32)
-    if len(scores) == 0:
-        return np.zeros((0,), dtype=np.float32)
-    score_min = float(scores.min())
-    score_max = float(scores.max())
-    if score_max - score_min < 1e-6:
-        return np.ones_like(scores, dtype=np.float32)
-    return (scores - score_min) / (score_max - score_min)
-
-
-def get_default_trajectories(num_poses: int) -> np.ndarray:
-    num_poses = max(2, int(num_poses))
-    t = np.linspace(0.0, 1.0, num_poses, dtype=np.float32)
-    forward = np.stack([np.zeros_like(t), 40.0 * t], axis=1)
-    slight_left = np.stack([-5.0 * (t ** 2), 38.0 * t], axis=1)
-    slight_right = np.stack([5.0 * (t ** 2), 38.0 * t], axis=1)
-    sharp_left = np.stack([-25.0 * (t ** 3), 30.0 * t], axis=1)
-    sharp_right = np.stack([25.0 * (t ** 3), 30.0 * t], axis=1)
-    return np.stack([forward, slight_left, slight_right, sharp_left, sharp_right], axis=0).astype(np.float32)
-
-#reads from HUGSIM FIFO pipe
-def read_obs(obs_pipe: Path):
-    """ pickled object from pipe: 8-byte length prefix + payload"""
-    with open(obs_pipe, "rb") as pipe:
-        header = pipe.read(8)
-        if len(header) != 8:
-            raise EOFError(f"Incomplete pipe header from {obs_pipe}")
-        payload_size = struct.unpack("<Q", header)[0]
-        payload = bytearray()
-        while len(payload) < payload_size:
-            chunk = pipe.read(payload_size - len(payload))
-            if not chunk:
-                raise EOFError(f"Incomplete pipe payload from {obs_pipe}")
-            payload.extend(chunk)
-    return pickle.loads(payload)
-
-
-def read_obs_file(pipe):
-    header = pipe.read(8)
-    if len(header) != 8:
-        raise EOFError("Incomplete pipe header from open obs pipe handle")
-    payload_size = struct.unpack("<Q", header)[0]
-    payload = bytearray()
-    while len(payload) < payload_size:
-        chunk = pipe.read(payload_size - len(payload))
-        if not chunk:
-            raise EOFError("Incomplete pipe payload from open obs pipe handle")
-        payload.extend(chunk)
-    return pickle.loads(payload)
-
-#writes DrivoR plan back to HUGSIM
-def write_plan(plan_pipe: Path, plan) -> None:
-    payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
-    with open(plan_pipe, "wb") as pipe:
-        pipe.write(struct.pack("<Q", len(payload)))
-        pipe.write(payload)
-
-
-def write_plan_file(pipe, plan) -> None:
-    payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
-    pipe.write(struct.pack("<Q", len(payload)))
-    pipe.write(payload)
-    pipe.flush()
 
 # ============================================================================
 # NEW FUNCTIONS: RAP-compatible candidate generation and payload building
@@ -870,98 +694,21 @@ def build_plan_payload(
     candidate_pool_rows: Optional[Sequence[Dict[str, object]]] = None,
     topk: int = TOPK,
 ) -> Dict[str, object]:
-    """
-    Build complete plan payload with candidate pool, defaults, and VLM metadata.
-    Mirrors RAP's build_plan_payload but adapted for DrivoR models.
-    
-    Handles both direct proposal selection and VLM-selected plan override.
-    """
-    # Determine topk and extract top indices
-    topk = max(1, min(int(topk), int(len(scores))))
-    top_indices = np.argsort(scores)[-topk:][::-1]
-
-    # Determine selected_idx
-    if selected_idx is None and selected_plan_override is None:
-        selected_idx = int(top_indices[0])
-    else:
-        selected_idx = None if selected_idx is None else int(selected_idx)
-
-    # Determine selected plan and score
-    if selected_plan_override is not None:
-        selected_plan = np.asarray(selected_plan_override, dtype=np.float32)
-        selected_score = float(selected_score_override) if selected_score_override is not None else None
-    else:
-        assert selected_idx is not None
-        selected_traj = proposals[selected_idx, :output_num_poses]
-        selected_plan = drivor_to_hugsim_plan(selected_traj)
-        selected_score = float(scores[selected_idx])
-
-    # Build candidate pool (either from provided rows or derived from top-k)
-    if candidate_pool_rows is not None:
-        candidate_pool_plans = [
-            np.asarray(row["local_plan"], dtype=np.float32).tolist()
-            for row in candidate_pool_rows
-        ]
-        candidate_pool_execution_plans = [
-            np.asarray(row.get("execution_plan", row["local_plan"]), dtype=np.float32).tolist()
-            for row in candidate_pool_rows
-        ]
-        candidate_pool_scores = [float(row.get("proposal_score", 0.0)) for row in candidate_pool_rows]
-        candidate_pool_q_scores = [
-            None if row.get("q_score") is None else float(row["q_score"])
-            for row in candidate_pool_rows
-        ]
-        candidate_pool_sources = [str(row.get("source", "current_drivor")) for row in candidate_pool_rows]
-        candidate_pool_proposal_indices = [
-            None if row.get("proposal_index") is None else int(row["proposal_index"])
-            for row in candidate_pool_rows
-        ]
-    else:
-        # Fallback: derive candidate pool from top-k proposals
-        candidate_pool_plans = [
-            drivor_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
-            for idx in top_indices
-        ]
-        candidate_pool_scores = [float(scores[idx]) for idx in top_indices]
-        candidate_pool_execution_plans = list(candidate_pool_plans)
-        candidate_pool_q_scores = [None for _ in top_indices]
-        candidate_pool_sources = ["current_drivor" for _ in top_indices]
-        candidate_pool_proposal_indices = [int(idx) for idx in top_indices]
-
-    # Build default overlay plans if requested
-    default_overlay_plans = None
-    default_overlay_sources = None
-    if bool(selection_debug and selection_debug.get("display_default_trajectories")):
-        default_overlay_plans = [traj.tolist() for traj in get_default_trajectories(output_num_poses)]
-        default_overlay_sources = [f"default_fallback_{idx}" for idx in range(len(default_overlay_plans))]
-
-    # Assemble final payload
-    payload = {
-        "selected_idx": selected_idx,
-        "selected_score": selected_score,
-        "selected_source": selected_source,
-        "selected_plan": selected_plan,
-        "topk_indices": [int(idx) for idx in top_indices],
-        "topk_scores": [float(scores[idx]) for idx in top_indices],
-        "topk_plans": [
-            drivor_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
-            for idx in top_indices
-        ],
-        "candidate_pool_plans": candidate_pool_plans,
-        "candidate_pool_execution_plans": candidate_pool_execution_plans,
-        "candidate_pool_scores": candidate_pool_scores,
-        "candidate_pool_q_scores": candidate_pool_q_scores,
-        "candidate_pool_sources": candidate_pool_sources,
-        "candidate_pool_proposal_indices": candidate_pool_proposal_indices,
-        "default_overlay_plans": default_overlay_plans,
-        "default_overlay_sources": default_overlay_sources,
-    }
-
-    # Merge selection_debug metadata into payload
-    if selection_debug:
-        payload.update(selection_debug)
-
-    return payload
+    return build_hugsim_plan_payload(
+        proposals=proposals,
+        scores=scores,
+        output_num_poses=output_num_poses,
+        plan_converter=drivor_to_hugsim_plan,
+        selected_idx=selected_idx,
+        selected_source=selected_source,
+        selection_debug=selection_debug,
+        selected_plan_override=selected_plan_override,
+        selected_score_override=selected_score_override,
+        candidate_pool_rows=candidate_pool_rows,
+        topk=topk,
+        default_source_name="current_drivor",
+        default_trajectory_provider=get_default_trajectories,
+    )
 
 
 def build_plain_drivor_plan_result(
@@ -1338,7 +1085,7 @@ def main() -> int:
                     proposals, scores = extract_proposals_and_scores_from_predictions(pred, output_num_poses=output_num_poses)
                 except Exception as e:
                     LOG.exception("Failed to extract proposals/scores from model output: %s", e)
-                    write_plan_file(plan_pipe_writer, None)
+                    write_plan_file(plan_pipe_writer, None, logger=LOG)
                     continue
 
                 # Build candidate rows (includes carry_prev, top-k, and optional defaults)
@@ -1382,75 +1129,15 @@ def main() -> int:
                             )
                         except Exception as e:
                             LOG.exception("Failed to append rule-based DrivoR merge candidates: %s", e)
-                    planner_gate_result = {
-                        "selected_planner": "learned",
-                        "confidence": None,
-                        "reasoning": "planner_gate_disabled",
-                        "elapsed_sec": 0.0,
-                        "error": None,
-                        "timed_out": False,
-                        "prompt_char_count": 0,
-                        "image_count": 0,
-                    }
-                    selected_planner = "learned"
-                    candidate_rows = learned_candidate_rows
-                    if rule_based_merge_cfg.enabled and not getattr(vlm_cfg, "planner_gate_enabled", False) and rule_based_candidate_rows:
-                        candidate_rows = list(learned_candidate_rows) + list(rule_based_candidate_rows)
-                    if getattr(vlm_cfg, "planner_gate_enabled", False):
-                        planner_gate_result = vlm_selector.maybe_select_planner(
-                            frame_index=frame_index,
-                            camera_images=obs.get("rgb", {}) if isinstance(obs, dict) else {},
-                            info=info,
-                            learned_candidate_rows=learned_candidate_rows,
-                            rule_based_candidate_rows=rule_based_candidate_rows,
-                        )
-                        selected_planner = str(planner_gate_result.get("selected_planner", "learned"))
-                        if selected_planner == "rule_based" and rule_based_candidate_rows:
-                            candidate_rows = rule_based_candidate_rows
-                        else:
-                            selected_planner = "learned"
-                            candidate_rows = learned_candidate_rows
-                    candidate_sources = [str(row.get("source", "unknown")) for row in candidate_rows]
-                    LOG.info(
-                        "DrivoR planner gate frame=%s planner=%s confidence=%s error=%s timed_out=%s chosen_size=%d sources=%s",
-                        frame_index,
-                        selected_planner,
-                        planner_gate_result.get("confidence"),
-                        planner_gate_result.get("error"),
-                        planner_gate_result.get("timed_out"),
-                        len(candidate_rows),
-                        candidate_sources,
-                    )
                 except Exception as e:
                     LOG.exception("Failed to build candidate rows: %s", e)
-                    write_plan_file(plan_pipe_writer, None)
+                    write_plan_file(plan_pipe_writer, None, logger=LOG)
                     continue
 
-                # Determine default selection for VLM fallback
-                # Find the index of the model's best candidate (argmax by score)
-                try:
-                    if selected_planner == "rule_based":
-                        default_selected_index = int(
-                            max(
-                                range(len(candidate_rows)),
-                                key=lambda idx: float(candidate_rows[idx].get("proposal_score", 0.0)),
-                            )
-                        )
-                        default_selected_source = "fallback_rule_based_argmax"
-                    else:
-                        best_idx = int(np.argmax(scores))
-                        default_selected_index = None
-                        for idx, row in enumerate(candidate_rows):
-                            if row.get("proposal_index") is not None and int(row.get("proposal_index")) == best_idx:
-                                default_selected_index = idx
-                                break
-                        if default_selected_index is None:
-                            default_selected_index = 0  # Fallback to first candidate
-                        default_selected_source = "drivor_argmax"
-                except Exception as e:
-                    LOG.exception("Failed to determine default selection: %s", e)
-                    default_selected_index = 0
-                    default_selected_source = "drivor_argmax"
+                selected_planner = "learned"
+                planner_gate_result = disabled_planner_gate_result()
+                default_selected_index = 0
+                default_selected_source = "drivor_argmax"
 
                 # Call VLM selector (or use default if disabled)
                 try:
@@ -1479,113 +1166,37 @@ def main() -> int:
                         }
 
                     else:
-                        if getattr(vlm_cfg, "planner_gate_enabled", False):
-                            selected_row = dict(candidate_rows[default_selected_index])
-                            selected_plan = np.asarray(
-                                selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32
-                            )
-                            selected_idx = selected_row.get("proposal_index")
-                            selected_score = float(selected_row.get("proposal_score", 0.0))
-                            selected_score_raw = (
-                                float(selected_row.get("origin_selected_score_raw"))
-                                if selected_row.get("origin_selected_score_raw") is not None
-                                else float(selected_score)
-                            )
-                            selected_source = (
-                                "planner_gate_rule_based_base_policy"
-                                if selected_planner == "rule_based"
-                                else "planner_gate_learned_base_policy"
-                            )
-                            if planner_gate_result.get("error") is not None:
-                                selected_source = "planner_gate_failed_base_policy_fallback"
-                            selection_debug = {
-                                "vlm_invoked": False,
-                                "scoring_invoked": False,
-                                "execution_mode": (
-                                    "planner_gate_failed_base_policy_fallback"
-                                    if planner_gate_result.get("error") is not None
-                                    else f"planner_gate_selected_{selected_planner}"
-                                ),
-                                "fallback_selected_idx": int(default_selected_index),
-                                "fallback_selected_source": default_selected_source,
-                                "planner_gate_selected_planner": selected_planner,
-                                "planner_gate_confidence": planner_gate_result.get("confidence"),
-                                "planner_gate_reasoning": planner_gate_result.get("reasoning"),
-                                "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
-                                "planner_gate_error": planner_gate_result.get("error"),
-                                "planner_gate_timed_out": planner_gate_result.get("timed_out"),
-                                "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
-                                "planner_gate_image_count": planner_gate_result.get("image_count"),
-                                "planner_gate_token_usage": planner_gate_result.get("token_usage"),
-                                "display_default_trajectories": bool(getattr(vlm_cfg, "display_default_trajectories", False)),
-                                "include_default_candidates": bool(getattr(vlm_cfg, "include_default_candidates", False)),
-                                "carry_previous_allowed": bool(allow_carry_prev),
-                                "previous_selected_source": previous_selected_source,
-                                "selected_score_raw": float(selected_score_raw),
-                                "vlm_failed": planner_gate_result.get("error") is not None,
-                            }
-                        else:
-                            camera_images = obs.get("rgb", {}) if isinstance(obs, dict) else {}
-                            selection_result = vlm_selector.maybe_select(
-                                frame_index=frame_index,
-                                camera_images=camera_images,
-                                info=info,
-                                candidate_rows=candidate_rows,
-                                default_selected_index=default_selected_index,
-                                default_selected_source=default_selected_source,
-                            )
-
-                            selected_row = selection_result["selected_candidate_row"]
-                            selected_plan = np.asarray(
-                                selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32
-                            )
-                            selected_idx = selected_row.get("proposal_index")
-                            selected_score = float(selected_row.get("proposal_score", 0.0))
-                            selected_score_raw = (
-                                float(selected_row.get("origin_selected_score_raw"))
-                                if selected_row.get("origin_selected_score_raw") is not None
-                                else float(selected_score)
-                            )
-                            selected_source = str(selection_result.get("selected_source", "drivor_vlm"))
-
-                            selection_debug = {
-                                "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
-                                "vlm_confidence": selection_result.get("vlm_confidence"),
-                                "vlm_reasoning": selection_result.get("vlm_reasoning"),
-                                "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
-                                "vlm_error": selection_result.get("vlm_error"),
-                                "scoring_invoked": selection_result.get("scoring_invoked"),
-                                "intervention_invoked": selection_result.get("intervention_invoked"),
-                                "intervention_should_intervene": selection_result.get("intervention_should_intervene"),
-                                "intervention_severity_score": selection_result.get("intervention_severity_score"),
-                                "intervention_severity_band": selection_result.get("intervention_severity_band"),
-                                "intervention_corrective_action": selection_result.get("intervention_corrective_action"),
-                                "intervention_confidence": selection_result.get("intervention_confidence"),
-                                "intervention_reasoning": selection_result.get("intervention_reasoning"),
-                                "intervention_elapsed_sec": selection_result.get("intervention_elapsed_sec"),
-                                "intervention_error": selection_result.get("intervention_error"),
-                                "adaptive_replan_decision": selection_result.get("adaptive_replan_decision"),
-                                "carry_previous_valid": selection_result.get("carry_previous_valid"),
-                                "latency_timeline_record": selection_result.get("latency_timeline_record"),
-                                "execution_mode": selection_result.get("execution_mode"),
-                                "vlm_failed": selection_result.get("vlm_failed"),
-                                "fallback_selected_idx": int(default_selected_index),
-                                "fallback_selected_source": default_selected_source,
-                                "planner_gate_selected_planner": selected_planner,
-                                "planner_gate_confidence": planner_gate_result.get("confidence"),
-                                "planner_gate_reasoning": planner_gate_result.get("reasoning"),
-                                "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
-                                "planner_gate_error": planner_gate_result.get("error"),
-                                "planner_gate_timed_out": planner_gate_result.get("timed_out"),
-                                "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
-                                "planner_gate_image_count": planner_gate_result.get("image_count"),
-                                "planner_gate_token_usage": planner_gate_result.get("token_usage"),
-                                "display_default_trajectories": bool(getattr(vlm_cfg, "display_default_trajectories", False)),
-                                "include_default_candidates": bool(getattr(vlm_cfg, "include_default_candidates", False)),
-                                "carry_previous_allowed": bool(allow_carry_prev),
-                                "previous_selected_source": previous_selected_source,
-                                "selected_score_raw": float(selected_score_raw),
-                            }
+                        selection = run_learned_planner_selection(
+                            frame_index=frame_index,
+                            camera_images=obs.get("rgb", {}) if isinstance(obs, dict) else {},
+                            info=info,
+                            vlm_selector=vlm_selector,
+                            scores=scores,
+                            learned_candidate_rows=learned_candidate_rows,
+                            rule_based_candidate_rows=rule_based_candidate_rows,
+                            rule_based_merge_enabled=rule_based_merge_cfg.enabled,
+                            planner_gate_enabled=getattr(vlm_cfg, "planner_gate_enabled", False),
+                            vlm_enabled=getattr(vlm_cfg, "enabled", False),
+                            display_default_trajectories=getattr(vlm_cfg, "display_default_trajectories", False),
+                            include_default_candidates=getattr(vlm_cfg, "include_default_candidates", False),
+                            allow_carry_previous=allow_carry_prev,
+                            previous_selected_source=previous_selected_source,
+                            learned_source_name="current_drivor",
+                            learned_default_source="drivor_argmax",
+                            score_fallback_key="proposal_score",
+                            planner_log_name="DrivoR",
+                            logger=LOG,
+                            strict_learned_argmax_lookup=False,
+                            q_key_prefix=False,
+                        )
+                        selected_row = selection.selected_row
+                        selected_plan = selection.selected_plan
+                        selected_idx = selection.selected_idx
+                        selected_score = selection.selected_score
+                        selected_score_raw = selection.selected_score_raw
+                        selected_source = selection.selected_source
+                        candidate_rows = selection.candidate_rows
+                        selection_debug = selection.selection_debug
                         # Build final payload below (outside this block)
                     frame_index += 1
                 except Exception as e:
@@ -1628,11 +1239,11 @@ def main() -> int:
                     )
                 except Exception as e:
                     LOG.exception("Failed to build plan payload: %s", e)
-                    write_plan_file(plan_pipe_writer, None)
+                    write_plan_file(plan_pipe_writer, None, logger=LOG)
                     continue
 
                 # Write final plan to HUGSIM
-                write_plan_file(plan_pipe_writer, plan_payload)
+                write_plan_file(plan_pipe_writer, plan_payload, logger=LOG)
 
                 # Save previous selection for carry-prev support
                 try:
@@ -1649,7 +1260,7 @@ def main() -> int:
                 LOG.error("Adapter loop failed")
                 LOG.error(traceback.format_exc())
                 try:
-                    write_plan_file(plan_pipe_writer, None)
+                    write_plan_file(plan_pipe_writer, None, logger=LOG)
                 except Exception:
                     LOG.error("Failed to notify HUGSIM about adapter failure")
                 return 1

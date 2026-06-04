@@ -3,8 +3,6 @@ import argparse
 import logging
 import math
 import os
-import pickle
-import struct
 import sys
 import time
 import traceback
@@ -16,9 +14,23 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 import torch
-from scipy.spatial.transform import Rotation as SCR
 
-from planners.common.rule_based_provider import (
+from autoagent0.adapters.hugsim.defaults import get_default_trajectories
+from autoagent0.adapters.hugsim.geometry import (
+    compute_local_acceleration,
+    compute_local_velocity,
+    forward_left_basis,
+    info_to_pose,
+    local_plan_to_world,
+    normalize_angle,
+    path_length,
+    truncate_plan,
+    world_points_to_current_local,
+)
+from autoagent0.adapters.hugsim.io import read_obs_file, write_plan_file
+from autoagent0.core.payloads import build_hugsim_plan_payload
+from autoagent0.core.planner_flow import run_learned_planner_selection
+from autoagent0.experts.rule_based import (
     RuleBasedMergeConfig,
     build_rule_based_candidate_rows,
     get_rule_based_proposals_and_scores,
@@ -341,78 +353,6 @@ def compute_scene_rig_lidar2img(
     return viewpad @ np.linalg.inv(front2cam) @ local_to_front_cam
 
 
-def normalize_angle(angle: float) -> float:
-    return float(math.atan2(math.sin(angle), math.cos(angle)))
-
-
-def forward_left_basis(yaw: float) -> Tuple[np.ndarray, np.ndarray]:
-    forward_dir = np.array([math.sin(yaw), math.cos(yaw)], dtype=np.float32)
-    left_dir = np.array([-math.cos(yaw), math.sin(yaw)], dtype=np.float32)
-    return forward_dir, left_dir
-
-
-def world_delta_to_local_components(delta_world: np.ndarray, yaw: float) -> np.ndarray:
-    forward_dir, left_dir = forward_left_basis(yaw)
-    return np.array(
-        [
-            float(np.dot(delta_world, forward_dir)),
-            float(np.dot(delta_world, left_dir)),
-        ],
-        dtype=np.float32,
-    )
-
-
-def timestamp_delta_seconds(prev_info: Dict[str, object], next_info: Dict[str, object], default_dt: float = 0.25) -> float:
-    dt = float(next_info["timestamp"]) - float(prev_info["timestamp"])
-    if dt <= 1e-6:
-        return default_dt
-    return dt
-
-
-def compute_local_velocity(info_history: Sequence[Dict[str, object]], index: int) -> np.ndarray:
-    if len(info_history) <= 1:
-        return np.zeros(2, dtype=np.float32)
-
-    curr_info = info_history[index]
-    curr_pos = np.asarray(curr_info["ego_pos"], dtype=np.float32)
-    curr_yaw = float(np.asarray(curr_info["ego_rot"], dtype=np.float32)[1])
-
-    if index > 0:
-        prev_info = info_history[index - 1]
-        prev_pos = np.asarray(prev_info["ego_pos"], dtype=np.float32)
-        dt = timestamp_delta_seconds(prev_info, curr_info)
-        delta_world = np.array(
-            [curr_pos[0] - prev_pos[0], curr_pos[2] - prev_pos[2]],
-            dtype=np.float32,
-        )
-        return world_delta_to_local_components(delta_world, curr_yaw) / dt
-
-    next_info = info_history[index + 1]
-    next_pos = np.asarray(next_info["ego_pos"], dtype=np.float32)
-    dt = timestamp_delta_seconds(curr_info, next_info)
-    delta_world = np.array(
-        [next_pos[0] - curr_pos[0], next_pos[2] - curr_pos[2]],
-        dtype=np.float32,
-    )
-    return world_delta_to_local_components(delta_world, curr_yaw) / dt
-
-
-def compute_local_acceleration(info_history: Sequence[Dict[str, object]], index: int) -> np.ndarray:
-    if len(info_history) <= 2:
-        return np.zeros(2, dtype=np.float32)
-
-    curr_vel = compute_local_velocity(info_history, index)
-
-    if index > 0:
-        prev_vel = compute_local_velocity(info_history, index - 1)
-        dt = timestamp_delta_seconds(info_history[index - 1], info_history[index])
-        return (curr_vel - prev_vel) / dt
-
-    next_vel = compute_local_velocity(info_history, index + 1)
-    dt = timestamp_delta_seconds(info_history[index], info_history[index + 1])
-    return (next_vel - curr_vel) / dt
-
-
 def build_features(
     obs: Dict[str, Dict[str, np.ndarray]],
     info_history: Sequence[Dict[str, object]],
@@ -484,51 +424,6 @@ def rap_to_hugsim_plan(trajectory: np.ndarray) -> np.ndarray:
     return np.stack([right, forward], axis=-1).astype(np.float32)
 
 
-def info_to_pose(info: Dict[str, object]) -> np.ndarray:
-    pose = np.eye(4, dtype=np.float32)
-    pose[:3, :3] = SCR.from_euler(
-        "XYZ",
-        np.asarray(info["ego_rot"], dtype=np.float32),
-        degrees=False,
-    ).as_matrix().astype(np.float32)
-    pose[:3, 3] = np.asarray(info["ego_pos"], dtype=np.float32)
-    return pose
-
-
-def local_plan_to_world(plan_traj: np.ndarray, ego_pose: np.ndarray) -> np.ndarray:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if len(plan_traj) == 0:
-        return np.zeros((0, 3), dtype=np.float32)
-
-    origin = ego_pose[:3, 3]
-    right_dir = ego_pose[:3, 0]
-    forward_dir = ego_pose[:3, 2]
-    points_world = [
-        origin + float(right) * right_dir + float(forward) * forward_dir
-        for right, forward in plan_traj
-    ]
-    return np.asarray(points_world, dtype=np.float32)
-
-
-def world_points_to_current_local(points_world: np.ndarray, ego_pose: np.ndarray) -> np.ndarray:
-    if len(points_world) == 0:
-        return np.zeros((0, 2), dtype=np.float32)
-
-    homogeneous = np.concatenate(
-        [np.asarray(points_world, dtype=np.float32), np.ones((len(points_world), 1), dtype=np.float32)],
-        axis=1,
-    )
-    ego_points = (np.linalg.inv(ego_pose) @ homogeneous.T).T[:, :3]
-    return np.stack([ego_points[:, 0], ego_points[:, 2]], axis=1).astype(np.float32)
-
-
-def path_length(plan_traj: np.ndarray) -> float:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if len(plan_traj) < 2:
-        return 0.0
-    return float(np.linalg.norm(np.diff(plan_traj, axis=0), axis=1).sum())
-
-
 def build_carry_plan_candidate(
     previous_plan: Optional[np.ndarray],
     previous_pose: Optional[np.ndarray],
@@ -579,85 +474,6 @@ def build_carry_plan_candidate(
     }
 
 
-def truncate_plan(plan_traj: np.ndarray, num_poses: int) -> np.ndarray:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if num_poses <= 0:
-        return np.zeros((0, 2), dtype=np.float32)
-    return np.asarray(plan_traj[: min(len(plan_traj), int(num_poses))], dtype=np.float32)
-
-
-def plan_endpoint(plan_traj: np.ndarray) -> np.ndarray:
-    plan_traj = np.asarray(plan_traj, dtype=np.float32)
-    if len(plan_traj) == 0:
-        return np.zeros(2, dtype=np.float32)
-    return np.asarray(plan_traj[-1], dtype=np.float32)
-
-
-def normalize_scores(scores: np.ndarray) -> np.ndarray:
-    scores = np.asarray(scores, dtype=np.float32)
-    if len(scores) == 0:
-        return np.zeros((0,), dtype=np.float32)
-    score_min = float(scores.min())
-    score_max = float(scores.max())
-    if score_max - score_min < 1e-6:
-        return np.ones_like(scores, dtype=np.float32)
-    return (scores - score_min) / (score_max - score_min)
-
-
-def get_default_trajectories(num_poses: int) -> np.ndarray:
-    num_poses = max(2, int(num_poses))
-    t = np.linspace(0.0, 1.0, num_poses, dtype=np.float32)
-    forward = np.stack([np.zeros_like(t), 40.0 * t], axis=1)
-    slight_left = np.stack([-5.0 * (t ** 2), 38.0 * t], axis=1)
-    slight_right = np.stack([5.0 * (t ** 2), 38.0 * t], axis=1)
-    sharp_left = np.stack([-25.0 * (t ** 3), 30.0 * t], axis=1)
-    sharp_right = np.stack([25.0 * (t ** 3), 30.0 * t], axis=1)
-    return np.stack([forward, slight_left, slight_right, sharp_left, sharp_right], axis=0).astype(np.float32)
-
-
-def read_obs(obs_pipe: Path):
-    with open(obs_pipe, "rb") as pipe:
-        header = pipe.read(8)
-        if len(header) != 8:
-            raise EOFError(f"Incomplete pipe header from {obs_pipe}")
-        payload_size = struct.unpack("<Q", header)[0]
-        payload = bytearray()
-        while len(payload) < payload_size:
-            chunk = pipe.read(payload_size - len(payload))
-            if not chunk:
-                raise EOFError(f"Incomplete pipe payload from {obs_pipe}")
-            payload.extend(chunk)
-    return pickle.loads(payload)
-
-
-def read_obs_file(pipe):
-    header = pipe.read(8)
-    if len(header) != 8:
-        raise EOFError("Incomplete pipe header")
-    payload_size = struct.unpack("<Q", header)[0]
-    payload = bytearray()
-    while len(payload) < payload_size:
-        chunk = pipe.read(payload_size - len(payload))
-        if not chunk:
-            raise EOFError("Incomplete pipe payload")
-        payload.extend(chunk)
-    return pickle.loads(payload)
-
-
-def write_plan(plan_pipe: Path, plan) -> None:
-    payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
-    with open(plan_pipe, "wb") as pipe:
-        pipe.write(struct.pack("<Q", len(payload)))
-        pipe.write(payload)
-
-
-def write_plan_file(pipe, plan) -> None:
-    payload = pickle.dumps(plan, protocol=pickle.HIGHEST_PROTOCOL)
-    pipe.write(struct.pack("<Q", len(payload)))
-    pipe.write(payload)
-    pipe.flush()
-
-
 def build_plan_payload(
     proposals: np.ndarray,
     scores: np.ndarray,
@@ -670,81 +486,21 @@ def build_plan_payload(
     candidate_pool_rows: Optional[Sequence[Dict[str, object]]] = None,
     topk: int = TOPK_PROPOSALS_TO_SEND,
 ) -> Dict[str, object]:
-    topk = max(1, min(int(topk), int(len(scores))))
-    top_indices = np.argsort(scores)[-topk:][::-1]
-    if selected_idx is None and selected_plan_override is None:
-        selected_idx = int(top_indices[0])
-    else:
-        selected_idx = None if selected_idx is None else int(selected_idx)
-
-    if selected_plan_override is not None:
-        selected_plan = np.asarray(selected_plan_override, dtype=np.float32)
-        selected_score = float(selected_score_override) if selected_score_override is not None else None
-    else:
-        assert selected_idx is not None
-        selected_traj = proposals[selected_idx, :output_num_poses]
-        selected_plan = rap_to_hugsim_plan(selected_traj)
-        selected_score = float(scores[selected_idx])
-
-    if candidate_pool_rows is not None:
-        candidate_pool_plans = [
-            np.asarray(row["local_plan"], dtype=np.float32).tolist()
-            for row in candidate_pool_rows
-        ]
-        candidate_pool_execution_plans = [
-            np.asarray(row.get("execution_plan", row["local_plan"]), dtype=np.float32).tolist()
-            for row in candidate_pool_rows
-        ]
-        candidate_pool_scores = [float(row.get("proposal_score", 0.0)) for row in candidate_pool_rows]
-        candidate_pool_q_scores = [
-            None if row.get("q_score") is None else float(row["q_score"])
-            for row in candidate_pool_rows
-        ]
-        candidate_pool_sources = [str(row.get("source", "current_rap")) for row in candidate_pool_rows]
-        candidate_pool_proposal_indices = [
-            None if row.get("proposal_index") is None else int(row["proposal_index"])
-            for row in candidate_pool_rows
-        ]
-    else:
-        candidate_pool_plans = [
-            rap_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
-            for idx in top_indices
-        ]
-        candidate_pool_scores = [float(scores[idx]) for idx in top_indices]
-        candidate_pool_execution_plans = list(candidate_pool_plans)
-        candidate_pool_q_scores = [None for _ in top_indices]
-        candidate_pool_sources = ["current_rap" for _ in top_indices]
-        candidate_pool_proposal_indices = [int(idx) for idx in top_indices]
-
-    default_overlay_plans = None
-    default_overlay_sources = None
-    if bool(selection_debug and selection_debug.get("display_default_trajectories")):
-        default_overlay_plans = [traj.tolist() for traj in get_default_trajectories(output_num_poses)]
-        default_overlay_sources = [f"default_fallback_{idx}" for idx in range(len(default_overlay_plans))]
-
-    payload = {
-        "selected_idx": selected_idx,
-        "selected_score": selected_score,
-        "selected_source": selected_source,
-        "selected_plan": selected_plan,
-        "topk_indices": [int(idx) for idx in top_indices],
-        "topk_scores": [float(scores[idx]) for idx in top_indices],
-        "topk_plans": [
-            rap_to_hugsim_plan(proposals[idx, :output_num_poses]).tolist()
-            for idx in top_indices
-        ],
-        "candidate_pool_plans": candidate_pool_plans,
-        "candidate_pool_execution_plans": candidate_pool_execution_plans,
-        "candidate_pool_scores": candidate_pool_scores,
-        "candidate_pool_q_scores": candidate_pool_q_scores,
-        "candidate_pool_sources": candidate_pool_sources,
-        "candidate_pool_proposal_indices": candidate_pool_proposal_indices,
-        "default_overlay_plans": default_overlay_plans,
-        "default_overlay_sources": default_overlay_sources,
-    }
-    if selection_debug:
-        payload.update(selection_debug)
-    return payload
+    return build_hugsim_plan_payload(
+        proposals=proposals,
+        scores=scores,
+        output_num_poses=output_num_poses,
+        plan_converter=rap_to_hugsim_plan,
+        selected_idx=selected_idx,
+        selected_source=selected_source,
+        selection_debug=selection_debug,
+        selected_plan_override=selected_plan_override,
+        selected_score_override=selected_score_override,
+        candidate_pool_rows=candidate_pool_rows,
+        topk=topk,
+        default_source_name="current_rap",
+        default_trajectory_provider=get_default_trajectories,
+    )
 
 
 def build_plain_rap_plan_result(
@@ -1009,189 +765,37 @@ def main() -> int:
                             )
                         except Exception:
                             logging.exception("Failed to append rule-based RAP merge candidates")
-                    planner_gate_result = {
-                        "selected_planner": "learned",
-                        "confidence": None,
-                        "reasoning": "planner_gate_disabled",
-                        "elapsed_sec": 0.0,
-                        "error": None,
-                        "timed_out": False,
-                        "prompt_char_count": 0,
-                        "image_count": 0,
-                    }
-                    selected_planner = "learned"
-                    candidate_rows = learned_candidate_rows
-                    if cfg.rule_based_merge.enabled and not cfg.vlm.planner_gate_enabled and rule_based_candidate_rows:
-                        candidate_rows = list(learned_candidate_rows) + list(rule_based_candidate_rows)
-                    if cfg.vlm.planner_gate_enabled:
-                        planner_gate_result = vlm_selector.maybe_select_planner(
-                            frame_index=frame_index,
-                            camera_images=obs["rgb"],
-                            info=info,
-                            learned_candidate_rows=learned_candidate_rows,
-                            rule_based_candidate_rows=rule_based_candidate_rows,
-                        )
-                        selected_planner = str(planner_gate_result.get("selected_planner", "learned"))
-                        if selected_planner == "rule_based" and rule_based_candidate_rows:
-                            candidate_rows = rule_based_candidate_rows
-                        else:
-                            selected_planner = "learned"
-                            candidate_rows = learned_candidate_rows
-
-                    candidate_sources = [str(row.get("source", "unknown")) for row in candidate_rows]
-                    logging.info(
-                        "RAP planner gate frame=%s planner=%s confidence=%s error=%s timed_out=%s chosen_size=%d sources=%s",
-                        frame_index,
-                        selected_planner,
-                        planner_gate_result.get("confidence"),
-                        planner_gate_result.get("error"),
-                        planner_gate_result.get("timed_out"),
-                        len(candidate_rows),
-                        candidate_sources,
+                    selection = run_learned_planner_selection(
+                        frame_index=frame_index,
+                        camera_images=obs["rgb"],
+                        info=info,
+                        vlm_selector=vlm_selector,
+                        scores=scores,
+                        learned_candidate_rows=learned_candidate_rows,
+                        rule_based_candidate_rows=rule_based_candidate_rows,
+                        rule_based_merge_enabled=cfg.rule_based_merge.enabled,
+                        planner_gate_enabled=cfg.vlm.planner_gate_enabled,
+                        vlm_enabled=cfg.vlm.enabled,
+                        display_default_trajectories=cfg.vlm.display_default_trajectories,
+                        include_default_candidates=cfg.vlm.include_default_candidates,
+                        allow_carry_previous=allow_carry_previous,
+                        previous_selected_source=previous_selected_source,
+                        learned_source_name="current_rap",
+                        learned_default_source="fallback_rap_argmax",
+                        score_fallback_key="rap_score",
+                        planner_log_name="RAP",
+                        logger=logging,
+                        strict_learned_argmax_lookup=True,
+                        q_key_prefix=True,
                     )
-                    if selected_planner == "rule_based":
-                        default_selected_index = int(
-                            max(
-                                range(len(candidate_rows)),
-                                key=lambda idx: float(candidate_rows[idx].get("proposal_score", 0.0)),
-                            )
-                        )
-                        default_selected_source = "fallback_rule_based_argmax"
-                    else:
-                        rap_best_idx = int(np.argmax(scores))
-                        default_selected_index = next(
-                            idx
-                            for idx, row in enumerate(candidate_rows)
-                            if row.get("source") == "current_rap" and row.get("proposal_index") == rap_best_idx
-                        )
-                        default_selected_source = "fallback_rap_argmax"
-
-                    if cfg.vlm.planner_gate_enabled:
-                        selected_row = dict(candidate_rows[default_selected_index])
-                        selected_plan = np.asarray(selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32)
-                        selected_idx = selected_row.get("proposal_index")
-                        selected_score_value = selected_row.get("proposal_score")
-                        if selected_score_value is None:
-                            selected_score_value = selected_row.get("rap_score", 0.0)
-                        selected_score = float(selected_score_value)
-                        selected_score_raw_value = selected_row.get("origin_selected_score_raw")
-                        if selected_score_raw_value is None:
-                            selected_score_raw_value = selected_score
-                        selected_score_raw = float(selected_score_raw_value)
-                        selected_source = (
-                            "planner_gate_rule_based_base_policy"
-                            if selected_planner == "rule_based"
-                            else "planner_gate_learned_base_policy"
-                        )
-                        if planner_gate_result.get("error") is not None:
-                            selected_source = "planner_gate_failed_base_policy_fallback"
-                        selection_debug = {
-                            "q_invoked_vlm": False,
-                            "scoring_invoked": False,
-                            "execution_mode": (
-                                "planner_gate_failed_base_policy_fallback"
-                                if planner_gate_result.get("error") is not None
-                                else f"planner_gate_selected_{selected_planner}"
-                            ),
-                            "fallback_selected_idx": int(default_selected_index),
-                            "fallback_selected_source": default_selected_source,
-                            "planner_gate_selected_planner": selected_planner,
-                            "planner_gate_confidence": planner_gate_result.get("confidence"),
-                            "planner_gate_reasoning": planner_gate_result.get("reasoning"),
-                            "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
-                            "planner_gate_error": planner_gate_result.get("error"),
-                            "planner_gate_timed_out": planner_gate_result.get("timed_out"),
-                            "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
-                            "planner_gate_image_count": planner_gate_result.get("image_count"),
-                            "planner_gate_token_usage": planner_gate_result.get("token_usage"),
-                            "display_default_trajectories": bool(cfg.vlm.display_default_trajectories),
-                            "include_default_candidates": bool(cfg.vlm.include_default_candidates),
-                            "carry_previous_allowed": bool(allow_carry_previous),
-                            "previous_selected_source": previous_selected_source,
-                            "selected_score_raw": selected_score_raw,
-                            "vlm_failed": planner_gate_result.get("error") is not None,
-                        }
-                    else:
-                        selection_result = vlm_selector.maybe_select(
-                            frame_index=frame_index,
-                            camera_images=obs["rgb"],
-                            info=info,
-                            candidate_rows=candidate_rows,
-                            default_selected_index=default_selected_index,
-                            default_selected_source=default_selected_source,
-                        )
-
-                        selected_row = selection_result["selected_candidate_row"]
-                        selected_plan = np.asarray(selected_row.get("execution_plan", selected_row["local_plan"]), dtype=np.float32)
-                        selected_idx = selected_row.get("proposal_index")
-                        selected_score_value = selected_row.get("proposal_score")
-                        if selected_score_value is None:
-                            selected_score_value = selected_row.get("rap_score", 0.0)
-                        selected_score = float(selected_score_value)
-
-                        selected_score_raw_value = selected_row.get("origin_selected_score_raw")
-                        if selected_score_raw_value is None:
-                            selected_score_raw_value = selected_score
-                        selected_score_raw = float(selected_score_raw_value)
-
-                        selection_debug = {
-                            "q_selected_idx": None,
-                            "q_selected_source": None,
-                            "q_candidate_scores": None,
-                            "q_carry_score": None,
-                            "q_best_current_score": None,
-                            "q_score_gap": None,
-                            "q_switch_margin": None,
-                            "q_selected_path_length": None,
-                            "q_best_current_path_length": None,
-                            "fallback_selected_idx": int(default_selected_index),
-                            "fallback_selected_source": default_selected_source,
-                            "planner_gate_selected_planner": selected_planner,
-                            "planner_gate_confidence": planner_gate_result.get("confidence"),
-                            "planner_gate_reasoning": planner_gate_result.get("reasoning"),
-                            "planner_gate_elapsed_sec": planner_gate_result.get("elapsed_sec"),
-                            "planner_gate_error": planner_gate_result.get("error"),
-                            "planner_gate_timed_out": planner_gate_result.get("timed_out"),
-                            "planner_gate_prompt_char_count": planner_gate_result.get("prompt_char_count"),
-                            "planner_gate_image_count": planner_gate_result.get("image_count"),
-                            "planner_gate_token_usage": planner_gate_result.get("token_usage"),
-                            "display_default_trajectories": bool(cfg.vlm.display_default_trajectories),
-                            "include_default_candidates": bool(cfg.vlm.include_default_candidates),
-                            "q_invoked_vlm": bool(cfg.vlm.enabled),
-                            "vlm_selected_idx": selection_result.get("vlm_candidate_index"),
-                            "vlm_confidence": selection_result.get("vlm_confidence"),
-                            "vlm_reasoning": selection_result.get("vlm_reasoning"),
-                            "vlm_elapsed_sec": selection_result.get("vlm_elapsed_sec"),
-                            "vlm_error": selection_result.get("vlm_error"),
-                            "vlm_candidate_count": selection_result.get("vlm_candidate_count"),
-                            "scoring_invoked": selection_result.get("scoring_invoked"),
-                            "intervention_invoked": selection_result.get("intervention_invoked"),
-                            "intervention_should_intervene": selection_result.get("intervention_should_intervene"),
-                            "intervention_severity_score": selection_result.get("intervention_severity_score"),
-                            "intervention_severity_band": selection_result.get("intervention_severity_band"),
-                            "intervention_corrective_action": selection_result.get("intervention_corrective_action"),
-                            "intervention_confidence": selection_result.get("intervention_confidence"),
-                            "intervention_reasoning": selection_result.get("intervention_reasoning"),
-                            "intervention_elapsed_sec": selection_result.get("intervention_elapsed_sec"),
-                            "intervention_error": selection_result.get("intervention_error"),
-                            "vlm_q_valid": selection_result.get("vlm_q_valid"),
-                            "vlm_timed_out": selection_result.get("vlm_timed_out"),
-                            "vlm_q_candidate_scores": selection_result.get("vlm_q_candidate_scores"),
-                            "vlm_q_best_candidate_index": selection_result.get("vlm_q_best_candidate_index"),
-                            "vlm_q_score_gap_to_carry": selection_result.get("vlm_q_score_gap_to_carry"),
-                            "vlm_q_score_gap_top2": selection_result.get("vlm_q_score_gap_top2"),
-                            "vlm_q_best_current_score": selection_result.get("vlm_q_best_current_score"),
-                            "vlm_q_carry_score": selection_result.get("vlm_q_carry_score"),
-                            "adaptive_replan_decision": selection_result.get("adaptive_replan_decision"),
-                            "carry_previous_valid": selection_result.get("carry_previous_valid"),
-                            "carry_previous_allowed": bool(allow_carry_previous),
-                            "previous_selected_source": previous_selected_source,
-                            "selected_score_raw": selected_score_raw,
-                            "latency_timeline_record": selection_result.get("latency_timeline_record"),
-                            "execution_mode": selection_result.get("execution_mode"),
-                            "vlm_failed": selection_result.get("vlm_failed"),
-                        }
-                        selected_source = str(selection_result["selected_source"])
+                    selected_row = selection.selected_row
+                    selected_plan = selection.selected_plan
+                    selected_idx = selection.selected_idx
+                    selected_score = selection.selected_score
+                    selected_score_raw = selection.selected_score_raw
+                    selected_source = selection.selected_source
+                    candidate_rows = selection.candidate_rows
+                    selection_debug = selection.selection_debug
                     frame_index += 1
                     plan_payload = build_plan_payload(
                         proposals,
@@ -1239,4 +843,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main())    

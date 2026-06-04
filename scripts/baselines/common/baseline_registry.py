@@ -44,6 +44,7 @@ def resolve_baseline_output_root(
     registry = registry or load_registry()
     roots = registry.get("roots", {})
     dataset_entry = get_dataset_entry(baseline_id, dataset, registry)
+    explicit_run_variant = run_variant
     run_variant = run_variant or get_baseline_entry(baseline_id, registry).get("run_variant", "default")
 
     if run_type == "canonical":
@@ -51,7 +52,7 @@ def resolve_baseline_output_root(
         return os.path.join(base_root, baseline_id, dataset, suite, run_variant)
     if run_type == "debug":
         base_root = roots["debug"]
-        return os.path.join(base_root, baseline_id, dataset, "current")
+        return os.path.join(base_root, baseline_id, dataset, explicit_run_variant or "current")
     if run_type == "archive":
         base_root = roots["archive"]
         archive_reason = archive_reason or "historical_unverified"

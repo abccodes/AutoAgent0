@@ -1,3 +1,62 @@
+# Rules
+
+## 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+
 # HUGSIM Methods and Run Guide
 
 ## 1. Core Execution Model
@@ -80,6 +139,56 @@ That gives three current rule-based participation modes:
   - after the gate decision, the system takes the chosen family's top/default trajectory directly
 
 ## 2. Current Method Catalog
+
+### AutoAgent0 architecture layer
+
+AutoAgent0 preparation code now lives under:
+- `autoagent0/core/`
+- `autoagent0/experts/`
+- `autoagent0/adapters/hugsim/`
+- `autoagent0/prompts/`
+
+This is currently a behavior-preserving agentic boundary around the existing
+HUGSIM pipeline. HUGSIM remains the evaluation backend, `planners/` remain the
+RAP/DrivoR/rule-based backend adapters, and existing configs remain the source
+of truth for current baselines.
+
+Current shared-code ownership:
+- `autoagent0/core/candidates.py` owns candidate summaries, candidate-row
+  formatting, path-length helpers, and planner-gate candidate filtering
+- `autoagent0/adapters/hugsim/context.py` owns route/task/camera/ego context
+  helpers used by HUGSIM-facing VLM paths
+- `autoagent0/prompts/orchestrator.py` owns the current scoring,
+  intervention, and planner-gate prompt builders
+- `autoagent0/core/orchestrator.py` owns VLM decision coercion, score parsing,
+  and selected-candidate reasoning helpers
+- `autoagent0/experts/rule_based.py` wraps the existing Rule-Planner provider
+  without moving Edmund's external implementation into this repo
+
+`planners/common/vlm_selector.py` remains the active runtime integration point
+and compatibility facade. Do not add new shared helper logic directly to that
+file unless it is HUGSIM/VLM-selector-specific; prefer adding reusable code
+under `autoagent0/` and re-exporting it through the facade only when needed for
+existing imports.
+
+Current method mapping:
+- solo VLM intervention -> learned-intervention agent flow
+- Choice A / `*_rule_merge*` -> rule-merge Designer + Orchestrator flow
+- Choice B / `*_rule_gate*` -> policy-gate Orchestrator flow
+- standalone `rule_based` -> rule-based expert baseline
+
+The phase-1 verifier is passive and always accepts. It is exposed through
+debug-only `agent_trace` fields and must not alter selected trajectories,
+fallbacks, metrics, or launcher behavior.
+
+Frame-level VLM debug JSON now includes `agent_trace` where the current VLM
+paths already write debug artifacts. This trace is diagnostic only and records:
+- designer candidate counts by source
+- orchestrator decision type
+- selected source or selected planner family
+- passive verifier status
+
+See `docs/autoagent0-architecture.md` for the short architecture guide.
 
 ### Canonical baseline registry
 
@@ -447,6 +556,62 @@ bash scripts/submit_dataset_3easy.sh kitti360 rule_based
 
 If no planner config is passed explicitly, the submit wrapper chooses the default config from `PLANNER_NAME`.
 
+### One-scene all-method smoke suite
+
+Use this after large refactors to verify that every canonical method still runs
+on one easy scene:
+- `scripts/baselines/smoke/submit_method_smoke.sh`
+- `scripts/baselines/smoke/run_method_smoke.slurm`
+- `scripts/baselines/smoke/check_method_smoke.py`
+
+Default behavior:
+- dataset: `nuscenes`
+- scene: `configs/benchmark/nuscenes_all_variants/scene-0010-easy-00.yaml`
+- suite: `full`
+- GPU allocation: `6`
+- methods: all 9 canonical baseline IDs:
+  - `rap_vlm`
+  - `drivor_vlm`
+  - `rap_intervention_4cam`
+  - `drivor_intervention_4cam`
+  - `rule_based`
+  - `rap_impl_a`
+  - `drivor_impl_a`
+  - `rap_impl_b`
+  - `drivor_impl_b`
+
+Run the default NuScenes smoke suite:
+
+```bash
+bash scripts/baselines/smoke/submit_method_smoke.sh
+```
+
+Switch to one easy Waymo or KITTI-360 scene while still running all 9 methods:
+
+```bash
+DATASET=waymo bash scripts/baselines/smoke/submit_method_smoke.sh
+```
+
+```bash
+DATASET=kitti360 bash scripts/baselines/smoke/submit_method_smoke.sh
+```
+
+Useful dry-runs:
+
+```bash
+DRY_RUN=1 bash scripts/baselines/smoke/submit_method_smoke.sh
+```
+
+```bash
+DATASET=waymo DRY_RUN=1 bash scripts/baselines/smoke/submit_method_smoke.sh
+```
+
+The smoke suite writes fresh debug outputs under:
+- `/bigdata/aidan/outputs/benchmark/out/debug/<baseline_id>/<dataset>/<SMOKE_RUN_ID>/<scene>/`
+
+The checker validates `eval.json`, `output.txt`, VLM debug artifacts when
+expected, and `agent_trace` for Choice A/Choice B frame debug outputs.
+
 ### Verified dataset support status
 
 The following planner families have already completed end-to-end 3-scene runs on shared `waymo` and `kitti360` HUGSIM assets:
@@ -539,7 +704,7 @@ Default GPU layout:
 
 
 
-
+git commit -m "Canonicalize baseline outputs and launcher layout"
   git add \
     AGENTS.md \
     docs/baseline-management.md \
