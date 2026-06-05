@@ -28,8 +28,9 @@ from autoagent0.adapters.hugsim.geometry import (
     world_points_to_current_local,
 )
 from autoagent0.adapters.hugsim.io import read_obs_file, write_plan_file
+from autoagent0.core.config import resolve_autoagent0_config
 from autoagent0.core.payloads import build_hugsim_plan_payload
-from autoagent0.core.planner_flow import run_learned_planner_selection
+from autoagent0.core.runtime import AutoAgent0Runtime
 from autoagent0.experts.rule_based import (
     RuleBasedMergeConfig,
     build_rule_based_candidate_rows,
@@ -620,6 +621,15 @@ def main() -> int:
     info_history: deque[Dict[str, object]] = deque(maxlen=EGO_HISTORY_FRAMES)
     vlm_selector = VLMPlanSelector(cfg.vlm, cfg.output_dir)
     vlm_selector.preload()
+    autoagent0_runtime = AutoAgent0Runtime(runtime_name="rap", logger=logging)
+    autoagent0_cfg = resolve_autoagent0_config()
+    logging.info(
+        "AutoAgent0 configured enabled=%s mode=%s redesign_budget=%d fallback_mode=%s",
+        autoagent0_cfg.enabled,
+        autoagent0_cfg.mode,
+        autoagent0_cfg.redesign_candidate_budget,
+        autoagent0_cfg.fallback_mode,
+    )
     frame_index = 0
     previous_selected_plan: Optional[np.ndarray] = None
     previous_selected_pose: Optional[np.ndarray] = None
@@ -765,29 +775,48 @@ def main() -> int:
                             )
                         except Exception:
                             logging.exception("Failed to append rule-based RAP merge candidates")
-                    selection = run_learned_planner_selection(
-                        frame_index=frame_index,
-                        camera_images=obs["rgb"],
-                        info=info,
-                        vlm_selector=vlm_selector,
-                        scores=scores,
-                        learned_candidate_rows=learned_candidate_rows,
-                        rule_based_candidate_rows=rule_based_candidate_rows,
-                        rule_based_merge_enabled=cfg.rule_based_merge.enabled,
-                        planner_gate_enabled=cfg.vlm.planner_gate_enabled,
-                        vlm_enabled=cfg.vlm.enabled,
-                        display_default_trajectories=cfg.vlm.display_default_trajectories,
-                        include_default_candidates=cfg.vlm.include_default_candidates,
-                        allow_carry_previous=allow_carry_previous,
-                        previous_selected_source=previous_selected_source,
-                        learned_source_name="current_rap",
-                        learned_default_source="fallback_rap_argmax",
-                        score_fallback_key="rap_score",
-                        planner_log_name="RAP",
-                        logger=logging,
-                        strict_learned_argmax_lookup=True,
-                        q_key_prefix=True,
-                    )
+                    if autoagent0_cfg.enabled:
+                        selection = autoagent0_runtime.select_final_actions_recovery_loop(
+                            frame_index=frame_index,
+                            camera_images=obs["rgb"],
+                            info=info,
+                            vlm_selector=vlm_selector,
+                            scores=scores,
+                            learned_candidate_rows=learned_candidate_rows,
+                            rule_based_candidate_rows=rule_based_candidate_rows,
+                            redesign_candidate_budget=autoagent0_cfg.redesign_candidate_budget,
+                            learned_source_name="current_rap",
+                            learned_default_source="fallback_rap_argmax",
+                            score_fallback_key="rap_score",
+                            planner_log_name="RAP",
+                            logger=logging,
+                            strict_learned_argmax_lookup=True,
+                            fallback_mode=autoagent0_cfg.fallback_mode,
+                        )
+                    else:
+                        selection = autoagent0_runtime.select_final_actions(
+                            frame_index=frame_index,
+                            camera_images=obs["rgb"],
+                            info=info,
+                            vlm_selector=vlm_selector,
+                            scores=scores,
+                            learned_candidate_rows=learned_candidate_rows,
+                            rule_based_candidate_rows=rule_based_candidate_rows,
+                            rule_based_merge_enabled=cfg.rule_based_merge.enabled,
+                            planner_gate_enabled=cfg.vlm.planner_gate_enabled,
+                            vlm_enabled=cfg.vlm.enabled,
+                            display_default_trajectories=cfg.vlm.display_default_trajectories,
+                            include_default_candidates=cfg.vlm.include_default_candidates,
+                            allow_carry_previous=allow_carry_previous,
+                            previous_selected_source=previous_selected_source,
+                            learned_source_name="current_rap",
+                            learned_default_source="fallback_rap_argmax",
+                            score_fallback_key="rap_score",
+                            planner_log_name="RAP",
+                            logger=logging,
+                            strict_learned_argmax_lookup=True,
+                            q_key_prefix=True,
+                        )
                     selected_row = selection.selected_row
                     selected_plan = selection.selected_plan
                     selected_idx = selection.selected_idx

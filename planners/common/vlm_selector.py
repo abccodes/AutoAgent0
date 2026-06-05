@@ -258,6 +258,9 @@ class VLMPlanSelector:
         candidate_rows: Sequence[Dict[str, object]],
         default_selected_index: int,
         default_selected_source: str,
+        force_scoring: bool = False,
+        intervention_corrective_action_override: Optional[str] = None,
+        execution_mode_label: Optional[str] = None,
     ) -> Dict[str, object]:
         route_instruction = resolve_route_instruction(info)
         task_target_hint = describe_task_target_hint(info)
@@ -392,7 +395,7 @@ class VLMPlanSelector:
         score_image_paths = _write_overlay_bundle("candidates", score_overlays, scoring_camera_order)
 
         intervention_result = None
-        if self.cfg.intervention_enabled:
+        if self.cfg.intervention_enabled and not force_scoring:
             intervention_invoked = True
             gate_overlays = render_candidate_overlays(
                 camera_images,
@@ -729,12 +732,16 @@ class VLMPlanSelector:
 
         scoring_route_instruction = route_instruction
         intervention_action_for_scoring = (
-            intervention_corrective_action
-            if self.cfg.intervention_enabled
-            and intervention_should_intervene is True
-            and intervention_severity_score is not None
-            and intervention_severity_score >= float(self.cfg.intervention_action_threshold)
-            else None
+            intervention_corrective_action_override
+            if intervention_corrective_action_override is not None
+            else (
+                intervention_corrective_action
+                if self.cfg.intervention_enabled
+                and intervention_should_intervene is True
+                and intervention_severity_score is not None
+                and intervention_severity_score >= float(self.cfg.intervention_action_threshold)
+                else None
+            )
         )
 
         try:
@@ -869,7 +876,7 @@ class VLMPlanSelector:
                 else "vlm_selected_current"
             )
         )
-        execution_mode = "intervention_triggered_scoring"
+        execution_mode = execution_mode_label or "intervention_triggered_scoring"
 
         timeline_record = {
             "frame_index": frame_index,

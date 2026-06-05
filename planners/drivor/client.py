@@ -64,8 +64,10 @@ from autoagent0.adapters.hugsim.geometry import (
     world_points_to_current_local,
 )
 from autoagent0.adapters.hugsim.io import read_obs_file, write_plan_file
+from autoagent0.core.config import resolve_autoagent0_config
 from autoagent0.core.payloads import build_hugsim_plan_payload
-from autoagent0.core.planner_flow import disabled_planner_gate_result, run_learned_planner_selection
+from autoagent0.core.planner_flow import disabled_planner_gate_result
+from autoagent0.core.runtime import AutoAgent0Runtime
 from autoagent0.experts.rule_based import (
     build_rule_based_candidate_rows,
     get_rule_based_proposals_and_scores,
@@ -967,12 +969,18 @@ def main() -> int:
     vlm_cfg = resolve_vlm_config()
     vlm_selector = VLMPlanSelector(vlm_cfg, output_dir)
     vlm_selector.preload()
+    autoagent0_runtime = AutoAgent0Runtime(runtime_name="drivor", logger=LOG)
+    autoagent0_cfg = resolve_autoagent0_config()
     LOG.info(
-        "VLM selector configured enabled=%s intervention_enabled=%s backend=%s device=%s",
+        "VLM selector configured enabled=%s intervention_enabled=%s backend=%s device=%s autoagent0_enabled=%s mode=%s redesign_budget=%d fallback_mode=%s",
         getattr(vlm_cfg, "enabled", False),
         getattr(vlm_cfg, "intervention_enabled", False),
         getattr(vlm_cfg, "backend", "unknown"),
         getattr(vlm_cfg, "device", "unknown"),
+        autoagent0_cfg.enabled,
+        autoagent0_cfg.mode,
+        autoagent0_cfg.redesign_candidate_budget,
+        autoagent0_cfg.fallback_mode,
     )
     frame_index = 0
     previous_selected_plan: Optional[np.ndarray] = None
@@ -1166,29 +1174,48 @@ def main() -> int:
                         }
 
                     else:
-                        selection = run_learned_planner_selection(
-                            frame_index=frame_index,
-                            camera_images=obs.get("rgb", {}) if isinstance(obs, dict) else {},
-                            info=info,
-                            vlm_selector=vlm_selector,
-                            scores=scores,
-                            learned_candidate_rows=learned_candidate_rows,
-                            rule_based_candidate_rows=rule_based_candidate_rows,
-                            rule_based_merge_enabled=rule_based_merge_cfg.enabled,
-                            planner_gate_enabled=getattr(vlm_cfg, "planner_gate_enabled", False),
-                            vlm_enabled=getattr(vlm_cfg, "enabled", False),
-                            display_default_trajectories=getattr(vlm_cfg, "display_default_trajectories", False),
-                            include_default_candidates=getattr(vlm_cfg, "include_default_candidates", False),
-                            allow_carry_previous=allow_carry_prev,
-                            previous_selected_source=previous_selected_source,
-                            learned_source_name="current_drivor",
-                            learned_default_source="drivor_argmax",
-                            score_fallback_key="proposal_score",
-                            planner_log_name="DrivoR",
-                            logger=LOG,
-                            strict_learned_argmax_lookup=False,
-                            q_key_prefix=False,
-                        )
+                        if autoagent0_cfg.enabled:
+                            selection = autoagent0_runtime.select_final_actions_recovery_loop(
+                                frame_index=frame_index,
+                                camera_images=obs.get("rgb", {}) if isinstance(obs, dict) else {},
+                                info=info,
+                                vlm_selector=vlm_selector,
+                                scores=scores,
+                                learned_candidate_rows=learned_candidate_rows,
+                                rule_based_candidate_rows=rule_based_candidate_rows,
+                                redesign_candidate_budget=autoagent0_cfg.redesign_candidate_budget,
+                                learned_source_name="current_drivor",
+                                learned_default_source="drivor_argmax",
+                                score_fallback_key="proposal_score",
+                                planner_log_name="DrivoR",
+                                logger=LOG,
+                                strict_learned_argmax_lookup=False,
+                                fallback_mode=autoagent0_cfg.fallback_mode,
+                            )
+                        else:
+                            selection = autoagent0_runtime.select_final_actions(
+                                frame_index=frame_index,
+                                camera_images=obs.get("rgb", {}) if isinstance(obs, dict) else {},
+                                info=info,
+                                vlm_selector=vlm_selector,
+                                scores=scores,
+                                learned_candidate_rows=learned_candidate_rows,
+                                rule_based_candidate_rows=rule_based_candidate_rows,
+                                rule_based_merge_enabled=rule_based_merge_cfg.enabled,
+                                planner_gate_enabled=getattr(vlm_cfg, "planner_gate_enabled", False),
+                                vlm_enabled=getattr(vlm_cfg, "enabled", False),
+                                display_default_trajectories=getattr(vlm_cfg, "display_default_trajectories", False),
+                                include_default_candidates=getattr(vlm_cfg, "include_default_candidates", False),
+                                allow_carry_previous=allow_carry_prev,
+                                previous_selected_source=previous_selected_source,
+                                learned_source_name="current_drivor",
+                                learned_default_source="drivor_argmax",
+                                score_fallback_key="proposal_score",
+                                planner_log_name="DrivoR",
+                                logger=LOG,
+                                strict_learned_argmax_lookup=False,
+                                q_key_prefix=False,
+                            )
                         selected_row = selection.selected_row
                         selected_plan = selection.selected_plan
                         selected_idx = selection.selected_idx
