@@ -44,6 +44,7 @@ from autoagent0.adapters.hugsim.runtime import (
     write_pipe_message_file,
 )
 from autoagent0.adapters.hugsim.video import to_front_video, to_video
+from autoagent0.core.config import build_prefixed_autoagent0_env
 from planners.common.candidate_visuals import get_candidate_visual_style
 from planners.common.task_overlay import draw_task_target_overlay
 from planners.common.vlm_env import build_prefixed_vlm_env
@@ -841,6 +842,7 @@ if __name__ == "__main__":
                 prefixes=("PLANNER_RULE_BASED_", "RAP_RULE_BASED_"),
             )
         )
+        extra_env.update(build_prefixed_autoagent0_env(cfg.planner.rap.get('autoagent0', {})))
         
     elif args.ad == "drivor":
         drivor_python_bin = cfg.planner.drivor.get('python_bin', 'python')
@@ -877,6 +879,7 @@ if __name__ == "__main__":
                 prefixes=("PLANNER_RULE_BASED_", "DRIVOR_RULE_BASED_"),
             )
         )
+        extra_env.update(build_prefixed_autoagent0_env(cfg.planner.drivor.get('autoagent0', {})))
     elif args.ad == "rule_based":
         rule_based_python_bin = cfg.planner.rule_based.get('python_bin', 'python')
         rule_based_device = os.environ.get('RULE_BASED_DEVICE_OVERRIDE') or cfg.planner.rule_based.get('device', 'cpu')

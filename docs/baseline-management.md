@@ -33,7 +33,29 @@ Examples:
 
 - `.../baselines/drivor_intervention_4cam/waymo/3easy/qwen3-vl-8b-instruct/...`
 - `.../baselines/rap_impl_b/kitti360/3easy/qwen3-vl-8b-instruct/...`
+- `.../baselines/drivor_autoagent0/nuscenes/full/qwen3-vl-8b-instruct/...`
 - `.../baselines/rap_vlm/nuscenes/full/rap-base-legacy/...`
+
+## AutoAgent0 recovery-loop baselines
+
+The canonical registry now includes:
+- `rap_autoagent0`
+- `drivor_autoagent0`
+
+These are opt-in agentic recovery-loop methods, not replacements for Method A/B.
+They first critique one learned default trajectory with the current VLM
+intervention mechanism. Only if critique requests redesign do they build an
+expanded learned + rule-based candidate pool, run the VLM scorer, critique the
+selected revised candidate once, and execute or fall back to a hold trajectory.
+
+Do not mark AutoAgent0 recovery-loop outputs as trusted in
+`configs/baselines/validated_runs.yaml` until at least a one-scene debug run has
+been inspected for:
+- `autoagent0_mode = recovery_loop`
+- `autoagent0_default_critique`
+- `autoagent0_redesign_triggered`
+- `autoagent0_final_critique` when redesign occurs
+- `agent_trace.runtime.behavior_mode = agentic_recovery_loop`
 
 ## Archive conventions
 

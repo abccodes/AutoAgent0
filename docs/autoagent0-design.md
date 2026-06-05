@@ -7,14 +7,17 @@ around the trajectory generation and VLM routing logic already implemented in
 this repo. The current design goal is to make the system look like an explicit
 Orchestrator + Designer workflow while preserving existing behavior.
 
-This document describes the current implementation-level design. It does not
-define a new active verifier, memory module, recovery planner, or rule-metric
-critic loop. Those components are intentionally left as future extension points.
+This document describes the current implementation-level design. The active
+`rap_autoagent0` and `drivor_autoagent0` methods implement a first bounded
+recovery-loop prototype. They do not yet define a deterministic verifier,
+memory module, recovery endpoint planner, or rule-metric critic loop. Those
+components remain future extension points.
 
 Current v1 scope:
 - Active: camera streams, language instruction, orchestrator routing,
   learned/rule-based candidate generation, VLM intervention/scoring, planner
-  gate selection, and final trajectory payload construction.
+  gate selection, one-redesign AutoAgent0 recovery-loop selection, and final
+  trajectory payload construction.
 - Deferred: memory, active verifier, recovery endpoint generation, and
   rule-metric critic loops.
 
@@ -44,10 +47,13 @@ Current SceneSmith-style tool vocabulary:
   learned and/or rule-based expert modules.
 - `select_final_actions`: active. Selects the final trajectory according to the
   current method semantics.
-- `request_critique`: future placeholder. This may later call a verifier or
-  rule-metric critic, but it is not active in this design pass.
-- `request_design_change(intervention)`: future placeholder. This may later ask
-  a recovery generator for revised candidates or a recovery endpoint.
+- `request_critique`: active in `*_autoagent0` through the current VLM
+  intervention mechanism. Future versions should replace or augment this with a
+  deterministic verifier and rule-metric critic.
+- `request_design_change(intervention)`: active as a trace/runtime transition in
+  `*_autoagent0`. In this prototype it does not call a separate recovery
+  endpoint generator; it triggers expanded learned + rule-based candidate
+  generation.
 
 ## Current Runtime Flow
 
@@ -68,10 +74,12 @@ AutoAgent0-style flow is used.
 6. `closed_loop.py` converts the trajectory into simulator control and writes
    evaluation/debug artifacts.
 
-This is still behavior-preserving relative to the current methods. The
-SceneSmith-style framing changes the conceptual boundaries; it does not change
-planner inference, trajectory ranking, VLM prompts, fallback behavior, or
-metrics.
+For Method A/B and existing intervention baselines this remains
+behavior-preserving. For `rap_autoagent0` and `drivor_autoagent0`, the active
+runtime behavior changes to a bounded recovery loop: critique one default
+trajectory first, generate/score expanded candidates only when the critique
+requests redesign, then critique the revised candidate once before execution or
+fallback.
 
 ## Module Design
 
@@ -116,11 +124,14 @@ Current Orchestrator behaviors:
 - Method B / Choice B: request learned and rule-based candidate families
   separately, run the VLM planner gate to choose the family, then use that
   family's top/default trajectory.
+- AutoAgent0 recovery loop: request one learned default trajectory, critique it
+  with VLM intervention, request expanded candidates only on rejection, score
+  the expanded pool, critique the selected revision, and then execute or fall
+  back.
 
-The current Orchestrator is not a new independent model loop. It is the
-agentic framing for the existing selection paths. Future work can turn this into
-a more explicit tool-calling loop, but the active v1 behavior remains tied to
-the existing planner configs and VLM selector path.
+The current Orchestrator is still implemented inside existing HUGSIM planner
+clients and `AutoAgent0Runtime`; it is not a standalone long-running agent
+server. The `*_autoagent0` path is the first active tool-call-style loop.
 
 ### Trajectory Generation
 
@@ -145,10 +156,12 @@ through the existing HUGSIM adapter. For this design pass, the rule-based
 generator is treated as an abstract working module. Another teammate may improve
 its internals, but AutoAgent0 should depend only on the adapter contract.
 
-The rule-based generator can currently participate in three ways:
+The rule-based generator can currently participate in four ways:
 - standalone `rule_based` baseline,
 - Method A candidate proposals merged with learned candidates,
 - Method B candidate family considered by the planner gate.
+- AutoAgent0 recovery-loop expanded candidates after the default trajectory is
+  rejected by VLM critique.
 
 Future recovery-specific rule-based generation is intentionally left
 unimplemented here. A later design may allow the Orchestrator to provide a
@@ -178,6 +191,9 @@ Current use:
   by the VLM scorer alongside learned candidates.
 - In Method B, the VLM gate first chooses the planner family. If it chooses
   rule-based, the selected rule-based family candidate is used directly.
+- In `*_autoagent0`, rule-based scores are only used to order the rule-based
+  rows before they are placed into the expanded redesign pool. The VLM scorer
+  still performs the cross-family selection.
 
 Future critique metrics may include out-of-road detection, collision detection,
 TTC, symbolic object state, bounding-box state, and map checks. These metrics
@@ -198,9 +214,16 @@ Orchestrator a consistent view of final actions and debug state.
 
 ### Verifier Agent
 
-The verifier agent is future work only. A passive verifier trace exists in the
-current AutoAgent0 scaffolding, but it always accepts and does not affect
-actions, fallbacks, metrics, or selected trajectories.
+The deterministic verifier agent is future work. A passive verifier trace
+exists in the behavior-preserving scaffolding, but it always accepts and does
+not affect actions, fallbacks, metrics, or selected trajectories.
+
+For the active `*_autoagent0` prototype, `request_critique` uses the current VLM
+intervention mechanism as a temporary VLM Critic. The VLM Critic checks a single
+candidate trajectory and maps `should_intervene = false` to accepted and
+`should_intervene = true` to rejected/redesign-needed. This is not the final
+rule-based verifier; it is a bootstrap critique mechanism so the agentic loop
+can be tested before map/TTC/collision checks are implemented.
 
 A future active verifier could use symbolic state and visual context for:
 - out-of-road or map boundary checks,
@@ -240,10 +263,51 @@ Current public methods remain the source of truth for experiments.
 | `rap_intervention_4cam` | Learned Designer + intervention selection | RAP candidates with current VLM intervention/scorer path. |
 | `drivor_intervention_4cam` | Learned Designer + intervention selection | DrivoR candidates with current VLM intervention/scorer path. |
 | `rule_based` | Rule-based Designer only | Rule-Planner adapter returns the selected rule-based trajectory. |
-| `rap_impl_a` | Learned + rule-based Designers, merged pool | RAP and rule-based candidates are merged; VLM scorer selects final trajectory. |
-| `drivor_impl_a` | Learned + rule-based Designers, merged pool | DrivoR and rule-based candidates are merged; VLM scorer selects final trajectory. |
-| `rap_impl_b` | Learned + rule-based Designers, planner gate | VLM planner gate chooses RAP family or rule-based family. |
-| `drivor_impl_b` | Learned + rule-based Designers, planner gate | VLM planner gate chooses DrivoR family or rule-based family. |
+| `rap_impl_a` | Ablation: learned + rule-based Designers, merged pool | RAP and rule-based candidates are merged; VLM scorer selects final trajectory. |
+| `drivor_impl_a` | Ablation: learned + rule-based Designers, merged pool | DrivoR and rule-based candidates are merged; VLM scorer selects final trajectory. |
+| `rap_impl_b` | Ablation: learned + rule-based Designers, planner gate | VLM planner gate chooses RAP family or rule-based family. |
+| `drivor_impl_b` | Ablation: learned + rule-based Designers, planner gate | VLM planner gate chooses DrivoR family or rule-based family. |
+| `rap_autoagent0` | Agentic recovery loop | RAP default trajectory is critiqued first; expanded RAP + rule-based candidates are scored only when critique requests redesign. |
+| `drivor_autoagent0` | Agentic recovery loop | DrivoR default trajectory is critiqued first; expanded DrivoR + rule-based candidates are scored only when critique requests redesign. |
+
+## Active Recovery-Loop Prototype
+
+The first active AutoAgent0 recovery-loop prototype keeps the Critic simple:
+`request_critique(...)` uses the existing VLM intervention mechanism. A default
+learned trajectory is checked first. If the VLM intervention says no redesign is
+needed, the default trajectory is executed. If it requests intervention, the
+Orchestrator asks for an expanded learned + rule-based candidate pool, uses the
+existing VLM scorer to select a revised trajectory, critiques the revised
+trajectory once more, and then either executes it or falls back to a hold
+trajectory.
+
+This prototype deliberately does not implement memory, deterministic map/TTC
+verification, multi-iteration redesign, or a new rule-based scorer. Method A/B
+remain runnable ablations and should not be treated as the final AutoAgent0
+workflow.
+
+Concrete implemented loop:
+
+1. `request_designer(mode="default", k=1)` selects the learned planner's default
+   candidate.
+2. `request_critique(phase="default")` calls VLM intervention on that one
+   candidate.
+3. If accepted, `select_final_actions` executes the default trajectory.
+4. If rejected, `request_design_change` records the VLM critique reason and
+   corrective action.
+5. `request_designer(mode="recovery", k=10)` builds an expanded learned +
+   rule-based candidate pool.
+6. The existing VLM scorer selects one revised candidate from that pool.
+7. `request_critique(phase="revised")` calls VLM intervention on the revised
+   candidate.
+8. If accepted, the revised candidate is executed. If rejected, the current
+   fallback is a hold trajectory.
+
+The loop does not currently keep adding more trajectories after the revised
+candidate is rejected. `redesign_candidate_budget` caps the expanded pool at 10
+in the current configs. `max_redesign_attempts` is present in config for the
+future, but the current implementation is effectively fixed at one redesign
+attempt.
 
 ## Codebase Mapping
 
@@ -255,6 +319,12 @@ Active implementation anchors:
   expert modules.
 - `autoagent0/core/designer.py`: candidate-row normalization and AutoAgent0
   trajectory candidate batches.
+- `autoagent0/core/runtime.py`: SceneSmith-style facade that exposes the
+  current behavior-preserving flow and the opt-in recovery-loop flow through
+  `request_designer(...)`, `request_critique(...)`, `request_design_change(...)`,
+  and `select_final_actions(...)`-style tool calls.
+- `autoagent0/core/config.py`: config/env bridge for the `autoagent0:` planner
+  config block used by `rap_autoagent0` and `drivor_autoagent0`.
 - `autoagent0/core/planner_flow.py`: current base-policy, Method A, and Method
   B selection-flow helpers.
 - `autoagent0/core/orchestrator.py`: current VLM decision parsing/coercion and

@@ -148,4 +148,36 @@ baselines:
         suites: [3easy]
         base_path: configs/sim/kitti360_base_local.yaml
 
+  rap_autoagent0:
+    planner_name: rap_vlm
+    planner_path: configs/planners/autoagent0/rap_autoagent0_recovery_loop_0605.yaml
+    method_family: autoagent0_recovery_loop
+    run_variant: qwen3-vl-8b-instruct
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+  drivor_autoagent0:
+    planner_name: drivor_vlm
+    planner_path: configs/planners/autoagent0/drivor_autoagent0_recovery_loop_0605.yaml
+    method_family: autoagent0_recovery_loop
+    run_variant: qwen3-vl-8b-instruct
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy]
+        base_path: configs/sim/kitti360_base_local.yaml
+
 historical_roots: []

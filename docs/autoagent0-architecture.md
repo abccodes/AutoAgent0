@@ -1,9 +1,14 @@
 # AutoAgent0 Architecture
 
-AutoAgent0 is the agentic driving layer being added inside this HUGSIM fork. In
-the first phase it is a behavior-preserving structure around the existing
-HUGSIM planner/VLM paths. It does not change planner inference, candidate
-ranking, VLM prompts, scoring, or fallback behavior.
+AutoAgent0 is the agentic driving layer being added inside this HUGSIM fork. It
+now has two runtime uses:
+- a behavior-preserving structure around the existing HUGSIM planner/VLM paths,
+- an opt-in recovery-loop prototype for `rap_autoagent0` and
+  `drivor_autoagent0`.
+
+The existing baseline methods keep their current semantics. The recovery-loop
+prototype is a separate method family and should not be treated as a replacement
+for Method A/B ablation baselines.
 
 ## Current Boundaries
 
@@ -27,6 +32,11 @@ The first shared-code migration is intentionally narrow:
   by RAP, DrivoR, and rule-based client adapters.
 - `autoagent0/core/planner_flow.py` owns shared planner-flow extraction helpers
   for method A/B and base-policy paths.
+- `autoagent0/core/runtime.py` owns the SceneSmith-style runtime facade. It
+  keeps the behavior-preserving Method A/B/base-policy flow and also exposes
+  the opt-in one-redesign AutoAgent0 recovery loop.
+- `autoagent0/core/config.py` owns the `AUTOAGENT0_*` config/env bridge used by
+  RAP and DrivoR clients.
 - `autoagent0/adapters/hugsim/context.py` owns current route/task/camera/ego
   context extraction helpers.
 - `autoagent0/adapters/hugsim/defaults.py`, `geometry.py`, `io.py`, and
@@ -70,17 +80,53 @@ image, geometry, and default-trajectory helpers are imported from `autoagent0/`.
   rule-based candidates are separate, and the VLM gate chooses the planner
   family.
 - Standalone `rule_based` remains an expert baseline.
+- `rap_autoagent0` and `drivor_autoagent0` map to the active AutoAgent0
+  recovery-loop prototype.
 
 Existing baseline IDs and configs remain the source of truth for current runs:
 `rap_vlm`, `drivor_vlm`, `rap_intervention_4cam`,
 `drivor_intervention_4cam`, `rule_based`, `rap_impl_a`, `drivor_impl_a`,
-`rap_impl_b`, and `drivor_impl_b`.
+`rap_impl_b`, `drivor_impl_b`, `rap_autoagent0`, and `drivor_autoagent0`.
+
+## Active Recovery Loop
+
+The `*_autoagent0` methods implement a bounded agentic loop:
+
+1. Generate the learned planner's default/top trajectory.
+2. Call `request_critique` using the current VLM intervention mechanism on
+   that single trajectory.
+3. If the critique accepts it, execute the default trajectory immediately.
+4. If the critique requests intervention, call `request_design_change` and build
+   an expanded candidate pool from learned candidates plus existing
+   Rule-Planner candidates.
+5. Use the existing VLM scorer to select one revised candidate from that pool.
+6. Critique the revised candidate once with the same VLM intervention mechanism.
+7. Execute the revised candidate if accepted; otherwise execute a hold fallback.
+
+This first prototype is intentionally bounded. It does not keep adding more
+trajectories after the revised candidate is rejected. The current config exposes
+`max_redesign_attempts`, but the implemented loop is effectively one redesign
+attempt:
+
+```yaml
+autoagent0:
+  enabled: true
+  mode: recovery_loop
+  redesign_candidate_budget: 10
+  max_redesign_attempts: 1
+  fallback_mode: hold
+```
+
+The expanded pool is capped by `redesign_candidate_budget`. With the current
+configs this is 10 total candidates, composed from learned candidate rows and
+available rule-based candidate rows.
 
 ## Phase-1 Verifier
 
-The verifier is passive in this phase. It always returns `accepted=True` and is
-recorded only in debug traces. It does not reject trajectories, trigger
-fallbacks, alter metrics, or change selected actions.
+The passive verifier object still exists for the behavior-preserving path. For
+the active `*_autoagent0` prototype, critique/rejection is driven by the current
+VLM intervention mechanism rather than by a deterministic rule-based verifier.
+This is a temporary Critic implementation.
 
 Future phases will add:
 - off-road/map checks
@@ -96,8 +142,9 @@ Frame-level VLM debug JSON now includes `agent_trace`. This records:
 - designer candidate counts by source
 - orchestrator decision type
 - selected source or planner family
-- passive verifier acceptance
-- previous verifier feedback, currently empty
+- critique phase and redesign request for `*_autoagent0`
+- passive verifier acceptance for behavior-preserving paths
+- previous verifier feedback, currently empty unless later extensions populate it
 
 The trace is diagnostic only. It is not used by `eval.json` scoring and should
 not affect plan payloads or selected trajectories.
@@ -109,6 +156,10 @@ NuScenes scene `scene-0010-easy-00` for all nine canonical methods:
 `rap_vlm`, `drivor_vlm`, `rap_intervention_4cam`,
 `drivor_intervention_4cam`, `rule_based`, `rap_impl_a`, `drivor_impl_a`,
 `rap_impl_b`, and `drivor_impl_b`.
+
+The `rap_autoagent0` and `drivor_autoagent0` methods were added after that smoke
+run and should be verified with one-scene debug runs before adding them to the
+default all-method smoke suite.
 
 Use this command after future large refactors:
 
