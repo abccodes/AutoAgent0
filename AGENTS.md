@@ -161,7 +161,13 @@ Current shared-code ownership:
 - `autoagent0/adapters/hugsim/context.py` owns route/task/camera/ego context
   helpers used by HUGSIM-facing VLM paths
 - `autoagent0/prompts/orchestrator.py` owns the current scoring,
-  intervention, and planner-gate prompt builders
+  intervention, and planner-gate prompt builders for legacy methods
+- `autoagent0/prompts/critic.py` owns the active `*_autoagent0`
+  single-candidate critique prompt
+- `autoagent0/prompts/planner.py` owns the active `*_autoagent0`
+  revised-candidate final selection prompt
+- `autoagent0/prompts/designer.py` owns the design-change prompt boundary for
+  future dynamic designer requests
 - `autoagent0/core/orchestrator.py` owns VLM decision coercion, score parsing,
   and selected-candidate reasoning helpers
 - `autoagent0/experts/rule_based.py` wraps the existing Rule-Planner provider
@@ -184,13 +190,15 @@ The phase-1 deterministic verifier object is passive and always accepts on
 behavior-preserving paths. It is exposed through debug-only `agent_trace` fields
 and must not alter selected trajectories, fallbacks, metrics, or launcher
 behavior. In the active `*_autoagent0` prototype, critique/rejection is handled
-by the current VLM intervention mechanism rather than by the passive verifier.
+by the dedicated AutoAgent0 VLM Critic prompt rather than by the passive
+verifier.
 
 The active `rap_autoagent0` / `drivor_autoagent0` prototype is separate from
-Method A/B. It first critiques one learned default trajectory with the current
-VLM intervention mechanism. Only if that critique requests redesign does it ask
-for expanded learned + rule-based candidates, use the VLM scorer, critique the
-revised selection once more, and then execute or fall back to a hold trajectory.
+Method A/B. It first critiques one learned default trajectory with the
+AutoAgent0 VLM Critic. Only if that critique requests redesign does it ask for
+expanded learned + rule-based candidates, use the AutoAgent0 Planner prompt to
+select a revised candidate, critique the revised selection once more, and then
+execute the revised selection once the configured one-redesign limit is reached.
 
 Frame-level VLM debug JSON now includes `agent_trace` where the current VLM
 paths already write debug artifacts. This trace is diagnostic only and records:
@@ -313,10 +321,6 @@ Current active configs:
 | `drivor_impl_a` | DrivoR + rule-based candidate merge (Choice A) | `configs/planners/choice_a_rule_merge/drivor_vlm_intervention_4cam_rule_merge_0522.yaml` |
 | `rap_impl_a` | RAP + rule-based candidate merge (Choice A) | `configs/planners/choice_a_rule_merge/rap_vlm_intervention_4cam_rule_merge_0522.yaml` |
 
-Single-scene non-benchmark configs:
-- `configs/planners/choice_a_rule_merge/drivor_vlm_intervention_4cam_rule_merge.yaml`
-- `configs/planners/choice_a_rule_merge/rap_vlm_intervention_4cam_rule_merge.yaml`
-
 Current Choice A candidate behavior:
 - `candidate_limit = 10`
 - `rule_based_merge.topk = 3`
@@ -345,10 +349,6 @@ Current active configs:
 | --- | --- | --- |
 | `drivor_impl_b` | DrivoR + planner gating (Choice B) | `configs/planners/choice_b_rule_gate/drivor_vlm_intervention_4cam_rule_gate_0522.yaml` |
 | `rap_impl_b` | RAP + planner gating (Choice B) | `configs/planners/choice_b_rule_gate/rap_vlm_intervention_4cam_rule_gate_0522.yaml` |
-
-Single-scene non-benchmark configs:
-- `configs/planners/choice_b_rule_gate/drivor_vlm_intervention_4cam_rule_gate.yaml`
-- `configs/planners/choice_b_rule_gate/rap_vlm_intervention_4cam_rule_gate.yaml`
 
 ### Canonical script and config layout
 
@@ -385,24 +385,27 @@ The active AutoAgent0 recovery-loop methods are:
 
 | Method | What it is | Config |
 | --- | --- | --- |
-| `rap_autoagent0` | RAP default trajectory plus one VLM-critic-triggered redesign attempt | `configs/planners/autoagent0/rap_autoagent0_recovery_loop_0605.yaml` |
-| `drivor_autoagent0` | DrivoR default trajectory plus one VLM-critic-triggered redesign attempt | `configs/planners/autoagent0/drivor_autoagent0_recovery_loop_0605.yaml` |
+| `rap_autoagent0` | RAP default trajectory plus one bounded VLM-critic-triggered redesign pass | `configs/planners/autoagent0/rap_autoagent0_recovery_loop_0605.yaml` |
+| `drivor_autoagent0` | DrivoR default trajectory plus one bounded VLM-critic-triggered redesign pass | `configs/planners/autoagent0/drivor_autoagent0_recovery_loop_0605.yaml` |
 
 These methods are separate from Choice A/B. They do not always merge or always
 gate learned and rule-based policies. Their current runtime flow is:
 - request one learned default/top trajectory
-- critique that one trajectory with the current VLM intervention mechanism
+- critique that one trajectory with the AutoAgent0 VLM Critic prompt
 - execute the default trajectory if critique accepts it
 - if critique requests redesign, build an expanded learned + rule-based pool
-- use the current VLM scorer to select one revised candidate
+- use the AutoAgent0 Planner prompt to select one revised candidate
 - critique the revised candidate once
 - execute the revised candidate if accepted
-- otherwise execute a hold fallback
+- if the final critique still rejects, current runtime either falls back or
+  executes the VLM Planner-selected revised candidate depending on the
+  configured redesign limit behavior
 
 Current limits:
 - `redesign_candidate_budget = 10`
-- `max_redesign_attempts = 1` is present in config but the implementation is
-  currently fixed to one redesign attempt
+- `max_redesign_attempts = 3` is present in config, but repeated redesign
+  iterations are not implemented yet; the current runtime performs one expanded
+  redesign pass and uses this value only for final-rejection behavior
 - no deterministic map/TTC/collision verifier is active yet
 - no memory module is active yet
 - no new rule-based scorer is active yet
@@ -414,7 +417,7 @@ autoagent0:
   enabled: true
   mode: recovery_loop
   redesign_candidate_budget: 10
-  max_redesign_attempts: 1
+  max_redesign_attempts: 3
   fallback_mode: hold
 ```
 
@@ -471,7 +474,7 @@ DrivoR Choice A:
 ```bash
 REPO_ROOT=/bigdata/aidan/HUGSIM \
 PLANNER_NAME=drivor_vlm \
-PLANNER_PATH=configs/planners/choice_a_rule_merge/drivor_vlm_intervention_4cam_rule_merge.yaml \
+PLANNER_PATH=configs/planners/choice_a_rule_merge/drivor_vlm_intervention_4cam_rule_merge_0522.yaml \
 SCENARIO_PATH=configs/benchmark/nuscenes_all_variants/scene-0038-easy-00.yaml \
 BASE_PATH=configs/sim/nuscenes_base_local.yaml \
 SIM_CUDA=inherit \
@@ -484,7 +487,7 @@ RAP Choice A:
 ```bash
 REPO_ROOT=/bigdata/aidan/HUGSIM \
 PLANNER_NAME=rap_vlm \
-PLANNER_PATH=configs/planners/choice_a_rule_merge/rap_vlm_intervention_4cam_rule_merge.yaml \
+PLANNER_PATH=configs/planners/choice_a_rule_merge/rap_vlm_intervention_4cam_rule_merge_0522.yaml \
 SCENARIO_PATH=configs/benchmark/nuscenes_all_variants/scene-0038-easy-00.yaml \
 BASE_PATH=configs/sim/nuscenes_base_local.yaml \
 RAP_DEVICE_OVERRIDE=cuda:0 \
@@ -501,7 +504,7 @@ DrivoR Choice B:
 ```bash
 REPO_ROOT=/bigdata/aidan/HUGSIM \
 PLANNER_NAME=drivor_vlm \
-PLANNER_PATH=configs/planners/choice_b_rule_gate/drivor_vlm_intervention_4cam_rule_gate.yaml \
+PLANNER_PATH=configs/planners/choice_b_rule_gate/drivor_vlm_intervention_4cam_rule_gate_0522.yaml \
 SCENARIO_PATH=configs/benchmark/nuscenes_all_variants/scene-0038-easy-00.yaml \
 BASE_PATH=configs/sim/nuscenes_base_local.yaml \
 SIM_CUDA=inherit \
@@ -514,7 +517,7 @@ RAP Choice B:
 ```bash
 REPO_ROOT=/bigdata/aidan/HUGSIM \
 PLANNER_NAME=rap_vlm \
-PLANNER_PATH=configs/planners/choice_b_rule_gate/rap_vlm_intervention_4cam_rule_gate.yaml \
+PLANNER_PATH=configs/planners/choice_b_rule_gate/rap_vlm_intervention_4cam_rule_gate_0522.yaml \
 SCENARIO_PATH=configs/benchmark/nuscenes_all_variants/scene-0038-easy-00.yaml \
 BASE_PATH=configs/sim/nuscenes_base_local.yaml \
 RAP_DEVICE_OVERRIDE=cuda:0 \

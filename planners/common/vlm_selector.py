@@ -41,6 +41,7 @@ from autoagent0.core.candidates import (
     summarize_candidate as _aa_summarize_candidate,
 )
 from autoagent0.core.orchestrator import (
+    coerce_critique_result as _aa_coerce_critique_result,
     coerce_candidate_scores as _aa_coerce_candidate_scores,
     coerce_intervention_decision as _aa_coerce_intervention_decision,
     intervention_severity_band as _aa_intervention_severity_band,
@@ -55,6 +56,8 @@ from autoagent0.prompts.orchestrator import (
     build_scoring_prompt as _aa_build_scoring_prompt,
     _summarize_gate_candidates as _aa_summarize_gate_candidates,
 )
+from autoagent0.prompts.critic import build_critic_prompt as _aa_build_critic_prompt
+from autoagent0.prompts.planner import build_final_action_selection_prompt as _aa_build_final_action_selection_prompt
 from autoagent0.vlm.backends import (
     Qwen3TrajectorySelector,
     SubprocessQwen3TrajectorySelector,
@@ -143,6 +146,7 @@ _select_representative_candidate_row = _aa_select_representative_candidate_row
 _family_rows_for_planner_gate = _aa_family_rows_for_planner_gate
 _dedupe_gate_candidates = _aa_dedupe_gate_candidates
 _coerce_candidate_scores = _aa_coerce_candidate_scores
+_coerce_critique_result = _aa_coerce_critique_result
 _intervention_severity_band = _aa_intervention_severity_band
 _coerce_intervention_decision = _aa_coerce_intervention_decision
 _select_from_vlm_scores = _aa_select_from_vlm_scores
@@ -249,6 +253,388 @@ class VLMPlanSelector:
         )
         preload_fn(timeout_sec=self.cfg.timeout_sec)
         LOG.info("VLM selector preload complete model=%s", self.cfg.model_id)
+
+    def _write_stage_overlays(
+        self,
+        *,
+        frame_stem: str,
+        suffix: str,
+        overlays: Dict[str, np.ndarray],
+        camera_order: Sequence[str],
+        temp_paths: List[Path],
+    ) -> List[Path]:
+        image_paths: List[Path] = []
+        for cam_name in camera_order:
+            overlay = overlays.get(cam_name)
+            if overlay is None:
+                continue
+            if self.cfg.save_debug_artifacts:
+                image_path = self.debug_dir / f"{frame_stem}_{suffix}_{cam_name}.jpg"
+            else:
+                image_path = self.output_dir / f"{frame_stem}_{suffix}_{cam_name}_tmp.jpg"
+                temp_paths.append(image_path)
+            cv2.imwrite(str(image_path), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+            image_paths.append(image_path)
+        return image_paths
+
+    def critique_autoagent0_candidate(
+        self,
+        *,
+        frame_index: int,
+        camera_images: Dict[str, np.ndarray],
+        info: Dict[str, object],
+        candidate_row: Dict[str, object],
+        stage: str,
+        previous_feedback: Optional[str] = None,
+    ) -> Dict[str, object]:
+        route_instruction = resolve_route_instruction(info)
+        task_target_hint = describe_task_target_hint(info)
+        camera_order = resolve_stage_camera_order(self.cfg, "intervention")
+        timestamp = float(info.get("timestamp", 0.0))
+        candidate_rows = build_candidate_rows([candidate_row], current_ego_speed_mps=extract_current_ego_speed_mps(info))
+
+        def _fallback_result(error: Optional[str]) -> Dict[str, object]:
+            result = {
+                "stage": stage,
+                "autoagent0_critique_accepted": True,
+                "autoagent0_critique_rejected": False,
+                "autoagent0_critique_severity_score": 0.0,
+                "autoagent0_critique_corrective_action": "straight",
+                "autoagent0_critique_confidence": None,
+                "autoagent0_critique_reasoning": "AutoAgent0 critic unavailable; keeping current default behavior.",
+                "autoagent0_critique_error": error,
+                "autoagent0_critique_elapsed_sec": 0.0,
+                "autoagent0_critique_token_usage": _empty_token_usage(),
+                "error": error,
+            }
+            timeline_record = {
+                "frame_index": frame_index,
+                "timestamp": timestamp,
+                "route_instruction": route_instruction,
+                "execution_mode": f"autoagent0_{stage}_critic_unavailable",
+                "candidate_count": 1,
+                "selected_source": candidate_rows[0].get("source"),
+                "autoagent0_stage": stage,
+                "autoagent0_tool": "request_critique",
+                "autoagent0_critique_accepted": True,
+                "autoagent0_critique_error": error,
+                "vlm_elapsed_sec": 0.0,
+                "scoring_invoked": False,
+                "q_invoked_vlm": False,
+                "vlm_failed": True,
+                "error": error,
+            }
+            self._record_timeline(timeline_record)
+            result["latency_timeline_record"] = timeline_record
+            return result
+
+        if not self.cfg.enabled:
+            return _fallback_result("vlm_disabled")
+        selector = self._ensure_selector()
+        if selector is None:
+            return _fallback_result(self._disabled_reason or "selector_unavailable")
+
+        frame_stem = f"frame_{frame_index:04d}"
+        temp_paths: List[Path] = []
+        overlays = render_candidate_overlays(
+            camera_images,
+            info,
+            candidate_rows,
+            camera_order=camera_order,
+        )
+        image_paths = self._write_stage_overlays(
+            frame_stem=frame_stem,
+            suffix=f"autoagent0_{stage}_critic",
+            overlays=overlays,
+            camera_order=camera_order,
+            temp_paths=temp_paths,
+        )
+        prompt = _aa_build_critic_prompt(
+            candidate_rows[0],
+            route_instruction,
+            task_target_hint=task_target_hint,
+            previous_feedback=previous_feedback,
+            camera_order=camera_order,
+        )
+        try:
+            inference_result = selector.infer_prompt(
+                image_paths=image_paths,
+                prompt=prompt,
+                max_new_tokens=self.cfg.intervention_max_new_tokens,
+                timeout_sec=self.cfg.intervention_timeout_sec,
+            )
+        except Exception as exc:
+            LOG.exception("AutoAgent0 critic failed")
+            inference_result = {
+                "raw_output": "",
+                "parsed_output": None,
+                "elapsed_sec": 0.0,
+                "prompt": prompt,
+                "error": str(exc),
+                "token_usage": _empty_token_usage(),
+            }
+
+        elapsed_sec = float(inference_result.get("elapsed_sec", 0.0))
+        token_usage = _normalize_token_usage(inference_result.get("token_usage"))
+        critique = _coerce_critique_result(inference_result.get("parsed_output"))
+        error = critique.error
+        if elapsed_sec > self.cfg.intervention_timeout_sec:
+            error = f"autoagent0_critic_timeout:{elapsed_sec:.3f}"
+        elif inference_result.get("error"):
+            error = str(inference_result.get("error"))
+        accepted = bool(critique.accepted) if error is None else True
+
+        timeline_record = {
+            "frame_index": frame_index,
+            "timestamp": timestamp,
+            "route_instruction": route_instruction,
+            "execution_mode": f"autoagent0_{stage}_critic",
+            "candidate_count": 1,
+            "selected_source": candidate_rows[0].get("source"),
+            "autoagent0_stage": stage,
+            "autoagent0_tool": "request_critique",
+            "autoagent0_critique_accepted": accepted,
+            "autoagent0_critique_severity_score": critique.severity_score,
+            "autoagent0_critique_corrective_action": critique.corrective_action,
+            "autoagent0_critique_confidence": critique.confidence,
+            "autoagent0_critique_elapsed_sec": elapsed_sec,
+            "autoagent0_critique_prompt_tokens": token_usage["prompt_tokens"],
+            "autoagent0_critique_completion_tokens": token_usage["completion_tokens"],
+            "autoagent0_critique_total_tokens": token_usage["total_tokens"],
+            "vlm_elapsed_sec": elapsed_sec,
+            "scoring_invoked": False,
+            "q_invoked_vlm": True,
+            "vlm_failed": error is not None,
+            "error": error,
+        }
+        self._record_timeline(timeline_record)
+        result = {
+            "stage": stage,
+            "autoagent0_critique_accepted": accepted,
+            "autoagent0_critique_rejected": not accepted,
+            "autoagent0_critique_severity_score": critique.severity_score,
+            "autoagent0_critique_corrective_action": critique.corrective_action,
+            "autoagent0_critique_confidence": critique.confidence,
+            "autoagent0_critique_reasoning": critique.reasoning,
+            "autoagent0_critique_error": error,
+            "autoagent0_critique_elapsed_sec": elapsed_sec,
+            "autoagent0_critique_token_usage": token_usage,
+            "autoagent0_critique_result": inference_result,
+            "latency_timeline_record": timeline_record,
+            "error": error,
+        }
+        if self.cfg.save_debug_artifacts:
+            result_path = self.debug_dir / f"{frame_stem}_autoagent0_{stage}_critique.json"
+            result_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+        else:
+            for temp_path in temp_paths:
+                temp_path.unlink(missing_ok=True)
+        return result
+
+    def score_autoagent0_candidates(
+        self,
+        *,
+        frame_index: int,
+        camera_images: Dict[str, np.ndarray],
+        info: Dict[str, object],
+        candidate_rows: Sequence[Dict[str, object]],
+        default_selected_index: int,
+        default_selected_source: str,
+        critique_reason: Optional[str] = None,
+        corrective_action: Optional[str] = None,
+    ) -> Dict[str, object]:
+        route_instruction = resolve_route_instruction(info)
+        task_target_hint = describe_task_target_hint(info)
+        camera_order = resolve_stage_camera_order(self.cfg, "scoring")
+        timestamp = float(info.get("timestamp", 0.0))
+        candidate_rows = build_candidate_rows(candidate_rows, current_ego_speed_mps=extract_current_ego_speed_mps(info))
+
+        def _fallback_result(error: Optional[str]) -> Dict[str, object]:
+            selected_row = dict(candidate_rows[default_selected_index])
+            timeline_record = {
+                "frame_index": frame_index,
+                "timestamp": timestamp,
+                "route_instruction": route_instruction,
+                "execution_mode": "autoagent0_scoring_unavailable",
+                "candidate_count": len(candidate_rows),
+                "selected_source": default_selected_source,
+                "selected_candidate_index": default_selected_index,
+                "autoagent0_tool": "select_final_actions",
+                "vlm_elapsed_sec": 0.0,
+                "scoring_invoked": False,
+                "q_invoked_vlm": False,
+                "vlm_failed": True,
+                "error": error,
+            }
+            self._record_timeline(timeline_record)
+            return {
+                "selected_candidate_row": selected_row,
+                "selected_source": default_selected_source,
+                "selected_path_reasoning": "AutoAgent0 scorer unavailable; using default candidate.",
+                "execution_mode": "autoagent0_scoring_unavailable",
+                "vlm_candidate_index": None,
+                "vlm_confidence": None,
+                "vlm_reasoning": None,
+                "vlm_elapsed_sec": 0.0,
+                "vlm_error": error,
+                "vlm_candidate_count": len(candidate_rows),
+                "vlm_q_valid": False,
+                "vlm_q_candidate_scores": None,
+                "vlm_q_best_candidate_index": None,
+                "vlm_q_score_gap_top2": None,
+                "adaptive_replan_decision": "autoagent0_scorer_failed_default",
+                "latency_timeline_record": timeline_record,
+                "vlm_failed": True,
+                "scoring_invoked": False,
+                "scoring_token_usage": _empty_token_usage(),
+                "error": error,
+            }
+
+        if not candidate_rows:
+            raise ValueError("AutoAgent0 scoring requires at least one candidate")
+        if not self.cfg.enabled:
+            return _fallback_result("vlm_disabled")
+        selector = self._ensure_selector()
+        if selector is None:
+            return _fallback_result(self._disabled_reason or "selector_unavailable")
+
+        frame_stem = f"frame_{frame_index:04d}"
+        temp_paths: List[Path] = []
+        overlays = render_candidate_overlays(
+            camera_images,
+            info,
+            candidate_rows,
+            camera_order=camera_order,
+        )
+        image_paths = self._write_stage_overlays(
+            frame_stem=frame_stem,
+            suffix="autoagent0_revised_candidates",
+            overlays=overlays,
+            camera_order=camera_order,
+            temp_paths=temp_paths,
+        )
+        prompt = _aa_build_final_action_selection_prompt(
+            candidate_rows,
+            route_instruction,
+            critique_reason=critique_reason,
+            corrective_action=corrective_action,
+            task_target_hint=task_target_hint,
+            camera_order=camera_order,
+        )
+        try:
+            inference_result = selector.infer_prompt(
+                image_paths=image_paths,
+                prompt=prompt,
+                max_new_tokens=self.cfg.max_new_tokens,
+                timeout_sec=self.cfg.timeout_sec,
+            )
+        except Exception as exc:
+            self._disabled_reason = f"selector_runtime_error:{exc}"
+            LOG.exception("AutoAgent0 scorer failed")
+            inference_result = {
+                "raw_output": "",
+                "parsed_output": None,
+                "elapsed_sec": 0.0,
+                "prompt": prompt,
+                "error": str(exc),
+                "token_usage": _empty_token_usage(),
+            }
+
+        parsed = inference_result.get("parsed_output")
+        elapsed_sec = float(inference_result.get("elapsed_sec", 0.0))
+        token_usage = _normalize_token_usage(inference_result.get("token_usage"))
+        selected_candidate_index = int(default_selected_index)
+        selected_row = dict(candidate_rows[default_selected_index])
+        selected_source = default_selected_source
+        vlm_confidence = None
+        vlm_reasoning = None
+        vlm_q_valid = False
+        vlm_q_candidate_scores = None
+        vlm_q_best_candidate_index = None
+        vlm_q_score_gap_top2 = None
+        error = None
+        if isinstance(parsed, dict):
+            coerced_scores, score_error = _coerce_candidate_scores(parsed.get("candidate_scores"), len(candidate_rows))
+            if coerced_scores is None:
+                error = score_error or "invalid_candidate_scores"
+            elif elapsed_sec > self.cfg.timeout_sec:
+                error = f"autoagent0_scorer_timeout:{elapsed_sec:.3f}"
+            else:
+                vlm_q_valid = True
+                vlm_q_candidate_scores = [float(score) for score in coerced_scores]
+                vlm_q_best_candidate_index = int(max(range(len(vlm_q_candidate_scores)), key=lambda idx: vlm_q_candidate_scores[idx]))
+                selection = _select_from_vlm_scores(candidate_rows=candidate_rows, vlm_scores=coerced_scores)
+                selected_candidate_index = int(selection["selected_candidate_index"])
+                selected_row = dict(selection["selected_candidate_row"])
+                selected_source = str(selection["selected_source"])
+                vlm_q_score_gap_top2 = selection["vlm_q_score_gap_top2"]
+                vlm_confidence = float(parsed.get("confidence", 0.0))
+                vlm_reasoning = parsed.get("reasoning")
+        else:
+            error = (
+                f"autoagent0_scorer_timeout:{elapsed_sec:.3f}"
+                if elapsed_sec > self.cfg.timeout_sec
+                else str(inference_result.get("error") or "invalid_selector_output")
+            )
+
+        selected_path_reasoning = _selected_path_reasoning(
+            selected_row=selected_row,
+            selected_candidate_index=selected_candidate_index,
+            selected_source=selected_source,
+            vlm_scores=vlm_q_candidate_scores,
+            parsed_reasoning=vlm_reasoning,
+        )
+        timeline_record = {
+            "frame_index": frame_index,
+            "timestamp": timestamp,
+            "route_instruction": route_instruction,
+            "execution_mode": "autoagent0_revised_scoring",
+            "candidate_count": len(candidate_rows),
+            "selected_source": selected_source,
+            "selected_candidate_index": selected_candidate_index,
+            "selected_candidate_source": selected_row.get("source"),
+            "selected_proposal_index": selected_row.get("proposal_index"),
+            "autoagent0_tool": "select_final_actions",
+            "vlm_elapsed_sec": elapsed_sec,
+            "scoring_prompt_tokens": token_usage["prompt_tokens"],
+            "scoring_completion_tokens": token_usage["completion_tokens"],
+            "scoring_total_tokens": token_usage["total_tokens"],
+            "scoring_invoked": True,
+            "vlm_q_valid": vlm_q_valid,
+            "vlm_failed": error is not None,
+            "error": error,
+        }
+        self._record_timeline(timeline_record)
+        result = {
+            "selected_candidate_row": selected_row,
+            "selected_source": selected_source,
+            "selected_path_reasoning": selected_path_reasoning,
+            "execution_mode": "autoagent0_revised_scoring",
+            "vlm_candidate_index": selected_candidate_index if error is None else None,
+            "vlm_confidence": vlm_confidence,
+            "vlm_reasoning": vlm_reasoning,
+            "vlm_elapsed_sec": elapsed_sec,
+            "vlm_error": error,
+            "vlm_candidate_count": len(candidate_rows),
+            "vlm_q_valid": vlm_q_valid,
+            "vlm_q_candidate_scores": vlm_q_candidate_scores,
+            "vlm_q_best_candidate_index": vlm_q_best_candidate_index,
+            "vlm_q_score_gap_top2": vlm_q_score_gap_top2,
+            "adaptive_replan_decision": "autoagent0_revised_scoring",
+            "latency_timeline_record": timeline_record,
+            "vlm_failed": error is not None,
+            "scoring_invoked": True,
+            "scoring_token_usage": token_usage,
+            "scoring_result": inference_result,
+            "error": error,
+        }
+        if self.cfg.save_debug_artifacts:
+            result_path = self.debug_dir / f"{frame_stem}_autoagent0_revised_scoring.json"
+            result_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+        else:
+            for temp_path in temp_paths:
+                temp_path.unlink(missing_ok=True)
+        return result
 
     def maybe_select(
         self,

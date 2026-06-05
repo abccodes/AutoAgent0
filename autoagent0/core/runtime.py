@@ -12,6 +12,7 @@ from autoagent0.core.planner_flow import (
     disabled_planner_gate_result,
     run_learned_planner_selection,
 )
+from autoagent0.core.schemas import DesignChangeRequest
 from autoagent0.core.trace import build_agent_trace
 from autoagent0.core.verifier import PassiveVerifier
 
@@ -153,6 +154,7 @@ class AutoAgent0Runtime:
         logger: Any,
         strict_learned_argmax_lookup: bool = False,
         fallback_mode: str = "hold",
+        max_redesign_attempts: int = 1,
     ) -> LearnedPlannerSelection:
         """Run the target AutoAgent0 one-redesign recovery loop.
 
@@ -163,6 +165,11 @@ class AutoAgent0Runtime:
         """
 
         self._tool_calls = []
+        self._record_tool_call(
+            "request_initial_design",
+            designer="learned",
+            candidate_count=len(learned_candidate_rows),
+        )
         self.request_designer(
             learned_candidate_rows=learned_candidate_rows,
             rule_based_candidate_rows=(),
@@ -183,19 +190,18 @@ class AutoAgent0Runtime:
         self._record_tool_call(
             "request_critique",
             phase="default",
-            critic="vlm_intervention",
+            critic="autoagent0_vlm_critic",
             candidate_count=1,
         )
-        critique_result = vlm_selector.maybe_select(
+        critique_result = vlm_selector.critique_autoagent0_candidate(
             frame_index=frame_index,
             camera_images=camera_images,
             info=info,
-            candidate_rows=[default_row],
-            default_selected_index=0,
-            default_selected_source=default_selected_source,
+            candidate_row=default_row,
+            stage="default",
         )
-        should_redesign = critique_result.get("intervention_should_intervene") is True
-        critique_error = critique_result.get("intervention_error") or critique_result.get("vlm_error")
+        should_redesign = critique_result.get("autoagent0_critique_rejected") is True
+        critique_error = critique_result.get("autoagent0_critique_error") or critique_result.get("error")
         if critique_error is not None:
             should_redesign = False
 
@@ -213,6 +219,7 @@ class AutoAgent0Runtime:
                     "autoagent0_phase": "default_accepted",
                     "autoagent0_redesign_triggered": False,
                     "autoagent0_default_critique": critique_result,
+                    "autoagent0_fallback_reason": None,
                     "fallback_selected_idx": int(default_selected_index),
                     "fallback_selected_source": default_selected_source,
                     "planner_gate_selected_planner": "learned",
@@ -241,39 +248,53 @@ class AutoAgent0Runtime:
                 phase="default_accepted",
             ))
 
-        corrective_action = critique_result.get("intervention_corrective_action")
-        rejection_reason = critique_result.get("intervention_reasoning") or "vlm_critic_requested_redesign"
+        corrective_action = critique_result.get("autoagent0_critique_corrective_action")
+        rejection_reason = critique_result.get("autoagent0_critique_reasoning") or "vlm_critic_requested_redesign"
+        redesign_budget = max(1, int(redesign_candidate_budget))
+        design_change_request = DesignChangeRequest(
+            reason=str(rejection_reason),
+            corrective_action=None if corrective_action is None else str(corrective_action),
+            candidate_budget=redesign_budget,
+            include_learned=True,
+            include_rule_based=bool(rule_based_candidate_rows),
+        )
         self._record_tool_call(
             "request_design_change",
             phase="default_rejected",
-            reason=str(rejection_reason),
-            corrective_action=corrective_action,
+            reason=design_change_request.reason,
+            corrective_action=design_change_request.corrective_action,
+            candidate_budget=design_change_request.candidate_budget,
+            include_rule_based=design_change_request.include_rule_based,
         )
-        redesign_budget = max(1, int(redesign_candidate_budget))
         learned_budget = max(1, redesign_budget - len(rule_based_candidate_rows))
         expanded_rows = list(learned_candidate_rows[:learned_budget]) + list(rule_based_candidate_rows)
         if not expanded_rows:
             expanded_rows = [default_row]
+        self._record_tool_call(
+            "request_revised_design",
+            designer="learned+rule_based",
+            candidate_count=len(expanded_rows),
+            candidate_budget=redesign_budget,
+        )
         self.request_designer(
             learned_candidate_rows=learned_candidate_rows[:learned_budget],
             rule_based_candidate_rows=rule_based_candidate_rows,
             combined_candidate_rows=expanded_rows,
         )
         self._record_tool_call(
-            "select_revised_candidate",
-            scorer="vlm_scorer",
+            "select_final_actions",
+            scorer="autoagent0_vlm_planner",
             candidate_count=len(expanded_rows),
         )
-        redesign_result = vlm_selector.maybe_select(
+        redesign_result = vlm_selector.score_autoagent0_candidates(
             frame_index=frame_index,
             camera_images=camera_images,
             info=info,
             candidate_rows=expanded_rows,
             default_selected_index=0,
             default_selected_source="autoagent0_redesign_default",
-            force_scoring=True,
-            intervention_corrective_action_override=None if corrective_action is None else str(corrective_action),
-            execution_mode_label="autoagent0_redesign_scoring",
+            critique_reason=design_change_request.reason,
+            corrective_action=design_change_request.corrective_action,
         )
         revised_row = dict(redesign_result["selected_candidate_row"])
         revised_plan = np.asarray(revised_row.get("execution_plan", revised_row["local_plan"]), dtype=np.float32)
@@ -283,19 +304,23 @@ class AutoAgent0Runtime:
         self._record_tool_call(
             "request_critique",
             phase="revised",
-            critic="vlm_intervention",
+            critic="autoagent0_vlm_critic",
             candidate_count=1,
         )
-        final_critique = vlm_selector.maybe_select(
+        final_critique = vlm_selector.critique_autoagent0_candidate(
             frame_index=frame_index,
             camera_images=camera_images,
             info=info,
-            candidate_rows=[revised_row],
-            default_selected_index=0,
-            default_selected_source=str(redesign_result.get("selected_source", "autoagent0_redesign_selected")),
+            candidate_row=revised_row,
+            stage="final",
+            previous_feedback=design_change_request.reason,
         )
-        final_rejected = final_critique.get("intervention_should_intervene") is True
-        if final_rejected:
+        final_rejected = final_critique.get("autoagent0_critique_rejected") is True
+        final_critique_error = final_critique.get("autoagent0_critique_error") or final_critique.get("error")
+        if final_critique_error is not None:
+            final_rejected = False
+        reached_redesign_limit = int(max_redesign_attempts) <= 1
+        if final_rejected and not reached_redesign_limit:
             fallback_plan = _hold_plan_like(revised_plan) if str(fallback_mode).lower() == "hold" else default_plan
             selected_row = {
                 "source": "fallback_brake_hold" if str(fallback_mode).lower() == "hold" else "fallback_learned_default",
@@ -310,17 +335,23 @@ class AutoAgent0Runtime:
             selected_score_raw = 0.0
             selected_source = str(selected_row["source"])
             phase = "fallback_after_revised_rejected"
+            fallback_reason = final_critique.get("autoagent0_critique_reasoning") or "final_critic_rejected_revised_candidate"
         else:
+            # TODO(autoagent0): replace this threshold behavior with a combined
+            # learned/rule-based scorer once the rule-based scorer design is finalized.
             selected_row = revised_row
             selected_plan = revised_plan
             selected_idx = None if revised_idx is None else int(revised_idx)
             selected_score = revised_score
             selected_score_raw = revised_score_raw
             selected_source = str(redesign_result.get("selected_source", "autoagent0_redesign_selected"))
-            phase = "redesign_accepted"
+            phase = "redesign_accepted" if not final_rejected else "redesign_selected_at_critic_limit"
+            fallback_reason = None if not final_rejected else (
+                "final_critic_rejected_but_max_redesign_attempts_reached_use_vlm_scorer_selection"
+            )
 
         self._record_tool_call(
-            "select_final_actions",
+            "emit_final_actions",
             phase=phase,
             selected_source=selected_source,
             selected_candidate_index=selected_idx,
@@ -332,14 +363,30 @@ class AutoAgent0Runtime:
                 "autoagent0_phase": phase,
                 "autoagent0_redesign_triggered": True,
                 "autoagent0_default_critique": critique_result,
-                "autoagent0_redesign_request": {
-                    "reason": rejection_reason,
-                    "corrective_action": corrective_action,
-                    "candidate_budget": redesign_budget,
-                    "include_learned": True,
-                    "include_rule_based": bool(rule_based_candidate_rows),
+                "autoagent0_design_change_request": {
+                    "reason": design_change_request.reason,
+                    "corrective_action": design_change_request.corrective_action,
+                    "candidate_budget": design_change_request.candidate_budget,
+                    "include_learned": design_change_request.include_learned,
+                    "include_rule_based": design_change_request.include_rule_based,
                 },
+                "autoagent0_redesign_request": {
+                    "reason": design_change_request.reason,
+                    "corrective_action": design_change_request.corrective_action,
+                    "candidate_budget": design_change_request.candidate_budget,
+                    "include_learned": design_change_request.include_learned,
+                    "include_rule_based": design_change_request.include_rule_based,
+                },
+                "autoagent0_revised_candidate_count": len(expanded_rows),
+                "autoagent0_revised_learned_candidate_count": sum(
+                    1 for row in expanded_rows if str(row.get("source", "")).startswith(learned_source_name)
+                ),
+                "autoagent0_revised_rule_based_candidate_count": sum(
+                    1 for row in expanded_rows if str(row.get("source", "")) == "rule_based"
+                ),
                 "autoagent0_final_critique": final_critique,
+                "autoagent0_fallback_reason": fallback_reason,
+                "autoagent0_max_redesign_attempts": int(max_redesign_attempts),
                 "fallback_selected_idx": 0,
                 "fallback_selected_source": "autoagent0_redesign_default",
                 "planner_gate_selected_planner": "autoagent0",
@@ -560,11 +607,13 @@ class AutoAgent0Runtime:
             }
             trace["tool_calls"] = list(self._tool_calls)
             trace["critique"] = {
-                "critic": "vlm_intervention",
+                "critic": "autoagent0_vlm_critic",
                 "default": selection_debug.get("autoagent0_default_critique"),
                 "final": selection_debug.get("autoagent0_final_critique"),
             }
+            trace["design_change_request"] = selection_debug.get("autoagent0_design_change_request")
             trace["redesign_request"] = selection_debug.get("autoagent0_redesign_request")
+            trace["fallback_reason"] = selection_debug.get("autoagent0_fallback_reason")
             selection_debug["agent_trace"] = trace
         except Exception as exc:
             if self.logger is not None:

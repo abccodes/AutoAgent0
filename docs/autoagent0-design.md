@@ -2,10 +2,11 @@
 
 ## Goal
 
-AutoAgent0 is currently a HUGSIM-backed, SceneSmith-inspired agentic wrapper
+AutoAgent0 is currently a HUGSIM-backed, SceneSmith-inspired agentic runtime
 around the trajectory generation and VLM routing logic already implemented in
-this repo. The current design goal is to make the system look like an explicit
-Orchestrator + Designer workflow while preserving existing behavior.
+this repo. The current design goal is to make the active `*_autoagent0` methods
+look like an explicit Planner + Designer + Critic workflow while preserving
+existing Method A/B, intervention, and base-policy baselines as ablations.
 
 This document describes the current implementation-level design. The active
 `rap_autoagent0` and `drivor_autoagent0` methods implement a first bounded
@@ -29,16 +30,20 @@ AutoAgent0, we use that structure as an architectural pattern rather than
 copying SceneSmith directly.
 
 Mapping:
-- SceneSmith Planner -> AutoAgent0 Orchestrator.
+- SceneSmith Planner -> AutoAgent0 runtime planner / orchestrator.
 - SceneSmith Designer -> learned and rule-based trajectory generators.
-- SceneSmith Critic -> future verifier/critique module.
+- SceneSmith Critic -> active VLM Critic for `*_autoagent0`, future
+  deterministic verifier/rule-metric critic.
 - SceneSmith checkpoint/reset -> future last-safe fallback or recovery behavior.
 
 The current system already has most of the functional pieces. The main design
 change is to name them in an agentic way and expose clean boundaries:
 - the Orchestrator coordinates which path to run,
 - Designers generate candidate trajectories,
-- existing VLM intervention/scoring/gating selects between options,
+- legacy VLM intervention/scoring/gating selects between options for existing
+  baselines,
+- AutoAgent0 role-specific prompts critique and select actions for
+  `*_autoagent0`,
 - HUGSIM receives the selected final trajectory through the existing payload
   path.
 
@@ -47,9 +52,9 @@ Current SceneSmith-style tool vocabulary:
   learned and/or rule-based expert modules.
 - `select_final_actions`: active. Selects the final trajectory according to the
   current method semantics.
-- `request_critique`: active in `*_autoagent0` through the current VLM
-  intervention mechanism. Future versions should replace or augment this with a
-  deterministic verifier and rule-metric critic.
+- `request_critique`: active in `*_autoagent0` through
+  `autoagent0/prompts/critic.py`. Future versions should replace or augment
+  this with a deterministic verifier and rule-metric critic.
 - `request_design_change(intervention)`: active as a trace/runtime transition in
   `*_autoagent0`. In this prototype it does not call a separate recovery
   endpoint generator; it triggers expanded learned + rule-based candidate
@@ -67,8 +72,9 @@ AutoAgent0-style flow is used.
    trajectories.
 3. The Orchestrator path determines whether candidates are used directly,
    merged into one pool, or separated into learned/rule-based families.
-4. Existing VLM intervention/scoring or planner-gate logic selects the final
-   trajectory when enabled by the method.
+4. Legacy VLM intervention/scoring or planner-gate logic selects the final
+   trajectory for existing methods. The active `*_autoagent0` path uses the
+   AutoAgent0 Critic and Planner prompts instead.
 5. The selected local trajectory and debug metadata are returned in the
    normalized HUGSIM plan payload.
 6. `closed_loop.py` converts the trajectory into simulator control and writes
@@ -99,8 +105,8 @@ surroundings rather than override the front-view path geometry.
 ### Language Instruction
 
 The language instruction comes from the route command or from task metadata.
-This instruction is passed into the current VLM intervention, scoring, and
-planner-gate prompts.
+This instruction is passed into legacy VLM intervention, scoring, and
+planner-gate prompts, and into the active AutoAgent0 Critic/Planner prompts.
 
 For normal benchmark runs, the instruction is the route command such as
 straight, left, or right. For curated demos, task metadata can override the
@@ -125,9 +131,9 @@ Current Orchestrator behaviors:
   separately, run the VLM planner gate to choose the family, then use that
   family's top/default trajectory.
 - AutoAgent0 recovery loop: request one learned default trajectory, critique it
-  with VLM intervention, request expanded candidates only on rejection, score
-  the expanded pool, critique the selected revision, and then execute or fall
-  back.
+  with the AutoAgent0 VLM Critic, request expanded candidates only on
+  rejection, use the AutoAgent0 Planner prompt to select from the expanded
+  pool, critique the selected revision, and then execute or fall back.
 
 The current Orchestrator is still implemented inside existing HUGSIM planner
 clients and `AutoAgent0Runtime`; it is not a standalone long-running agent
@@ -218,10 +224,10 @@ The deterministic verifier agent is future work. A passive verifier trace
 exists in the behavior-preserving scaffolding, but it always accepts and does
 not affect actions, fallbacks, metrics, or selected trajectories.
 
-For the active `*_autoagent0` prototype, `request_critique` uses the current VLM
-intervention mechanism as a temporary VLM Critic. The VLM Critic checks a single
-candidate trajectory and maps `should_intervene = false` to accepted and
-`should_intervene = true` to rejected/redesign-needed. This is not the final
+For the active `*_autoagent0` prototype, `request_critique` uses the dedicated
+AutoAgent0 VLM Critic prompt in `autoagent0/prompts/critic.py`. The Critic
+checks a single candidate trajectory and returns `accepted`, `severity_score`,
+`corrective_action`, `confidence`, and `reasoning`. This is not the final
 rule-based verifier; it is a bootstrap critique mechanism so the agentic loop
 can be tested before map/TTC/collision checks are implemented.
 
@@ -232,9 +238,9 @@ A future active verifier could use symbolic state and visual context for:
 - lane/rule checks,
 - structured rejection reasons that are fed back to the Orchestrator.
 
-This future verifier should be treated as the eventual SceneSmith-style Critic,
-but the current VLM intervention/scorer should not be renamed into a full Critic
-agent yet.
+This future verifier should be treated as the eventual safety-grounded
+SceneSmith-style Critic. The current VLM Critic is intentionally minimal and
+visual-only.
 
 ### Judge And Memory Agent / Memory
 
@@ -272,14 +278,14 @@ Current public methods remain the source of truth for experiments.
 
 ## Active Recovery-Loop Prototype
 
-The first active AutoAgent0 recovery-loop prototype keeps the Critic simple:
-`request_critique(...)` uses the existing VLM intervention mechanism. A default
-learned trajectory is checked first. If the VLM intervention says no redesign is
-needed, the default trajectory is executed. If it requests intervention, the
-Orchestrator asks for an expanded learned + rule-based candidate pool, uses the
-existing VLM scorer to select a revised trajectory, critiques the revised
-trajectory once more, and then either executes it or falls back to a hold
-trajectory.
+The first active AutoAgent0 recovery-loop prototype keeps the Critic and
+Planner prompts minimal. A default learned trajectory is checked first by
+`autoagent0/prompts/critic.py`. If the Critic accepts it, the default trajectory
+is executed. If it rejects it, the runtime records a design-change request,
+asks for an expanded learned + rule-based candidate pool, uses
+`autoagent0/prompts/planner.py` to select a revised trajectory, critiques the
+revised trajectory once more, and then executes the revised selection once the
+configured one-redesign limit is reached.
 
 This prototype deliberately does not implement memory, deterministic map/TTC
 verification, multi-iteration redesign, or a new rule-based scorer. Method A/B
@@ -290,24 +296,28 @@ Concrete implemented loop:
 
 1. `request_designer(mode="default", k=1)` selects the learned planner's default
    candidate.
-2. `request_critique(phase="default")` calls VLM intervention on that one
-   candidate.
+2. `request_critique(phase="default")` calls the AutoAgent0 VLM Critic on that
+   one candidate.
 3. If accepted, `select_final_actions` executes the default trajectory.
 4. If rejected, `request_design_change` records the VLM critique reason and
    corrective action.
 5. `request_designer(mode="recovery", k=10)` builds an expanded learned +
    rule-based candidate pool.
-6. The existing VLM scorer selects one revised candidate from that pool.
-7. `request_critique(phase="revised")` calls VLM intervention on the revised
-   candidate.
+6. The AutoAgent0 Planner prompt selects one revised candidate from that pool.
+7. `request_critique(phase="revised")` calls the AutoAgent0 VLM Critic on the
+   revised candidate.
 8. If accepted, the revised candidate is executed. If rejected, the current
-   fallback is a hold trajectory.
+   runtime either falls back or executes the revised VLM Planner selection
+   depending on the configured redesign-limit behavior. TODO: replace this
+   threshold behavior with combined learned/rule-based scorer logic once the
+   rule-based scorer design is finalized.
 
 The loop does not currently keep adding more trajectories after the revised
 candidate is rejected. `redesign_candidate_budget` caps the expanded pool at 10
-in the current configs. `max_redesign_attempts` is present in config for the
-future, but the current implementation is effectively fixed at one redesign
-attempt.
+in the current configs. `max_redesign_attempts = 3` is present in config, but
+repeated redesign iterations are not implemented yet; the current implementation
+performs one expanded redesign pass and uses this value only for
+final-rejection behavior.
 
 ## Codebase Mapping
 
@@ -330,7 +340,13 @@ Active implementation anchors:
 - `autoagent0/core/orchestrator.py`: current VLM decision parsing/coercion and
   selected-candidate helpers.
 - `autoagent0/prompts/orchestrator.py`: current intervention, scoring, and
-  planner-gate prompts.
+  planner-gate prompts for legacy methods.
+- `autoagent0/prompts/critic.py`: active AutoAgent0 single-candidate critique
+  prompt.
+- `autoagent0/prompts/planner.py`: active AutoAgent0 revised-candidate final
+  selection prompt.
+- `autoagent0/prompts/designer.py`: design-change prompt boundary reserved for
+  future dynamic designer requests.
 - `autoagent0/adapters/hugsim/`: HUGSIM-specific context, runtime, video,
   results, geometry, default trajectory, overlay, and IO helpers.
 

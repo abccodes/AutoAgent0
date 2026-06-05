@@ -19,7 +19,7 @@ rap:
     enabled: true
     mode: recovery_loop
     redesign_candidate_budget: 10
-    max_redesign_attempts: 1
+    max_redesign_attempts: 3
     fallback_mode: hold
 
   vlm:
@@ -62,6 +62,6 @@ rap:
     python_bin: /bigdata/aidan/.home/envs/rap/bin/python
     config: /bigdata/aidan/HUGSIM/.external/Rule-Planner/config_example.yaml
     device: cpu
-    topk: 3
+    topk: 5
     include_privileged_info: true
     source_name: rule_based

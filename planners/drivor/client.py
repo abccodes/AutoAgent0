@@ -1191,6 +1191,7 @@ def main() -> int:
                                 logger=LOG,
                                 strict_learned_argmax_lookup=False,
                                 fallback_mode=autoagent0_cfg.fallback_mode,
+                                max_redesign_attempts=autoagent0_cfg.max_redesign_attempts,
                             )
                         else:
                             selection = autoagent0_runtime.select_final_actions(

@@ -50,6 +50,49 @@ class OrchestratorDecision:
 
 
 @dataclass(frozen=True)
+class PlannerToolCall:
+    """SceneSmith-style planner tool call for trace/debug output."""
+
+    name: str
+    arguments: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CritiqueResult:
+    """Structured result from the active AutoAgent0 critic."""
+
+    accepted: bool
+    severity_score: float
+    corrective_action: str
+    confidence: Optional[float] = None
+    reasoning: Optional[str] = None
+    error: Optional[str] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DesignChangeRequest:
+    """Request issued after critic rejection to expand/revise candidates."""
+
+    reason: str
+    corrective_action: Optional[str]
+    candidate_budget: int
+    include_learned: bool = True
+    include_rule_based: bool = True
+
+
+@dataclass(frozen=True)
+class FinalActionSelection:
+    """Final selected action metadata for the active AutoAgent0 path."""
+
+    selected_source: str
+    selected_planner: str
+    selected_candidate_index: Optional[int] = None
+    fallback_selected: bool = False
+    fallback_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class VerifierResult:
     """Verifier result. Phase 1 is passive and always accepts."""
 
@@ -98,4 +141,3 @@ class AgentStepTrace:
             },
             "previous_verifier_feedback": self.previous_verifier_feedback or {},
         }
-

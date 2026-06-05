@@ -20,8 +20,9 @@ for Method A/B ablation baselines.
 - `autoagent0/adapters/hugsim/` contains HUGSIM conversion, runtime, video,
   demo-task, output/result, and visualization helpers. HUGSIM is the current
   evaluation backend, not the long-term core abstraction.
-- `autoagent0/prompts/` contains prompt builders used by the current
-  intervention scorer and planner gate.
+- `autoagent0/prompts/` contains legacy prompt builders for current
+  intervention/scoring/planner-gate paths plus role-specific Planner, Designer,
+  and Critic prompt builders for the active `*_autoagent0` path.
 - `autoagent0/vlm/` contains shared VLM backend, parsing, and debug utilities
   used by the current selector paths.
 
@@ -48,7 +49,13 @@ The first shared-code migration is intentionally narrow:
   front/video rendering, curated demo task completion/overrides, and eval
   performance summary/output naming helpers.
 - `autoagent0/prompts/orchestrator.py` owns current scoring, intervention, and
-  planner-gate prompt builders.
+  planner-gate prompt builders for legacy methods.
+- `autoagent0/prompts/critic.py` owns the active `*_autoagent0`
+  single-candidate critique prompt.
+- `autoagent0/prompts/planner.py` owns the active `*_autoagent0`
+  revised-candidate final selection prompt.
+- `autoagent0/prompts/designer.py` owns the design-change prompt boundary for
+  future dynamic designer requests.
 - `autoagent0/core/orchestrator.py` owns current VLM output coercion and
   selection helpers.
 - `autoagent0/vlm/backends.py`, `parsing.py`, and `debug.py` own shared VLM
@@ -93,27 +100,31 @@ Existing baseline IDs and configs remain the source of truth for current runs:
 The `*_autoagent0` methods implement a bounded agentic loop:
 
 1. Generate the learned planner's default/top trajectory.
-2. Call `request_critique` using the current VLM intervention mechanism on
-   that single trajectory.
+2. Call `request_critique` using the AutoAgent0 VLM Critic prompt on that
+   single trajectory.
 3. If the critique accepts it, execute the default trajectory immediately.
 4. If the critique requests intervention, call `request_design_change` and build
    an expanded candidate pool from learned candidates plus existing
    Rule-Planner candidates.
-5. Use the existing VLM scorer to select one revised candidate from that pool.
-6. Critique the revised candidate once with the same VLM intervention mechanism.
-7. Execute the revised candidate if accepted; otherwise execute a hold fallback.
+5. Use the AutoAgent0 Planner prompt to select one revised candidate from that
+   pool.
+6. Critique the revised candidate once with the AutoAgent0 VLM Critic prompt.
+7. Execute the revised candidate if accepted. If the final critique still
+   rejects, the current runtime falls back or executes the VLM Planner-selected
+   revised candidate depending on the configured redesign-limit behavior.
 
 This first prototype is intentionally bounded. It does not keep adding more
 trajectories after the revised candidate is rejected. The current config exposes
-`max_redesign_attempts`, but the implemented loop is effectively one redesign
-attempt:
+`max_redesign_attempts = 3`, but repeated redesign iterations are not
+implemented yet; the current loop performs one expanded redesign pass and uses
+that value only for final-rejection behavior:
 
 ```yaml
 autoagent0:
   enabled: true
   mode: recovery_loop
   redesign_candidate_budget: 10
-  max_redesign_attempts: 1
+  max_redesign_attempts: 3
   fallback_mode: hold
 ```
 
@@ -124,9 +135,9 @@ available rule-based candidate rows.
 ## Phase-1 Verifier
 
 The passive verifier object still exists for the behavior-preserving path. For
-the active `*_autoagent0` prototype, critique/rejection is driven by the current
-VLM intervention mechanism rather than by a deterministic rule-based verifier.
-This is a temporary Critic implementation.
+the active `*_autoagent0` prototype, critique/rejection is driven by the
+dedicated AutoAgent0 VLM Critic prompt rather than by a deterministic
+rule-based verifier. This is a temporary visual Critic implementation.
 
 Future phases will add:
 - off-road/map checks

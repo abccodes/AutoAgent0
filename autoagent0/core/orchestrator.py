@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from autoagent0.core.schemas import CritiqueResult
+
 
 class Orchestrator:
     """Pass-through wrapper around the current VLM selector API."""
@@ -136,6 +138,71 @@ def coerce_intervention_decision(
     if reasoning is not None and not isinstance(reasoning, str):
         reasoning = str(reasoning)
     return bool(raw_flag), severity_score, corrective_action, confidence, reasoning, None
+
+
+def coerce_critique_result(parsed: object) -> CritiqueResult:
+    if not isinstance(parsed, dict):
+        return CritiqueResult(
+            accepted=False,
+            severity_score=1.0,
+            corrective_action="straight",
+            error="critique_output_invalid",
+        )
+
+    raw_accepted = parsed.get("accepted")
+    if not isinstance(raw_accepted, bool):
+        return CritiqueResult(
+            accepted=False,
+            severity_score=1.0,
+            corrective_action="straight",
+            error="critique_accepted_missing",
+            raw=dict(parsed),
+        )
+
+    try:
+        severity_score = float(parsed.get("severity_score"))
+    except Exception:
+        return CritiqueResult(
+            accepted=False,
+            severity_score=1.0,
+            corrective_action="straight",
+            error="critique_severity_score_invalid",
+            raw=dict(parsed),
+        )
+    if not (0.0 <= severity_score <= 1.0):
+        return CritiqueResult(
+            accepted=False,
+            severity_score=1.0,
+            corrective_action="straight",
+            error=f"critique_severity_score_out_of_range:{severity_score}",
+            raw=dict(parsed),
+        )
+
+    corrective_action = normalize_corrective_action(parsed.get("corrective_action")) or "straight"
+    confidence = None
+    if parsed.get("confidence") is not None:
+        try:
+            confidence = float(parsed.get("confidence"))
+        except Exception:
+            return CritiqueResult(
+                accepted=False,
+                severity_score=severity_score,
+                corrective_action=corrective_action,
+                error="critique_confidence_invalid",
+                raw=dict(parsed),
+            )
+    reasoning = parsed.get("reasoning")
+    if reasoning is not None and not isinstance(reasoning, str):
+        reasoning = str(reasoning)
+
+    return CritiqueResult(
+        accepted=bool(raw_accepted),
+        severity_score=severity_score,
+        corrective_action=corrective_action,
+        confidence=confidence,
+        reasoning=reasoning,
+        raw=dict(parsed),
+    )
 
 
 def select_from_vlm_scores(
