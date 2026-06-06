@@ -442,6 +442,7 @@ class VLMPlanSelector:
         default_selected_source: str,
         critique_reason: Optional[str] = None,
         corrective_action: Optional[str] = None,
+        stage: str = "revised",
     ) -> Dict[str, object]:
         route_instruction = resolve_route_instruction(info)
         task_target_hint = describe_task_target_hint(info)
@@ -455,10 +456,11 @@ class VLMPlanSelector:
                 "frame_index": frame_index,
                 "timestamp": timestamp,
                 "route_instruction": route_instruction,
-                "execution_mode": "autoagent0_scoring_unavailable",
+                "execution_mode": f"autoagent0_{stage}_scoring_unavailable",
                 "candidate_count": len(candidate_rows),
                 "selected_source": default_selected_source,
                 "selected_candidate_index": default_selected_index,
+                "autoagent0_stage": stage,
                 "autoagent0_tool": "select_final_actions",
                 "vlm_elapsed_sec": 0.0,
                 "scoring_invoked": False,
@@ -471,7 +473,7 @@ class VLMPlanSelector:
                 "selected_candidate_row": selected_row,
                 "selected_source": default_selected_source,
                 "selected_path_reasoning": "AutoAgent0 scorer unavailable; using default candidate.",
-                "execution_mode": "autoagent0_scoring_unavailable",
+                "execution_mode": f"autoagent0_{stage}_scoring_unavailable",
                 "vlm_candidate_index": None,
                 "vlm_confidence": None,
                 "vlm_reasoning": None,
@@ -508,7 +510,7 @@ class VLMPlanSelector:
         )
         image_paths = self._write_stage_overlays(
             frame_stem=frame_stem,
-            suffix="autoagent0_revised_candidates",
+            suffix=f"autoagent0_{stage}_candidates",
             overlays=overlays,
             camera_order=camera_order,
             temp_paths=temp_paths,
@@ -588,12 +590,13 @@ class VLMPlanSelector:
             "frame_index": frame_index,
             "timestamp": timestamp,
             "route_instruction": route_instruction,
-            "execution_mode": "autoagent0_revised_scoring",
+            "execution_mode": f"autoagent0_{stage}_scoring",
             "candidate_count": len(candidate_rows),
             "selected_source": selected_source,
             "selected_candidate_index": selected_candidate_index,
             "selected_candidate_source": selected_row.get("source"),
             "selected_proposal_index": selected_row.get("proposal_index"),
+            "autoagent0_stage": stage,
             "autoagent0_tool": "select_final_actions",
             "vlm_elapsed_sec": elapsed_sec,
             "scoring_prompt_tokens": token_usage["prompt_tokens"],
@@ -609,7 +612,7 @@ class VLMPlanSelector:
             "selected_candidate_row": selected_row,
             "selected_source": selected_source,
             "selected_path_reasoning": selected_path_reasoning,
-            "execution_mode": "autoagent0_revised_scoring",
+            "execution_mode": f"autoagent0_{stage}_scoring",
             "vlm_candidate_index": selected_candidate_index if error is None else None,
             "vlm_confidence": vlm_confidence,
             "vlm_reasoning": vlm_reasoning,
@@ -620,7 +623,7 @@ class VLMPlanSelector:
             "vlm_q_candidate_scores": vlm_q_candidate_scores,
             "vlm_q_best_candidate_index": vlm_q_best_candidate_index,
             "vlm_q_score_gap_top2": vlm_q_score_gap_top2,
-            "adaptive_replan_decision": "autoagent0_revised_scoring",
+            "adaptive_replan_decision": f"autoagent0_{stage}_scoring",
             "latency_timeline_record": timeline_record,
             "vlm_failed": error is not None,
             "scoring_invoked": True,
@@ -629,7 +632,7 @@ class VLMPlanSelector:
             "error": error,
         }
         if self.cfg.save_debug_artifacts:
-            result_path = self.debug_dir / f"{frame_stem}_autoagent0_revised_scoring.json"
+            result_path = self.debug_dir / f"{frame_stem}_autoagent0_{stage}_scoring.json"
             result_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
         else:
             for temp_path in temp_paths:

@@ -19,5 +19,5 @@ Corrective action: "{corrective_action or 'straight'}"
 Candidate budget: {int(candidate_budget)}
 
 Request a revised candidate set from the available learned and rule-based
-trajectory designers. Keep the request short-horizon and corrective.
+trajectory designers.
 """.strip()

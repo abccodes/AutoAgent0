@@ -1,45 +1,45 @@
 # AutoAgent0 Architecture
 
-AutoAgent0 is the agentic driving layer being added inside this HUGSIM fork. It
-now has two runtime uses:
-- a behavior-preserving structure around the existing HUGSIM planner/VLM paths,
-- an opt-in recovery-loop prototype for `rap_autoagent0` and
-  `drivor_autoagent0`.
-
-The existing baseline methods keep their current semantics. The recovery-loop
-prototype is a separate method family and should not be treated as a replacement
-for Method A/B ablation baselines.
-
-## Current Boundaries
-
-- `autoagent0/core/` defines the reusable agent contracts: scene context,
-  trajectory candidates, orchestrator decisions, verifier results, memory, and
-  debug traces.
+- `autoagent0/core/` defines reusable agent contracts, candidate/payload
+  utilities, the SceneSmith-style runtime facade, the active orchestrator
+  helpers, passive verifier scaffolding, memory placeholder, and debug traces.
 - `autoagent0/experts/` names RAP, DrivoR, and rule-based planners as expert
   backends. The actual model/client code remains in `planners/`.
-- `autoagent0/adapters/hugsim/` contains HUGSIM conversion, runtime, video,
-  demo-task, output/result, and visualization helpers. HUGSIM is the current
-  evaluation backend, not the long-term core abstraction.
+- `autoagent0/adapters/hugsim/` contains HUGSIM conversion, action/runtime,
+  video, demo-task, output/result, geometry, IO, and visualization helpers.
+  HUGSIM is the current evaluation backend, not the long-term core abstraction.
 - `autoagent0/prompts/` contains legacy prompt builders for current
   intervention/scoring/planner-gate paths plus role-specific Planner, Designer,
   and Critic prompt builders for the active `*_autoagent0` path.
 - `autoagent0/vlm/` contains shared VLM backend, parsing, and debug utilities
-  used by the current selector paths.
+  used by the current selector paths and AutoAgent0 role prompts.
 
-The first shared-code migration is intentionally narrow:
 - `autoagent0/core/candidates.py` owns candidate summarization, candidate-row
   formatting, path-length helpers, and planner-gate candidate filtering.
+- `autoagent0/core/schemas.py` owns the common dataclasses for scene context,
+  trajectory candidates, design batches, orchestrator decisions, critique
+  results, verifier results, and step traces.
+- `autoagent0/core/designer.py` owns behavior-preserving candidate-batch
+  normalization for learned and rule-based designer outputs.
 - `autoagent0/core/payloads.py` owns normalized plan payload construction used
   by RAP, DrivoR, and rule-based client adapters.
 - `autoagent0/core/planner_flow.py` owns shared planner-flow extraction helpers
   for method A/B and base-policy paths.
 - `autoagent0/core/runtime.py` owns the SceneSmith-style runtime facade. It
   keeps the behavior-preserving Method A/B/base-policy flow and also exposes
-  the opt-in one-redesign AutoAgent0 recovery loop.
+  the opt-in bounded AutoAgent0 recovery loop.
 - `autoagent0/core/config.py` owns the `AUTOAGENT0_*` config/env bridge used by
   RAP and DrivoR clients.
+- `autoagent0/core/orchestrator.py` owns VLM decision coercion, Critic/Planner
+  parsing helpers, design-change request construction, expanded-design
+  assembly, final recovery action selection, and tool-call trace records.
+- `autoagent0/core/trace.py` owns debug-only `agent_trace` construction.
+- `autoagent0/core/verifier.py` owns the passive phase-1 verifier stub.
+- `autoagent0/core/memory.py` is a placeholder for future reusable recovery
+  memory and currently has no active runtime behavior.
 - `autoagent0/adapters/hugsim/context.py` owns current route/task/camera/ego
   context extraction helpers.
+- `autoagent0/adapters/hugsim/action.py` owns HUGSIM control/action helpers.
 - `autoagent0/adapters/hugsim/defaults.py`, `geometry.py`, `io.py`, and
   `overlays.py` own HUGSIM default-trajectory, geometry, filesystem/image, and
   overlay helpers shared across planner clients.
@@ -56,10 +56,12 @@ The first shared-code migration is intentionally narrow:
   revised-candidate final selection prompt.
 - `autoagent0/prompts/designer.py` owns the design-change prompt boundary for
   future dynamic designer requests.
-- `autoagent0/core/orchestrator.py` owns current VLM output coercion and
-  selection helpers.
+- `autoagent0/prompts/verifier.py` is reserved for future verifier-agent prompt
+  work and is not active in the current recovery loop.
 - `autoagent0/vlm/backends.py`, `parsing.py`, and `debug.py` own shared VLM
   model-call, JSON parsing, and debug artifact helpers.
+- `autoagent0/experts/learned.py` names the learned-expert boundary for RAP and
+  DrivoR without moving their model clients out of `planners/`.
 - `autoagent0/experts/rule_based.py` is the normalized wrapper around the
   existing Rule-Planner provider.
 
@@ -106,18 +108,16 @@ The `*_autoagent0` methods implement a bounded agentic loop:
 4. If the critique requests intervention, call `request_design_change` and build
    an expanded candidate pool from learned candidates plus existing
    Rule-Planner candidates.
-5. Use the AutoAgent0 Planner prompt to select one revised candidate from that
-   pool.
-6. Critique the revised candidate once with the AutoAgent0 VLM Critic prompt.
-7. Execute the revised candidate if accepted. If the final critique still
-   rejects, the current runtime falls back or executes the VLM Planner-selected
-   revised candidate depending on the configured redesign-limit behavior.
+5. For up to `max_redesign_attempts`, use the AutoAgent0 Planner prompt to
+   select one revised candidate from that pool, then critique it with the
+   AutoAgent0 VLM Critic prompt.
+6. Execute the first revised candidate accepted by the Critic.
+7. If all redesign attempts are rejected, execute the last VLM Planner-selected
+   revised candidate rather than repeatedly holding.
 
-This first prototype is intentionally bounded. It does not keep adding more
-trajectories after the revised candidate is rejected. The current config exposes
-`max_redesign_attempts = 3`, but repeated redesign iterations are not
-implemented yet; the current loop performs one expanded redesign pass and uses
-that value only for final-rejection behavior:
+This first prototype is intentionally bounded. It does not dynamically add new
+trajectories between attempts yet; repeated attempts reuse the same expanded
+learned + rule-based candidate pool:
 
 ```yaml
 autoagent0:
@@ -159,6 +159,34 @@ Frame-level VLM debug JSON now includes `agent_trace`. This records:
 
 The trace is diagnostic only. It is not used by `eval.json` scoring and should
 not affect plan payloads or selected trajectories.
+
+## Video Outputs
+
+`closed_loop.py` writes two standard videos for completed runs:
+
+- `front.mp4` is the front-camera debug video. It draws the projected reference
+  line and candidate trajectories, then adds a compact text panel with run
+  name, frame, route, selected trajectory, and method-specific decision fields.
+- `video.mp4` is the multiview trajectory video. It keeps trajectory
+  visualization but does not include the front-video decision/reasoning text
+  panel.
+
+For `rap_autoagent0` and `drivor_autoagent0`, `front.mp4` now displays
+AutoAgent0-specific state when available:
+
+- AutoAgent0 mode and phase
+- selected decision/source and selected trajectory rank
+- redesign attempt count and max attempt count
+- learned/rule-based/total revised candidate counts
+- default and final Critic accept/reject status, severity score, corrective
+  action, and confidence
+- fallback reason when present
+- short Critic/Planner reasoning
+
+If a run was launched before the overlay-support code was loaded, stale or
+older `front.mp4` files will not show these AutoAgent0 fields even if the VLM
+debug JSON contains them. Check file mtimes against the Slurm/output log before
+trusting a video artifact.
 
 ## Verification when making large changes
 

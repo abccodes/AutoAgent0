@@ -1,8 +1,59 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from autoagent0.core.schemas import CritiqueResult
+from autoagent0.core.schemas import CritiqueResult, DesignChangeRequest
+
+
+PHASE_DEFAULT_ACCEPTED = "default_accepted"
+PHASE_DEFAULT_REJECTED = "default_rejected"
+PHASE_REDESIGN_REJECTED_RETRY = "redesign_rejected_retry"
+PHASE_REDESIGN_ACCEPTED = "redesign_accepted"
+PHASE_REDESIGN_SELECTED_AT_LIMIT = "redesign_selected_at_critic_limit"
+PHASE_FALLBACK_AFTER_REVISED_REJECTED = "fallback_after_revised_rejected"
+
+
+@dataclass(frozen=True)
+class ExpandedDesign:
+    """Expanded candidate pool requested after an AutoAgent0 critique rejection."""
+
+    rows: List[Dict[str, object]]
+    learned_budget: int
+
+
+@dataclass(frozen=True)
+class FinalRecoveryDecision:
+    """Orchestrator decision after the revised candidate critique."""
+
+    final_rejected: bool
+    continue_redesign: bool
+    use_fallback: bool
+    phase: str
+    fallback_reason: Optional[str]
+
+
+class OrchestratorToolLog:
+    """Per-frame SceneSmith-style tool-call trace recorder."""
+
+    def __init__(self, *, runtime_name: str):
+        self.runtime_name = str(runtime_name)
+        self._tool_calls: List[Dict[str, object]] = []
+
+    def reset(self) -> None:
+        self._tool_calls = []
+
+    def record(self, name: str, **metadata: object) -> None:
+        self._tool_calls.append(
+            {
+                "name": name,
+                "runtime": self.runtime_name,
+                **metadata,
+            }
+        )
+
+    def to_debug_list(self) -> List[Dict[str, object]]:
+        return list(self._tool_calls)
 
 
 class Orchestrator:
@@ -30,6 +81,95 @@ class Orchestrator:
             learned_candidate_rows=learned_candidate_rows,
             rule_based_candidate_rows=rule_based_candidate_rows,
         )
+
+
+def critique_requests_redesign(critique_result: Dict[str, object]) -> bool:
+    """Return whether the active Critic requested redesign.
+
+    Critic transport/parse errors intentionally preserve current behavior:
+    errors do not trigger redesign because the old path treats them as a
+    non-blocking critique failure.
+    """
+
+    should_redesign = critique_result.get("autoagent0_critique_rejected") is True
+    critique_error = critique_result.get("autoagent0_critique_error") or critique_result.get("error")
+    if critique_error is not None:
+        return False
+    return bool(should_redesign)
+
+
+def build_design_change_request(
+    critique_result: Dict[str, object],
+    *,
+    redesign_candidate_budget: int,
+    has_rule_based_candidates: bool,
+) -> DesignChangeRequest:
+    corrective_action = critique_result.get("autoagent0_critique_corrective_action")
+    rejection_reason = critique_result.get("autoagent0_critique_reasoning") or "vlm_critic_requested_redesign"
+    return DesignChangeRequest(
+        reason=str(rejection_reason),
+        corrective_action=None if corrective_action is None else str(corrective_action),
+        candidate_budget=max(1, int(redesign_candidate_budget)),
+        include_learned=True,
+        include_rule_based=bool(has_rule_based_candidates),
+    )
+
+
+def build_expanded_design(
+    *,
+    learned_candidate_rows: Sequence[Dict[str, object]],
+    rule_based_candidate_rows: Sequence[Dict[str, object]],
+    default_row: Dict[str, object],
+    design_change_request: DesignChangeRequest,
+) -> ExpandedDesign:
+    learned_budget = max(1, int(design_change_request.candidate_budget) - len(rule_based_candidate_rows))
+    expanded_rows = list(learned_candidate_rows[:learned_budget]) + list(rule_based_candidate_rows)
+    if not expanded_rows:
+        expanded_rows = [default_row]
+    return ExpandedDesign(rows=expanded_rows, learned_budget=learned_budget)
+
+
+def decide_final_recovery_action(
+    final_critique: Dict[str, object],
+    *,
+    attempt_index: int,
+    max_redesign_attempts: int,
+) -> FinalRecoveryDecision:
+    final_rejected = final_critique.get("autoagent0_critique_rejected") is True
+    final_critique_error = final_critique.get("autoagent0_critique_error") or final_critique.get("error")
+    if final_critique_error is not None:
+        final_rejected = False
+
+    reached_redesign_limit = int(attempt_index) >= max(1, int(max_redesign_attempts))
+    if final_rejected and not reached_redesign_limit:
+        fallback_reason = (
+            final_critique.get("autoagent0_critique_reasoning")
+            or "final_critic_rejected_revised_candidate"
+        )
+        return FinalRecoveryDecision(
+            final_rejected=True,
+            continue_redesign=True,
+            use_fallback=False,
+            phase=PHASE_REDESIGN_REJECTED_RETRY,
+            fallback_reason=str(fallback_reason),
+        )
+
+    if final_rejected:
+        return FinalRecoveryDecision(
+            final_rejected=True,
+            continue_redesign=False,
+            use_fallback=False,
+            phase=PHASE_REDESIGN_SELECTED_AT_LIMIT,
+            fallback_reason="final_critic_rejected_but_max_redesign_attempts_reached_use_vlm_scorer_selection",
+        )
+
+    return FinalRecoveryDecision(
+        final_rejected=False,
+        continue_redesign=False,
+        use_fallback=False,
+        phase=PHASE_REDESIGN_ACCEPTED,
+        fallback_reason=None,
+    )
 
 
 def normalize_corrective_action(value: object) -> Optional[str]:

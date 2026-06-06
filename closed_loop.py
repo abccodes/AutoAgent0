@@ -380,6 +380,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False, planne
     current_q_best_current_score = None
     current_q_score_gap = None
     current_q_invoked_vlm = None
+    current_autoagent0_debug = {}
     current_planner_decision_step = None
     current_planner_decision_frame_index = None
     current_planner_decision_timestamp = None
@@ -485,6 +486,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False, planne
             current_q_best_current_score = None
             current_q_score_gap = None
             current_q_invoked_vlm = None
+            current_autoagent0_debug = {}
             current_planner_decision_step = cnt
             current_planner_decision_timestamp = current_info.get('timestamp')
             if isinstance(plan_payload, dict):
@@ -517,6 +519,20 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False, planne
                 current_q_best_current_score = plan_payload.get('q_best_current_score')
                 current_q_score_gap = plan_payload.get('q_score_gap')
                 current_q_invoked_vlm = plan_payload.get('q_invoked_vlm')
+                current_autoagent0_debug = {
+                    key: value
+                    for key, value in plan_payload.items()
+                    if (
+                        key.startswith('autoagent0_')
+                        or key in {
+                            'agent_trace',
+                            'selected_candidate_index',
+                            'selected_candidate_source',
+                            'selected_path_reasoning',
+                            'selected_proposal_index',
+                        }
+                    )
+                }
                 if isinstance(current_latency_timeline_record, dict):
                     current_planner_decision_frame_index = current_latency_timeline_record.get('frame_index')
                 else:
@@ -623,6 +639,7 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False, planne
                     'overlay_plan_origin_pose': None if overlay_plan_origin_pose is None else (
                         np.asarray(overlay_plan_origin_pose, dtype=np.float32).tolist()
                     ),
+                    **current_autoagent0_debug,
                 },
                 'collision': current_info.get('collision', False),
                 'rc': current_rc

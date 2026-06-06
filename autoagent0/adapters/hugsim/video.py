@@ -134,6 +134,16 @@ def _resolve_selected_traj_text(frame_debug: dict) -> str | None:
     if not candidate_sources:
         candidate_sources = frame_debug.get("candidate_pool_sources")
     candidate_indices = frame_debug.get("candidate_pool_proposal_indices") or []
+    for rank_key in ("selected_candidate_index", "vlm_selected_idx"):
+        rank_value = frame_debug.get(rank_key)
+        if rank_value is None:
+            continue
+        try:
+            rank = int(rank_value)
+        except (TypeError, ValueError):
+            continue
+        if candidate_sources and 0 <= rank < len(candidate_sources):
+            return f"#{rank}"
     selected_source = frame_debug.get("selected_source")
     selected_idx = frame_debug.get("selected_idx")
     selected_kind = _normalize_overlay_source(selected_source)
@@ -154,6 +164,115 @@ def _resolve_selected_traj_text(frame_debug: dict) -> str | None:
             continue
         return f"#{rank}"
     return None
+
+
+def _format_critic_state(critique: object) -> str | None:
+    if not isinstance(critique, dict):
+        return None
+    accepted = critique.get("autoagent0_critique_accepted")
+    rejected = critique.get("autoagent0_critique_rejected")
+    if accepted is True:
+        state = "accepted"
+    elif rejected is True or accepted is False:
+        state = "rejected"
+    else:
+        state = "unknown"
+    score = critique.get("autoagent0_critique_severity_score")
+    action = critique.get("autoagent0_critique_corrective_action")
+    confidence = critique.get("autoagent0_critique_confidence")
+    parts = [state]
+    if score is not None:
+        parts.append(f"score={_format_overlay_value(score)}")
+    if action is not None:
+        parts.append(f"action={_format_overlay_value(action)}")
+    if confidence is not None:
+        parts.append(f"conf={_format_overlay_value(confidence)}")
+    return " ".join(parts)
+
+
+def _first_autoagent0_reasoning(frame_debug: dict) -> object:
+    final_critique = frame_debug.get("autoagent0_final_critique")
+    if isinstance(final_critique, dict) and final_critique.get("autoagent0_critique_reasoning"):
+        return final_critique.get("autoagent0_critique_reasoning")
+    default_critique = frame_debug.get("autoagent0_default_critique")
+    if isinstance(default_critique, dict) and default_critique.get("autoagent0_critique_reasoning"):
+        return default_critique.get("autoagent0_critique_reasoning")
+    attempts = frame_debug.get("autoagent0_redesign_attempts")
+    if isinstance(attempts, list):
+        for attempt in reversed(attempts):
+            if isinstance(attempt, dict) and attempt.get("critique_reasoning"):
+                return attempt.get("critique_reasoning")
+    return (
+        frame_debug.get("selected_path_reasoning")
+        or frame_debug.get("vlm_reasoning")
+        or frame_debug.get("intervention_reasoning")
+    )
+
+
+def _append_autoagent0_overlay_lines(
+    lines: list[str],
+    frame_debug: dict,
+    font: int,
+    font_scale: float,
+    thickness: int,
+    max_text_width: int,
+) -> None:
+    phase = frame_debug.get("autoagent0_phase")
+    mode = frame_debug.get("autoagent0_mode")
+    if mode is not None:
+        lines.append(f"autoagent0 mode: {_format_overlay_value(mode)}")
+    if phase is not None:
+        lines.append(f"autoagent0 phase: {_format_overlay_value(phase)}")
+
+    selected_source = frame_debug.get("selected_source")
+    selected_candidate_source = frame_debug.get("selected_candidate_source")
+    if selected_source is not None or selected_candidate_source is not None:
+        lines.append(
+            "decision: "
+            f"{_format_overlay_value(selected_source)}"
+            f" / {_format_overlay_value(selected_candidate_source)}"
+        )
+
+    attempt_count = frame_debug.get("autoagent0_redesign_attempt_count")
+    max_attempts = frame_debug.get("autoagent0_max_redesign_attempts")
+    if attempt_count is not None or max_attempts is not None:
+        lines.append(
+            "redesign: "
+            f"{_format_overlay_value(attempt_count)}"
+            f"/{_format_overlay_value(max_attempts)}"
+        )
+
+    total_count = frame_debug.get("autoagent0_revised_candidate_count")
+    learned_count = frame_debug.get("autoagent0_revised_learned_candidate_count")
+    rule_count = frame_debug.get("autoagent0_revised_rule_based_candidate_count")
+    if total_count is not None or learned_count is not None or rule_count is not None:
+        lines.append(
+            "candidates: "
+            f"learned={_format_overlay_value(learned_count)} "
+            f"rule={_format_overlay_value(rule_count)} "
+            f"total={_format_overlay_value(total_count)}"
+        )
+
+    default_critic = _format_critic_state(frame_debug.get("autoagent0_default_critique"))
+    if default_critic is not None:
+        lines.append(f"default critic: {default_critic}")
+    final_critic = _format_critic_state(frame_debug.get("autoagent0_final_critique"))
+    if final_critic is not None:
+        lines.append(f"final critic: {final_critic}")
+
+    fallback_reason = frame_debug.get("autoagent0_fallback_reason")
+    if fallback_reason is not None:
+        lines.append(f"fallback: {_format_overlay_value(fallback_reason)}")
+
+    _append_wrapped_text(
+        lines,
+        "reasoning",
+        _first_autoagent0_reasoning(frame_debug),
+        font,
+        font_scale,
+        thickness,
+        max_text_width,
+    )
 
 
 def _build_front_overlay_lines(frame_idx: int, frame_debug: dict, run_label: str, max_text_width: int) -> list[str]:
@@ -187,6 +306,12 @@ def _build_front_overlay_lines(frame_idx: int, frame_debug: dict, run_label: str
     thickness = 1
     uses_vlm = ("vlm" in run_label) or (frame_debug.get("vlm_reasoning") is not None)
     uses_intervention = "intervention" in run_label
+    uses_autoagent0 = (
+        "autoagent0" in run_label
+        or frame_debug.get("autoagent0_mode") is not None
+        or frame_debug.get("autoagent0_phase") is not None
+        or frame_debug.get("agent_trace") is not None
+    )
     planner_gate_selected = frame_debug.get("planner_gate_selected_planner")
     planner_gate_confidence = frame_debug.get("planner_gate_confidence")
     planner_gate_reasoning = frame_debug.get("planner_gate_reasoning")
@@ -200,7 +325,16 @@ def _build_front_overlay_lines(frame_idx: int, frame_debug: dict, run_label: str
         or (isinstance(execution_mode, str) and execution_mode.startswith("planner_gate_"))
     )
 
-    if uses_intervention:
+    if uses_autoagent0:
+        _append_autoagent0_overlay_lines(
+            lines,
+            frame_debug,
+            font,
+            font_scale,
+            thickness,
+            max_text_width,
+        )
+    elif uses_intervention:
         should_intervene = latency_record.get("intervention_should_intervene")
         lines.append(f"intervened: {_format_overlay_value(should_intervene)}")
         severity_score = latency_record.get("intervention_severity_score")
