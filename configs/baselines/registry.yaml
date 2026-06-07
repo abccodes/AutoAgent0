@@ -1,0 +1,183 @@
+roots:
+  canonical: /bigdata/aidan/outputs/benchmark/out/baselines
+  archive: /bigdata/aidan/outputs/benchmark/out/archive
+  debug: /bigdata/aidan/outputs/benchmark/out/debug
+
+baselines:
+  rap_vlm:
+    planner_name: rap_vlm
+    planner_path: configs/planners/basepolicy/rap_vlm_0428.yaml
+    method_family: solo_learned
+    run_variant: rap-base
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy, extended]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy, extended]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+  drivor_vlm:
+    planner_name: drivor_vlm
+    planner_path: configs/planners/basepolicy/drivor_vlm_0428.yaml
+    method_family: solo_learned
+    run_variant: drivor-base
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy, extended]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy, extended]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+  rap_intervention_4cam:
+    planner_name: rap_vlm
+    planner_path: configs/planners/vlm_intervention/rap_vlm_intervention_4cam_0428.yaml
+    method_family: vlm_intervention
+    run_variant: qwen3-vl-8b-instruct
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+  drivor_intervention_4cam:
+    planner_name: drivor_vlm
+    planner_path: configs/planners/vlm_intervention/drivor_vlm_intervention_4cam_0428.yaml
+    method_family: vlm_intervention
+    run_variant: qwen3-vl-8b-instruct
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+  rule_based:
+    planner_name: rule_based
+    planner_path: configs/planners/rule_based/rule_based_local_aidan.yaml
+    method_family: rule_based
+    run_variant: rule-based-local-aidan
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+  rap_impl_a:
+    planner_name: rap_vlm
+    planner_path: configs/planners/choice_a_rule_merge/rap_vlm_intervention_4cam_rule_merge_0522.yaml
+    method_family: choice_a_rule_merge
+    run_variant: qwen3-vl-8b-instruct
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+  drivor_impl_a:
+    planner_name: drivor_vlm
+    planner_path: configs/planners/choice_a_rule_merge/drivor_vlm_intervention_4cam_rule_merge_0522.yaml
+    method_family: choice_a_rule_merge
+    run_variant: drivor-rule-merge
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+  rap_impl_b:
+    planner_name: rap_vlm
+    planner_path: configs/planners/choice_b_rule_gate/rap_vlm_intervention_4cam_rule_gate_0522.yaml
+    method_family: choice_b_rule_gate
+    run_variant: qwen3-vl-8b-instruct
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+  drivor_impl_b:
+    planner_name: drivor_vlm
+    planner_path: configs/planners/choice_b_rule_gate/drivor_vlm_intervention_4cam_rule_gate_0522.yaml
+    method_family: choice_b_rule_gate
+    run_variant: drivor-rule-gate
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+  rap_autoagent0:
+    planner_name: rap_vlm
+    planner_path: configs/planners/autoagent0/rap_autoagent0_recovery_loop_0605.yaml
+    method_family: autoagent0_recovery_loop
+    run_variant: qwen3-vl-8b-instruct
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+  drivor_autoagent0:
+    planner_name: drivor_vlm
+    planner_path: configs/planners/autoagent0/drivor_autoagent0_recovery_loop_0605.yaml
+    method_family: autoagent0_recovery_loop
+    run_variant: qwen3-vl-8b-instruct
+    datasets:
+      nuscenes:
+        suites: [full]
+        base_path: configs/sim/nuscenes_base_local_0522_full.yaml
+      waymo:
+        suites: [3easy]
+        base_path: configs/sim/waymo_base_local.yaml
+      kitti360:
+        suites: [3easy]
+        base_path: configs/sim/kitti360_base_local.yaml
+
+historical_roots: []

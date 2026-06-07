@@ -460,6 +460,15 @@ class ScoreCalculator:
 
         print(f"current exp has {len(self.data['frames'])} frames")
         if len(self.data['frames']) == 0:
+            #if we continue to get errors due to no frames, fall back to default of 0 score
+            # No frames: return a default, well-formed score tuple so callers
+            # don't receive None and attempt to index into it.
+            # averages = {'nc': 0.0, 'dac': 0.0, 'ttc': 0.0, 'c': 0.0, 'pdms': 0.0}
+            # mean_score = 0.0
+            # route_completion = 0.0
+            # driving_score = 0.0
+            # score_list = {}
+            # return mean_score, route_completion, driving_score, averages, score_list
             return None
 
         score_list = {}

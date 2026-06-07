@@ -1,0 +1,55 @@
+drivor:
+  output_suffix: drivor_intervention_vlm_4_cam_rule_merge_v2
+  launch_path: ./planners/drivor/launch.sh
+  repo_root: /bigdata/aidan/DrivoR
+  checkpoint: /bigdata/aidan/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
+  dino: /bigdata/aidan/DrivoR/weights/vit_small_patch14_reg4_dinov2.lvd142m
+  python_bin: /bigdata/aidan/.home/envs/drivor/bin/python3.8
+  config: /bigdata/aidan/DrivoR/navsim/planning/script/config/common/agent/drivoR.yaml
+
+  device: cuda
+  image_scale: 0.4
+
+  vlm:
+    enabled: true
+    intervention_enabled: true
+    camera_mode: front_only
+    intervention_camera_mode: multiview
+    scoring_camera_mode: front_only
+    backend: local_transformers_subprocess
+    model_id: Qwen/Qwen3-VL-8B-Instruct
+    output_model_slug: qwen3-vl-8b-instruct
+    device: auto
+    python_bin: /bigdata/aidan/.home/envs/vlm/bin/python
+    max_new_tokens: 300
+    intervention_max_new_tokens: 120
+    candidate_limit: 10
+    timeout_sec: 180.0
+    intervention_timeout_sec: 180.0
+    save_debug_artifacts: true
+    debug_dir_name: vlm_debug
+    carry_previous_enabled: true
+    carry_previous_min_path_m: 0.5
+    carry_previous_min_points: 2
+    adaptive_replan_mode: log_only
+    latency_tracking_mode: full_timeline
+    q_enabled: true
+    q_switch_margin: 0.05
+    q_weight_rap_score: 0.55
+    q_weight_progress: 0.30
+    q_weight_offcenter: 0.10
+    q_weight_curvature: 0.08
+    q_weight_shortplan: 0.18
+    q_carry_score_decay: 0.0
+    display_default_trajectories: false
+    include_default_candidates: false
+
+  rule_based_merge:
+    enabled: true
+    repo_root: /bigdata/aidan/HUGSIM/.external/Rule-Planner
+    python_bin: /bigdata/aidan/.home/envs/drivor/bin/python3.8
+    config: /bigdata/aidan/HUGSIM/.external/Rule-Planner/config_example.yaml
+    device: cpu
+    topk: 3
+    include_privileged_info: true
+    source_name: rule_based

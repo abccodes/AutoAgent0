@@ -89,7 +89,7 @@ class HUGSimEnv(gymnasium.Env):
         if cfg.scenario.load_HD_map:
             self.planner.update_agent_route()
         
-        self.cam_params, cam_align, self.cam_rect = load_camera_cfg(cfg.camera)
+        self.cam_params, cam_align, self.cam_rect = load_camera_cfg(cfg.camera, cfg.model_path)
         
         self.ego_verts = np.array([[0.5, 0, 0.5], [0.5, 0, -0.5], [0.5, 1.0,  0.5], [0.5, 1.0, -0.5],
                     [-0.5, 0, -0.5], [-0.5, 0, 0.5], [-0.5, 1.0, -0.5], [-0.5, 1.0, 0.5]])
@@ -277,7 +277,8 @@ class HUGSimEnv(gymnasium.Env):
         self.timestamp += self.dt
         if self.planner is not None:
             self.render_kwargs['planning'] = self.planner.plan_traj(self.timestamp, self.ego_state)
-        steer_rate, acc = action['steer_rate'], action['acc']
+        steer_rate = float(np.clip(action['steer_rate'], self.kinematic['min_steer'], self.kinematic['max_steer']))
+        acc = float(np.clip(action['acc'], self.kinematic['min_acc'], self.kinematic['max_acc']))
         self.last_steer_rate, self.last_accel = steer_rate, acc
         L = self.kinematic['Lr'] + self.kinematic['Lf']
         self.velo += acc * self.dt

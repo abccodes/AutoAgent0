@@ -1,0 +1,264 @@
+validated_runs:
+  - baseline_id: rule_based
+    dataset: waymo
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rule_based/waymo/3easy/rule-based-local-aidan
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/waymo_rule_based
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Standalone rule-based planner completed on the shared Waymo assets with working end-to-end dataset support.
+
+  - baseline_id: rule_based
+    dataset: kitti360
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rule_based/kitti360/3easy/rule-based-local-aidan
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/kitti360_rule_based
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Standalone rule-based planner completed on the shared KITTI-360 assets with working end-to-end dataset support.
+
+  - baseline_id: drivor_intervention_4cam
+    dataset: waymo
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/drivor_intervention_4cam/waymo/3easy/qwen3-vl-8b-instruct
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/qwen3-vl-8b-instruct_waymo_drivor_intervention_vlm_4_cam
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Valid intervention baseline after the worker crash fix; gate false keeps base policy and gate true invokes scoring.
+
+  - baseline_id: rap_intervention_4cam
+    dataset: waymo
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rap_intervention_4cam/waymo/3easy/qwen3-vl-8b-instruct
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/qwen3-vl-8b-instruct_waymo_rap_intervention_vlm_4_cam
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Valid intervention baseline after the worker crash fix; gate false keeps base policy and gate true invokes scoring.
+
+  - baseline_id: drivor_intervention_4cam
+    dataset: kitti360
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/drivor_intervention_4cam/kitti360/3easy/qwen3-vl-8b-instruct
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/qwen3-vl-8b-instruct_kitti360_drivor_intervention_vlm_4_cam
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Valid intervention baseline after the worker crash fix; gate false keeps base policy and gate true invokes scoring.
+
+  - baseline_id: rap_intervention_4cam
+    dataset: kitti360
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rap_intervention_4cam/kitti360/3easy/qwen3-vl-8b-instruct
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/qwen3-vl-8b-instruct_kitti360_rap_intervention_vlm_4_cam
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Valid intervention baseline after the worker crash fix; gate false keeps base policy and gate true invokes scoring.
+
+  - baseline_id: drivor_impl_a
+    dataset: waymo
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/drivor_impl_a/waymo/3easy/drivor-rule-merge
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/waymo_/drivor_impl_a
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Choice A validated after restoring conditional intervention semantics and increasing intervention token budget.
+
+  - baseline_id: rap_impl_a
+    dataset: waymo
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rap_impl_a/waymo/3easy/qwen3-vl-8b-instruct
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/waymo_/rap_impl_a
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Choice A validated after restoring conditional intervention semantics and increasing intervention token budget.
+
+  - baseline_id: drivor_impl_a
+    dataset: kitti360
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/drivor_impl_a/kitti360/3easy/drivor-rule-merge
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/kitti360_/drivor_impl_a
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Choice A validated after restoring conditional intervention semantics and increasing intervention token budget.
+
+  - baseline_id: rap_impl_a
+    dataset: kitti360
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rap_impl_a/kitti360/3easy/qwen3-vl-8b-instruct
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/kitti360_/rap_impl_a
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Choice A validated after restoring conditional intervention semantics and increasing intervention token budget.
+
+  - baseline_id: drivor_impl_b
+    dataset: waymo
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/drivor_impl_b/waymo/3easy/drivor-rule-gate
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/waymo_/drivor_impl_b
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Choice B validated as an always-on planner gate with no second-stage scorer.
+
+  - baseline_id: rap_impl_b
+    dataset: waymo
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rap_impl_b/waymo/3easy/qwen3-vl-8b-instruct
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/waymo_/rap_impl_b
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Choice B validated as an always-on planner gate with no second-stage scorer.
+
+  - baseline_id: drivor_impl_b
+    dataset: kitti360
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/drivor_impl_b/kitti360/3easy/drivor-rule-gate
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/kitti360_/drivor_impl_b
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Choice B validated as an always-on planner gate with no second-stage scorer.
+
+  - baseline_id: rap_impl_b
+    dataset: kitti360
+    suite: 3easy
+    status: validated_canonical
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rap_impl_b/kitti360/3easy/qwen3-vl-8b-instruct
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/kitti360_/rap_impl_b
+    scene_count_expected: 3
+    scene_count_completed: 3
+    last_validated_date: 2026-05-28
+    correctness_note: Choice B validated as an always-on planner gate with no second-stage scorer.
+
+  - baseline_id: drivor_vlm
+    dataset: waymo
+    suite: extended
+    status: validated_historical_base_policy
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/drivor_vlm/waymo/extended/drivor-base-policy-legacy
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/05_26_26/drivor_waymo_base_policy
+    scene_count_completed: 107
+    last_validated_date: 2026-05-28
+    correctness_note: Valid historical base-policy baseline. The intervention gate executed but always fell back before scoring, so this should be treated as a base-policy run.
+
+  - baseline_id: drivor_vlm
+    dataset: kitti360
+    suite: extended
+    status: validated_historical_base_policy
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/drivor_vlm/kitti360/extended/drivor-base-policy-legacy
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/05_26_26/drivor_kitti_base_policy
+    scene_count_completed: 113
+    last_validated_date: 2026-05-28
+    correctness_note: Valid historical base-policy baseline. The intervention gate executed but always fell back before scoring, so this should be treated as a base-policy run.
+
+  - baseline_id: rap_vlm
+    dataset: waymo
+    suite: extended
+    status: validated_historical_base_policy
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rap_vlm/waymo/extended/rap-base-policy-legacy
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/05_26_26/rap_waymo_base_policy
+    scene_count_completed: 107
+    last_validated_date: 2026-05-28
+    correctness_note: Valid historical base-policy baseline. The intervention gate executed but always fell back before scoring, so this should be treated as a base-policy run.
+
+  - baseline_id: rap_vlm
+    dataset: kitti360
+    suite: extended
+    status: validated_historical_base_policy
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rap_vlm/kitti360/extended/rap-base-policy-legacy
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/05_26_26/rap_kitti_base_policy
+    scene_count_completed: 113
+    last_validated_date: 2026-05-28
+    correctness_note: Valid historical base-policy baseline. The intervention gate executed but always fell back before scoring, so this should be treated as a base-policy run.
+
+  - baseline_id: rap_vlm
+    dataset: nuscenes
+    suite: full
+    status: validated_historical_full
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rap_vlm/nuscenes/full/rap-base-legacy
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/nusc_rap
+    scene_count_expected: 95
+    scene_count_completed: 95
+    last_validated_date: 2026-05-28
+    correctness_note: Historical full NuScenes RAP learned-planner baseline preserved in canonical layout.
+
+  - baseline_id: rap_vlm
+    dataset: nuscenes
+    suite: full
+    status: validated_historical_full
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rap_vlm/nuscenes/full/qwen3-vl-8b-instruct-legacy
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/qwen3-vl-8b-instruct_nusc_rap_vlm
+    scene_count_expected: 95
+    scene_count_completed: 95
+    last_validated_date: 2026-05-28
+    correctness_note: Historical full NuScenes RAP VLM baseline preserved in canonical layout.
+
+  - baseline_id: rap_intervention_4cam
+    dataset: nuscenes
+    suite: full
+    status: validated_historical_full
+    output_root: /bigdata/aidan/outputs/benchmark/out/baselines/rap_intervention_4cam/nuscenes/full/qwen3-vl-8b-instruct-front-only-legacy
+    legacy_output_root: /bigdata/aidan/outputs/benchmark/out/qwen3-vl-8b-instruct_nusc_rap_vlm_intervention
+    scene_count_expected: 94
+    scene_count_completed: 94
+    last_validated_date: 2026-05-28
+    correctness_note: Historical full NuScenes RAP intervention baseline preserved in canonical layout. This is a legacy front-only intervention variant, not the current 4-camera canonical setup.
+
+pending_baselines:
+  - baseline_id: drivor_impl_a
+    dataset: nuscenes
+    suite: full
+    status: pending_run
+    correctness_note: Canonical current-semantics NuScenes full baseline has not been rerun yet through the new baseline structure.
+
+  - baseline_id: rap_impl_a
+    dataset: nuscenes
+    suite: full
+    status: pending_run
+    correctness_note: Canonical current-semantics NuScenes full baseline has not been rerun yet through the new baseline structure.
+
+  - baseline_id: drivor_impl_b
+    dataset: nuscenes
+    suite: full
+    status: pending_run
+    correctness_note: Canonical current-semantics NuScenes full baseline has not been rerun yet through the new baseline structure.
+
+  - baseline_id: rap_impl_b
+    dataset: nuscenes
+    suite: full
+    status: pending_run
+    correctness_note: Canonical current-semantics NuScenes full baseline has not been rerun yet through the new baseline structure.
+
+  - baseline_id: drivor_intervention_4cam
+    dataset: nuscenes
+    suite: full
+    status: pending_run
+    correctness_note: Canonical current-semantics NuScenes full solo intervention baseline has not been rerun yet.
+
+  - baseline_id: rap_intervention_4cam
+    dataset: nuscenes
+    suite: full
+    status: pending_run
+    correctness_note: Canonical current-semantics NuScenes full solo intervention baseline has not been rerun yet.

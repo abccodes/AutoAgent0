@@ -1,0 +1,19 @@
+rap:
+  launch_path: ./planners/rap/launch.sh
+  repo_root: /bigdata/aidan/RAP
+  checkpoint: /bigdata/aidan/models/RAP_ckpts/RAP_DINO_navsimv2.ckpt
+  output_model_slug: rap_dino_navsimv2
+  python_bin: /bigdata/aidan/.home/envs/rap/bin/python
+  device: cuda
+  image_scale: 0.4
+  use_scene_rig_lidar2img: true
+  hf_hub_offline: true
+  transformers_offline: true
+  hf_home: /bigdata/aidan/models/hf
+  hf_hub_cache: /bigdata/aidan/models/hf/hub
+  transformers_cache: /bigdata/aidan/models/hf/hub
+  nuplan_devkit_dir: /bigdata/jason/drivor_evaluation/DrivoR/nuplan-devkit
+  backbone_path: /bigdata/aidan/models/hf/dinov3-vith16plus-pretrain-
+
+  vlm:
+    enabled: false
