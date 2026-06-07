@@ -77,6 +77,9 @@ class DesignChangeRequest:
     reason: str
     corrective_action: Optional[str]
     candidate_budget: int
+    learned_budget: int
+    rule_based_budget: int
+    allocation_strategy: str
     include_learned: bool = True
     include_rule_based: bool = True
 

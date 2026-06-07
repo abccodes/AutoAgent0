@@ -102,14 +102,21 @@ def build_design_change_request(
     critique_result: Dict[str, object],
     *,
     redesign_candidate_budget: int,
+    available_rule_based_count: int,
     has_rule_based_candidates: bool,
 ) -> DesignChangeRequest:
     corrective_action = critique_result.get("autoagent0_critique_corrective_action")
     rejection_reason = critique_result.get("autoagent0_critique_reasoning") or "vlm_critic_requested_redesign"
+    candidate_budget = max(1, int(redesign_candidate_budget))
+    rule_based_budget = min(int(available_rule_based_count), candidate_budget) if has_rule_based_candidates else 0
+    learned_budget = max(1, candidate_budget - rule_based_budget)
     return DesignChangeRequest(
         reason=str(rejection_reason),
         corrective_action=None if corrective_action is None else str(corrective_action),
-        candidate_budget=max(1, int(redesign_candidate_budget)),
+        candidate_budget=candidate_budget,
+        learned_budget=learned_budget,
+        rule_based_budget=rule_based_budget,
+        allocation_strategy="balanced_static_v1",
         include_learned=True,
         include_rule_based=bool(has_rule_based_candidates),
     )
@@ -122,8 +129,9 @@ def build_expanded_design(
     default_row: Dict[str, object],
     design_change_request: DesignChangeRequest,
 ) -> ExpandedDesign:
-    learned_budget = max(1, int(design_change_request.candidate_budget) - len(rule_based_candidate_rows))
-    expanded_rows = list(learned_candidate_rows[:learned_budget]) + list(rule_based_candidate_rows)
+    learned_budget = max(1, int(design_change_request.learned_budget))
+    rule_based_budget = max(0, int(design_change_request.rule_based_budget))
+    expanded_rows = list(learned_candidate_rows[:learned_budget]) + list(rule_based_candidate_rows[:rule_based_budget])
     if not expanded_rows:
         expanded_rows = [default_row]
     return ExpandedDesign(rows=expanded_rows, learned_budget=learned_budget)

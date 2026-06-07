@@ -238,6 +238,7 @@ class AutoAgent0Runtime:
         design_change_request = build_design_change_request(
             critique_result,
             redesign_candidate_budget=redesign_candidate_budget,
+            available_rule_based_count=len(rule_based_candidate_rows),
             has_rule_based_candidates=bool(rule_based_candidate_rows),
         )
         self._record_tool_call(
@@ -246,6 +247,9 @@ class AutoAgent0Runtime:
             reason=design_change_request.reason,
             corrective_action=design_change_request.corrective_action,
             candidate_budget=design_change_request.candidate_budget,
+            learned_budget=design_change_request.learned_budget,
+            rule_based_budget=design_change_request.rule_based_budget,
+            allocation_strategy=design_change_request.allocation_strategy,
             include_rule_based=design_change_request.include_rule_based,
         )
         expanded_design = build_expanded_design(
@@ -260,6 +264,9 @@ class AutoAgent0Runtime:
             designer="learned+rule_based",
             candidate_count=len(expanded_rows),
             candidate_budget=design_change_request.candidate_budget,
+            learned_budget=design_change_request.learned_budget,
+            rule_based_budget=design_change_request.rule_based_budget,
+            allocation_strategy=design_change_request.allocation_strategy,
         )
         self.request_designer(
             learned_candidate_rows=learned_candidate_rows[:expanded_design.learned_budget],
@@ -376,6 +383,9 @@ class AutoAgent0Runtime:
                     "reason": design_change_request.reason,
                     "corrective_action": design_change_request.corrective_action,
                     "candidate_budget": design_change_request.candidate_budget,
+                    "learned_budget": design_change_request.learned_budget,
+                    "rule_based_budget": design_change_request.rule_based_budget,
+                    "allocation_strategy": design_change_request.allocation_strategy,
                     "include_learned": design_change_request.include_learned,
                     "include_rule_based": design_change_request.include_rule_based,
                 },
@@ -383,10 +393,15 @@ class AutoAgent0Runtime:
                     "reason": design_change_request.reason,
                     "corrective_action": design_change_request.corrective_action,
                     "candidate_budget": design_change_request.candidate_budget,
+                    "learned_budget": design_change_request.learned_budget,
+                    "rule_based_budget": design_change_request.rule_based_budget,
+                    "allocation_strategy": design_change_request.allocation_strategy,
                     "include_learned": design_change_request.include_learned,
                     "include_rule_based": design_change_request.include_rule_based,
                 },
                 "autoagent0_revised_candidate_count": len(expanded_rows),
+                "autoagent0_requested_learned_candidate_count": design_change_request.learned_budget,
+                "autoagent0_requested_rule_based_candidate_count": design_change_request.rule_based_budget,
                 "autoagent0_revised_learned_candidate_count": sum(
                     1 for row in expanded_rows if str(row.get("source", "")).startswith(learned_source_name)
                 ),
