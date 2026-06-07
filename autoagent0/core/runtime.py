@@ -372,6 +372,13 @@ class AutoAgent0Runtime:
             selected_candidate_index=selected_idx,
             redesign_attempt_count=len(attempt_records),
         )
+        actual_learned_count = sum(
+            1 for row in expanded_rows if str(row.get("source", "")).startswith(learned_source_name)
+        )
+        actual_rule_based_count = sum(
+            1 for row in expanded_rows if str(row.get("source", "")) == "rule_based"
+        )
+        missing_rule_based_count = max(0, int(design_change_request.rule_based_budget) - actual_rule_based_count)
         selection_debug = dict(redesign_result)
         selection_debug.update(
             {
@@ -402,12 +409,10 @@ class AutoAgent0Runtime:
                 "autoagent0_revised_candidate_count": len(expanded_rows),
                 "autoagent0_requested_learned_candidate_count": design_change_request.learned_budget,
                 "autoagent0_requested_rule_based_candidate_count": design_change_request.rule_based_budget,
-                "autoagent0_revised_learned_candidate_count": sum(
-                    1 for row in expanded_rows if str(row.get("source", "")).startswith(learned_source_name)
-                ),
-                "autoagent0_revised_rule_based_candidate_count": sum(
-                    1 for row in expanded_rows if str(row.get("source", "")) == "rule_based"
-                ),
+                "autoagent0_revised_learned_candidate_count": actual_learned_count,
+                "autoagent0_revised_rule_based_candidate_count": actual_rule_based_count,
+                "autoagent0_missing_rule_based_candidate_count": missing_rule_based_count,
+                "autoagent0_rule_based_budget_satisfied": missing_rule_based_count == 0,
                 "autoagent0_final_critique": final_critique,
                 "autoagent0_fallback_reason": final_decision.fallback_reason,
                 "autoagent0_redesign_attempt_count": len(attempt_records),
