@@ -21,6 +21,7 @@ import pickle
 import json
 import logging
 import time
+import stat
 from sim.utils.launch_ad import launch, check_alive
 from omegaconf import OmegaConf
 import open3d as o3d
@@ -317,14 +318,15 @@ def create_gym_env(cfg, output, run_label, include_privileged_pipe=False, planne
     obs_pipe = os.path.join(output, 'obs_pipe')
     plan_pipe = os.path.join(output, 'plan_pipe')
     for pipe_path in (obs_pipe, plan_pipe):
-        if not os.path.exists(pipe_path):
-            os.mkfifo(pipe_path)
-        else:
-            try:
-                st = os.stat(pipe_path)
-                print(f"[FIFO EXISTS] path={pipe_path} inode={st.st_ino} mode={oct(st.st_mode)} t={time.time():.6f}")
-            except Exception:
-                print(f"[FIFO EXISTS] path={pipe_path} (stat failed) t={time.time():.6f}")
+        if os.path.exists(pipe_path):
+            st = os.stat(pipe_path)
+            if not stat.S_ISFIFO(st.st_mode):
+                raise RuntimeError(f"Refusing to replace non-FIFO path: {pipe_path}")
+            os.unlink(pipe_path)
+            print(f"[FIFO RECREATE] removed stale FIFO path={pipe_path} inode={st.st_ino} t={time.time():.6f}")
+        os.mkfifo(pipe_path)
+        st = os.stat(pipe_path)
+        print(f"[FIFO CREATE] path={pipe_path} inode={st.st_ino} mode={oct(st.st_mode)} t={time.time():.6f}")
     # Keep both FIFOs open in RDWR mode to avoid blocking open-order deadlocks
     # between closed_loop and the planner adapter. Actual message traffic still
     # uses fresh per-message open/read/write calls below.
