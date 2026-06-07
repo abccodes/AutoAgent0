@@ -4,12 +4,18 @@
 .DS_Store
 .nfs*
 __pycache__
+__pycache__/
 *.pth
+*.log
 output
 build
 shell
 private
 apex
+.codex
+.external/
+.generated/
+.worktrees/
 # pixi environments
 .pixi
 *.egg-info

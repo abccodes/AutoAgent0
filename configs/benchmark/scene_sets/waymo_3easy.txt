@@ -1,0 +1,3 @@
+/bigdata/datasets/HUGSIM/waymo/scene-100613054308-easy-00.yaml
+/bigdata/datasets/HUGSIM/waymo/scene-102751446607-easy-00.yaml
+/bigdata/datasets/HUGSIM/waymo/scene-106762673266-easy-00.yaml

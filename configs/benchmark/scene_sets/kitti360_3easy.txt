@@ -1,0 +1,3 @@
+/bigdata/datasets/HUGSIM/kitti360/scene-10320_10520-easy-00.yaml
+/bigdata/datasets/HUGSIM/kitti360/scene-10520_10720-easy-00.yaml
+/bigdata/datasets/HUGSIM/kitti360/scene-1290_1490-easy-00.yaml
