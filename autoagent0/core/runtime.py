@@ -235,50 +235,19 @@ class AutoAgent0Runtime:
                 phase=PHASE_DEFAULT_ACCEPTED,
             ))
 
-        design_change_request = build_design_change_request(
-            critique_result,
-            redesign_candidate_budget=redesign_candidate_budget,
-            available_rule_based_count=len(rule_based_candidate_rows),
-            has_rule_based_candidates=bool(rule_based_candidate_rows),
-        )
-        self._record_tool_call(
-            "request_design_change",
-            phase=PHASE_DEFAULT_REJECTED,
-            reason=design_change_request.reason,
-            corrective_action=design_change_request.corrective_action,
-            candidate_budget=design_change_request.candidate_budget,
-            learned_budget=design_change_request.learned_budget,
-            rule_based_budget=design_change_request.rule_based_budget,
-            allocation_strategy=design_change_request.allocation_strategy,
-            include_rule_based=design_change_request.include_rule_based,
-        )
-        expanded_design = build_expanded_design(
-            learned_candidate_rows=learned_candidate_rows,
-            rule_based_candidate_rows=rule_based_candidate_rows,
-            default_row=default_row,
-            design_change_request=design_change_request,
-        )
-        expanded_rows = expanded_design.rows
-        self._record_tool_call(
-            "request_revised_design",
-            designer="learned+rule_based",
-            candidate_count=len(expanded_rows),
-            candidate_budget=design_change_request.candidate_budget,
-            learned_budget=design_change_request.learned_budget,
-            rule_based_budget=design_change_request.rule_based_budget,
-            allocation_strategy=design_change_request.allocation_strategy,
-        )
-        self.request_designer(
-            learned_candidate_rows=learned_candidate_rows[:expanded_design.learned_budget],
-            rule_based_candidate_rows=rule_based_candidate_rows,
-            combined_candidate_rows=expanded_rows,
-        )
         max_attempts = max(1, int(max_redesign_attempts))
-        previous_feedback = design_change_request.reason
+        previous_feedback = (
+            critique_result.get("autoagent0_critique_reasoning")
+            or "vlm_critic_requested_redesign"
+        )
+        latest_critique_result = critique_result
         attempt_records = []
+        design_change_requests = []
         redesign_result = None
         final_critique = None
         final_decision = None
+        design_change_request = None
+        expanded_rows = [default_row]
         revised_row = default_row
         revised_plan = default_plan
         revised_idx = default_idx
@@ -287,6 +256,76 @@ class AutoAgent0Runtime:
 
         for attempt_index in range(1, max_attempts + 1):
             attempt_stage = f"redesign_attempt_{attempt_index}"
+            design_change_request = build_design_change_request(
+                latest_critique_result,
+                redesign_candidate_budget=redesign_candidate_budget,
+                available_rule_based_count=len(rule_based_candidate_rows),
+                has_rule_based_candidates=bool(rule_based_candidate_rows),
+                attempt_index=attempt_index,
+            )
+            self._record_tool_call(
+                "request_design_change",
+                phase=PHASE_DEFAULT_REJECTED if attempt_index == 1 else PHASE_REDESIGN_REJECTED_RETRY,
+                reason=design_change_request.reason,
+                corrective_action=design_change_request.corrective_action,
+                candidate_budget=design_change_request.candidate_budget,
+                learned_budget=design_change_request.learned_budget,
+                rule_based_budget=design_change_request.rule_based_budget,
+                allocation_strategy=design_change_request.allocation_strategy,
+                include_rule_based=design_change_request.include_rule_based,
+                attempt_index=attempt_index,
+                max_attempts=max_attempts,
+            )
+            expanded_design = build_expanded_design(
+                learned_candidate_rows=learned_candidate_rows,
+                rule_based_candidate_rows=rule_based_candidate_rows,
+                default_row=default_row,
+                design_change_request=design_change_request,
+            )
+            expanded_rows = expanded_design.rows
+            actual_learned_count = sum(
+                1 for row in expanded_rows if str(row.get("source", "")).startswith(learned_source_name)
+            )
+            actual_rule_based_count = sum(
+                1 for row in expanded_rows if str(row.get("source", "")) == "rule_based"
+            )
+            missing_rule_based_count = max(0, int(design_change_request.rule_based_budget) - actual_rule_based_count)
+            design_change_requests.append(
+                {
+                    "attempt_index": attempt_index,
+                    "reason": design_change_request.reason,
+                    "corrective_action": design_change_request.corrective_action,
+                    "candidate_budget": design_change_request.candidate_budget,
+                    "learned_budget": design_change_request.learned_budget,
+                    "rule_based_budget": design_change_request.rule_based_budget,
+                    "allocation_strategy": design_change_request.allocation_strategy,
+                    "include_learned": design_change_request.include_learned,
+                    "include_rule_based": design_change_request.include_rule_based,
+                    "actual_learned_count": actual_learned_count,
+                    "actual_rule_based_count": actual_rule_based_count,
+                    "missing_rule_based_count": missing_rule_based_count,
+                    "rule_based_budget_satisfied": missing_rule_based_count == 0,
+                }
+            )
+            self._record_tool_call(
+                "request_revised_design",
+                designer="learned+rule_based",
+                candidate_count=len(expanded_rows),
+                candidate_budget=design_change_request.candidate_budget,
+                learned_budget=design_change_request.learned_budget,
+                rule_based_budget=design_change_request.rule_based_budget,
+                allocation_strategy=design_change_request.allocation_strategy,
+                actual_learned_count=actual_learned_count,
+                actual_rule_based_count=actual_rule_based_count,
+                missing_rule_based_count=missing_rule_based_count,
+                attempt_index=attempt_index,
+                max_attempts=max_attempts,
+            )
+            self.request_designer(
+                learned_candidate_rows=learned_candidate_rows[:expanded_design.learned_budget],
+                rule_based_candidate_rows=rule_based_candidate_rows[:design_change_request.rule_based_budget],
+                combined_candidate_rows=expanded_rows,
+            )
             self._record_tool_call(
                 "select_final_actions",
                 phase=attempt_stage,
@@ -343,6 +382,12 @@ class AutoAgent0Runtime:
                     "critique_rejected": final_decision.final_rejected,
                     "critique_reasoning": final_critique.get("autoagent0_critique_reasoning"),
                     "fallback_reason": final_decision.fallback_reason,
+                    "requested_learned_candidate_count": design_change_request.learned_budget,
+                    "requested_rule_based_candidate_count": design_change_request.rule_based_budget,
+                    "actual_learned_candidate_count": actual_learned_count,
+                    "actual_rule_based_candidate_count": actual_rule_based_count,
+                    "missing_rule_based_candidate_count": missing_rule_based_count,
+                    "allocation_strategy": design_change_request.allocation_strategy,
                 }
             )
             if not final_decision.continue_redesign:
@@ -352,8 +397,9 @@ class AutoAgent0Runtime:
                 or final_decision.fallback_reason
                 or previous_feedback
             )
+            latest_critique_result = final_critique
 
-        if redesign_result is None or final_critique is None or final_decision is None:
+        if redesign_result is None or final_critique is None or final_decision is None or design_change_request is None:
             raise RuntimeError("AutoAgent0 redesign loop did not produce a revised candidate")
 
         # TODO(autoagent0): replace this threshold behavior with a combined
@@ -396,6 +442,7 @@ class AutoAgent0Runtime:
                     "include_learned": design_change_request.include_learned,
                     "include_rule_based": design_change_request.include_rule_based,
                 },
+                "autoagent0_design_change_requests": design_change_requests,
                 "autoagent0_redesign_request": {
                     "reason": design_change_request.reason,
                     "corrective_action": design_change_request.corrective_action,
@@ -406,6 +453,7 @@ class AutoAgent0Runtime:
                     "include_learned": design_change_request.include_learned,
                     "include_rule_based": design_change_request.include_rule_based,
                 },
+                "autoagent0_redesign_requests": design_change_requests,
                 "autoagent0_revised_candidate_count": len(expanded_rows),
                 "autoagent0_requested_learned_candidate_count": design_change_request.learned_budget,
                 "autoagent0_requested_rule_based_candidate_count": design_change_request.rule_based_budget,

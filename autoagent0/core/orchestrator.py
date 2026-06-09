@@ -104,19 +104,36 @@ def build_design_change_request(
     redesign_candidate_budget: int,
     available_rule_based_count: int,
     has_rule_based_candidates: bool,
+    attempt_index: int = 1,
 ) -> DesignChangeRequest:
     corrective_action = critique_result.get("autoagent0_critique_corrective_action")
     rejection_reason = critique_result.get("autoagent0_critique_reasoning") or "vlm_critic_requested_redesign"
     candidate_budget = max(1, int(redesign_candidate_budget))
-    learned_budget = 8
-    rule_based_budget = 5 if has_rule_based_candidates else 0
+    attempt = max(1, int(attempt_index))
+    if attempt == 1:
+        learned_budget = 8
+        rule_based_budget = 5
+        allocation_strategy = "learned8_rule5_after_default_rejection"
+    elif attempt == 2:
+        learned_budget = 5
+        rule_based_budget = 10
+        allocation_strategy = "learned5_rule10_after_revised_rejection"
+    else:
+        learned_budget = 3
+        rule_based_budget = 12
+        allocation_strategy = "recovery_heavy_at_redesign_limit"
+
+    if not has_rule_based_candidates:
+        rule_based_budget = 0
+        allocation_strategy = f"{allocation_strategy}_no_rule_based_available"
+
     return DesignChangeRequest(
         reason=str(rejection_reason),
         corrective_action=None if corrective_action is None else str(corrective_action),
         candidate_budget=candidate_budget,
         learned_budget=learned_budget,
         rule_based_budget=rule_based_budget,
-        allocation_strategy="learned8_rule5_static_v1",
+        allocation_strategy=allocation_strategy,
         include_learned=True,
         include_rule_based=bool(has_rule_based_candidates and int(available_rule_based_count) > 0),
     )
