@@ -82,6 +82,18 @@ class DesignChangeRequest:
     allocation_strategy: str
     include_learned: bool = True
     include_rule_based: bool = True
+    routing_mode: str = "normal"
+
+
+@dataclass(frozen=True)
+class FrameUncertainty:
+    """Per-frame uncertainty signals used to route the design-change budget."""
+
+    intra_learned_m: float
+    cross_family_m: float
+    mode_count: int
+    routing_zone: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from autoagent0.core.schemas import CritiqueResult, DesignChangeRequest
+from autoagent0.core.schemas import CritiqueResult, DesignChangeRequest, FrameUncertainty
+from autoagent0.core.uncertainty import (
+    ROUTING_ZONE_LEAN_RULE_BASED,
+    ROUTING_ZONE_NORMAL,
+    ROUTING_ZONE_RULE_BASED_FALLBACK,
+)
 
 
 PHASE_DEFAULT_ACCEPTED = "default_accepted"
@@ -105,6 +110,7 @@ def build_design_change_request(
     available_rule_based_count: int,
     has_rule_based_candidates: bool,
     attempt_index: int = 1,
+    frame_uncertainty: Optional[FrameUncertainty] = None,
 ) -> DesignChangeRequest:
     corrective_action = critique_result.get("autoagent0_critique_corrective_action")
     rejection_reason = critique_result.get("autoagent0_critique_reasoning") or "vlm_critic_requested_redesign"
@@ -123,6 +129,25 @@ def build_design_change_request(
         rule_based_budget = 12
         allocation_strategy = "recovery_heavy_at_redesign_limit"
 
+    routing_mode = ROUTING_ZONE_NORMAL
+    if frame_uncertainty is not None and has_rule_based_candidates:
+        zone = frame_uncertainty.routing_zone
+        if zone == ROUTING_ZONE_RULE_BASED_FALLBACK:
+            learned_budget = 0
+            rule_based_budget = candidate_budget
+            allocation_strategy = (
+                f"rule_based_only_uncertainty_intra{frame_uncertainty.intra_learned_m:.2f}"
+                f"_cross{frame_uncertainty.cross_family_m:.2f}"
+                f"_modes{frame_uncertainty.mode_count}"
+            )
+            routing_mode = ROUTING_ZONE_RULE_BASED_FALLBACK
+        elif zone == ROUTING_ZONE_LEAN_RULE_BASED:
+            shift = max(1, learned_budget // 2)
+            learned_budget = max(0, learned_budget - shift)
+            rule_based_budget = max(rule_based_budget, candidate_budget - learned_budget)
+            allocation_strategy = f"{allocation_strategy}_lean_rule_based"
+            routing_mode = ROUTING_ZONE_LEAN_RULE_BASED
+
     if not has_rule_based_candidates:
         rule_based_budget = 0
         allocation_strategy = f"{allocation_strategy}_no_rule_based_available"
@@ -136,6 +161,7 @@ def build_design_change_request(
         allocation_strategy=allocation_strategy,
         include_learned=True,
         include_rule_based=bool(has_rule_based_candidates and int(available_rule_based_count) > 0),
+        routing_mode=routing_mode,
     )
 
 

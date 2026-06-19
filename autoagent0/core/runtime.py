@@ -9,6 +9,7 @@ from autoagent0.core.designer import Designer
 from autoagent0.core.orchestrator import (
     PHASE_DEFAULT_ACCEPTED,
     PHASE_DEFAULT_REJECTED,
+    PHASE_REDESIGN_REJECTED_RETRY,
     OrchestratorToolLog,
     build_design_change_request,
     build_expanded_design,
@@ -21,7 +22,15 @@ from autoagent0.core.planner_flow import (
     disabled_planner_gate_result,
     run_learned_planner_selection,
 )
+from autoagent0.core.schemas import FrameUncertainty
 from autoagent0.core.trace import build_agent_trace
+from autoagent0.core.uncertainty import (
+    ROUTING_ZONE_NORMAL,
+    classify_routing_zone,
+    compute_cross_family_disagreement,
+    compute_intra_learned_disagreement,
+    compute_mode_count,
+)
 from autoagent0.core.verifier import PassiveVerifier
 
 
@@ -56,6 +65,18 @@ def _optional_int(value: object) -> Optional[int]:
         return int(value)
     except Exception:
         return None
+
+
+def _frame_uncertainty_debug(frame_uncertainty: Optional[FrameUncertainty]) -> Optional[Dict[str, Any]]:
+    if frame_uncertainty is None:
+        return None
+    return {
+        "intra_learned_m": frame_uncertainty.intra_learned_m,
+        "cross_family_m": frame_uncertainty.cross_family_m,
+        "mode_count": frame_uncertainty.mode_count,
+        "routing_zone": frame_uncertainty.routing_zone,
+        "metadata": dict(frame_uncertainty.metadata),
+    }
 
 
 def _score_from_row(selected_row: Dict[str, object], fallback_key: str) -> tuple[float, float]:
@@ -144,6 +165,13 @@ class AutoAgent0Runtime:
         strict_learned_argmax_lookup: bool = False,
         fallback_mode: str = "hold",
         max_redesign_attempts: int = 1,
+        uncertainty_enabled: bool = True,
+        uncertainty_t_intra: float = 1.5,
+        uncertainty_t_cross: float = 2.0,
+        uncertainty_mode_k_max: int = 3,
+        uncertainty_mode_count_high: int = 3,
+        uncertainty_horizon_steps: int = 0,
+        uncertainty_kmeans_backend: str = "auto",
     ) -> LearnedPlannerSelection:
         """Run the target AutoAgent0 bounded recovery loop.
 
@@ -177,6 +205,57 @@ class AutoAgent0Runtime:
         default_idx = default_row.get("proposal_index")
         default_score, default_score_raw = _score_from_row(default_row, score_fallback_key)
 
+        frame_uncertainty: Optional[FrameUncertainty] = None
+        if uncertainty_enabled:
+            horizon = int(uncertainty_horizon_steps) if uncertainty_horizon_steps else None
+            intra = compute_intra_learned_disagreement(
+                learned_candidate_rows,
+                horizon_steps=horizon,
+            )
+            cross = compute_cross_family_disagreement(
+                default_row,
+                rule_based_candidate_rows,
+                horizon_steps=horizon,
+            )
+            modes = compute_mode_count(
+                learned_candidate_rows,
+                k_max=int(uncertainty_mode_k_max),
+                horizon_steps=horizon,
+                backend=str(uncertainty_kmeans_backend),
+            )
+            routing_zone = classify_routing_zone(
+                intra["disagreement_m"],
+                cross["disagreement_m"],
+                modes["mode_count"],
+                t_intra=float(uncertainty_t_intra),
+                t_cross=float(uncertainty_t_cross),
+                mode_count_high=int(uncertainty_mode_count_high),
+            )
+            frame_uncertainty = FrameUncertainty(
+                intra_learned_m=float(intra["disagreement_m"]),
+                cross_family_m=float(cross["disagreement_m"]),
+                mode_count=int(modes["mode_count"]),
+                routing_zone=routing_zone,
+                metadata={
+                    "intra": intra,
+                    "cross": cross,
+                    "modes": modes,
+                    "thresholds": {
+                        "t_intra": float(uncertainty_t_intra),
+                        "t_cross": float(uncertainty_t_cross),
+                        "mode_count_high": int(uncertainty_mode_count_high),
+                    },
+                },
+            )
+            self._record_tool_call(
+                "compute_uncertainty",
+                intra_m=frame_uncertainty.intra_learned_m,
+                cross_m=frame_uncertainty.cross_family_m,
+                mode_count=frame_uncertainty.mode_count,
+                zone=frame_uncertainty.routing_zone,
+                backend_used=modes.get("backend_used"),
+            )
+
         self._record_tool_call(
             "request_critique",
             phase="default",
@@ -207,6 +286,7 @@ class AutoAgent0Runtime:
                     "autoagent0_redesign_triggered": False,
                     "autoagent0_default_critique": critique_result,
                     "autoagent0_fallback_reason": None,
+                    "autoagent0_frame_uncertainty": _frame_uncertainty_debug(frame_uncertainty),
                     "fallback_selected_idx": int(default_selected_index),
                     "fallback_selected_source": default_selected_source,
                     "planner_gate_selected_planner": "learned",
@@ -262,6 +342,7 @@ class AutoAgent0Runtime:
                 available_rule_based_count=len(rule_based_candidate_rows),
                 has_rule_based_candidates=bool(rule_based_candidate_rows),
                 attempt_index=attempt_index,
+                frame_uncertainty=frame_uncertainty,
             )
             self._record_tool_call(
                 "request_design_change",
@@ -301,6 +382,7 @@ class AutoAgent0Runtime:
                     "allocation_strategy": design_change_request.allocation_strategy,
                     "include_learned": design_change_request.include_learned,
                     "include_rule_based": design_change_request.include_rule_based,
+                    "routing_mode": design_change_request.routing_mode,
                     "actual_learned_count": actual_learned_count,
                     "actual_rule_based_count": actual_rule_based_count,
                     "missing_rule_based_count": missing_rule_based_count,
@@ -432,6 +514,7 @@ class AutoAgent0Runtime:
                 "autoagent0_phase": final_decision.phase,
                 "autoagent0_redesign_triggered": True,
                 "autoagent0_default_critique": critique_result,
+                "autoagent0_frame_uncertainty": _frame_uncertainty_debug(frame_uncertainty),
                 "autoagent0_design_change_request": {
                     "reason": design_change_request.reason,
                     "corrective_action": design_change_request.corrective_action,
@@ -441,6 +524,7 @@ class AutoAgent0Runtime:
                     "allocation_strategy": design_change_request.allocation_strategy,
                     "include_learned": design_change_request.include_learned,
                     "include_rule_based": design_change_request.include_rule_based,
+                    "routing_mode": design_change_request.routing_mode,
                 },
                 "autoagent0_design_change_requests": design_change_requests,
                 "autoagent0_redesign_request": {
@@ -452,6 +536,7 @@ class AutoAgent0Runtime:
                     "allocation_strategy": design_change_request.allocation_strategy,
                     "include_learned": design_change_request.include_learned,
                     "include_rule_based": design_change_request.include_rule_based,
+                    "routing_mode": design_change_request.routing_mode,
                 },
                 "autoagent0_redesign_requests": design_change_requests,
                 "autoagent0_revised_candidate_count": len(expanded_rows),

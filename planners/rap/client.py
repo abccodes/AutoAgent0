@@ -793,6 +793,13 @@ def main() -> int:
                             strict_learned_argmax_lookup=True,
                             fallback_mode=autoagent0_cfg.fallback_mode,
                             max_redesign_attempts=autoagent0_cfg.max_redesign_attempts,
+                            uncertainty_enabled=autoagent0_cfg.uncertainty_enabled,
+                            uncertainty_t_intra=autoagent0_cfg.uncertainty_t_intra,
+                            uncertainty_t_cross=autoagent0_cfg.uncertainty_t_cross,
+                            uncertainty_mode_k_max=autoagent0_cfg.uncertainty_mode_k_max,
+                            uncertainty_mode_count_high=autoagent0_cfg.uncertainty_mode_count_high,
+                            uncertainty_horizon_steps=autoagent0_cfg.uncertainty_horizon_steps,
+                            uncertainty_kmeans_backend=autoagent0_cfg.uncertainty_kmeans_backend,
                         )
                     else:
                         selection = autoagent0_runtime.select_final_actions(
