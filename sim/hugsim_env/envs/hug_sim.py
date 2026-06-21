@@ -3,7 +3,6 @@ import numpy as np
 from copy import deepcopy
 import gymnasium
 from gymnasium import spaces
-from copy import deepcopy
 from sim.utils.sim_utils import create_cam, rt2pose, pose2rt, load_camera_cfg, dense_cam_poses
 from scipy.spatial.transform import Rotation as SCR
 from sim.utils.score_calculator import create_rectangle, bg_collision_det
@@ -330,6 +329,29 @@ class HUGSimEnv(gymnasium.Env):
             if hasattr(self, 'planner') and hasattr(self.planner, 'ckpts'):
                 ckpt = self.planner.ckpts.get(agent_id)
 
+            # Attach nearest ground-truth camera waypoint (from ground_model) as privileged info
+            try:
+                cam_poses, cam_heights, cam_commands = self.ground_model
+                # camera centers in world coordinates
+                cam_centers = np.asarray(cam_poses)[:, :3, 3].astype(np.float32)
+                agent_world = np.asarray(agent_pos_world, dtype=np.float32)
+                # compute 2D (x,z) distances since ground route lies mostly in X-Z plane
+                cam_xy = cam_centers[:, [0, 2]]
+                agent_xy = agent_world[[0, 2]]
+                dists = np.linalg.norm(cam_xy - agent_xy[None, :], axis=1)
+                nearest_idx = int(np.argmin(dists)) if len(dists) > 0 else 0
+                nearest_cam_world_pos = cam_centers[nearest_idx].astype(float).tolist() if len(cam_centers) > 0 else [0.0, 0.0, 0.0]
+                nearest_cam_dist = float(dists[nearest_idx]) if len(dists) > 0 else float('inf')
+                # full GT anchors (3D) and optional 2D projection
+                gt_anchors_3d = cam_centers.astype(float).tolist() if len(cam_centers) > 0 else None
+                gt_anchors_2d = cam_centers[:, [0, 2]].astype(float).tolist() if len(cam_centers) > 0 else None
+            except Exception:
+                nearest_idx = None
+                nearest_cam_world_pos = None
+                nearest_cam_dist = None
+                gt_anchors_3d = None
+                gt_anchors_2d = None
+
             out.append({
                 'agent_id': agent_id,
                 'b2w': b2w_np,
@@ -344,6 +366,15 @@ class HUGSimEnv(gymnasium.Env):
                 'steer_rate': steer_rate,
                 'route': route,
                 'ckpt': ckpt,
+                # privileged ground-truth waypoint (nearest ground camera) for planner use
+                'waypoint': {
+                    'cam_idx': nearest_idx,
+                    'cam_pos_world': nearest_cam_world_pos,
+                    'cam_dist_m': nearest_cam_dist,
+                },
+                # full ground-truth anchors for this frame (3D and 2D projected)
+                'ground_truth_anchors': gt_anchors_3d,
+                'ground_truth_anchors_2d': gt_anchors_2d,
             })
 
         return out
