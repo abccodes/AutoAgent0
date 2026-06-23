@@ -1,9 +1,18 @@
-realcar_path: /bigdata/jason/drivor_evaluation/HUGSIM/3DRealCar
-model_base: /bigdata/datasets/HUGSIM/scenes/nuscenes
-uniad_path: ""
-vad_path: ""
+realcar_path: /home/jiageng/AutoAgent0/released_assets/3DRealCar
+
+model_base: /home/jiageng/AutoAgent0/released_assets/scenes/nuscenes
+
+# 自动驾驶模型启动脚本
+# UniAD 和 VAD 可以共用 UniAD_SIM 目录下的 pixi 环境，
+# 但这里填写的是启动脚本路径，不是 pixi.toml 路径。
+uniad_path: /home/jiageng/UniAD_SIM/tools/e2e.sh
+vad_path: /home/jiageng/VAD_SIM/tools/e2e.sh
+
+# 暂时不用 LTF 时保留为空
 ltf_path: ""
-output_dir: /bigdata/aidan/outputs/benchmark/out/nusc_
+
+output_dir: /home/jiageng/AutoAgent0/outputs/benchmark/out/nusc_
+
 HD_map:
-  path: /bigdata/datasets/nuscenes
+  path: /home/jiageng/AutoAgent0/released_assets/nusc_map_cache
   version: nusc_trainval

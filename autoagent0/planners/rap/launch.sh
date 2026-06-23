@@ -5,7 +5,7 @@ CUDA_ID="${1:?missing cuda id}"
 OUTPUT_DIR="${2:?missing output dir}"
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
-HUGSIM_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+HUGSIM_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 if [[ "${CUDA_ID}" != "inherit" ]]; then
     export CUDA_VISIBLE_DEVICES="${CUDA_ID}"
@@ -29,6 +29,12 @@ fi
 
 export PYTHONPATH="${HUGSIM_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
+# Prepend the RAP repo so its navsim/agents/rap_dino takes priority over any
+# other navsim installation on PYTHONPATH (e.g. a global PYTHONPATH entry).
+if [[ -n "${RAP_REPO_ROOT:-}" && -d "${RAP_REPO_ROOT}" ]]; then
+    export PYTHONPATH="${RAP_REPO_ROOT}:${PYTHONPATH}"
+fi
+
 # Prevent the RAP env from accidentally loading HUGSIM pixi torch libs.
 if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
     OLD_IFS="${IFS}"
@@ -49,4 +55,4 @@ if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
     fi
 fi
 
-exec "${PYTHON_BIN}" "${SCRIPT_DIR}/client.py" --output "${OUTPUT_DIR}"
+exec "${PYTHON_BIN}" -m autoagent0.planners.rap --output "${OUTPUT_DIR}"

@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from planners.common.candidate_visuals import get_candidate_visual_style
+from autoagent0.adapters.hugsim.candidate_visuals import get_candidate_visual_style
 
 
 PLAN_DT_SEC = 0.5

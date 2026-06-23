@@ -5,7 +5,7 @@ from typing import Dict, Optional, Sequence
 import numpy as np
 
 from autoagent0.adapters.hugsim.context import describe_vlm_camera_inputs
-from autoagent0.core.candidates import (
+from autoagent0.decision.candidates import (
     dedupe_gate_candidates,
     family_rows_for_planner_gate,
     format_candidate_text,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Sequence
 
 from autoagent0.adapters.hugsim.context import describe_vlm_camera_inputs
-from autoagent0.core.candidates import format_candidate_text
+from autoagent0.decision.candidates import format_candidate_text
 
 
 def build_final_action_selection_prompt(

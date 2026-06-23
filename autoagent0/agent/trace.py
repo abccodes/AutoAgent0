@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Sequence
 
-from autoagent0.core.designer import summarize_sources
-from autoagent0.core.schemas import AgentStepTrace, OrchestratorDecision, SceneContext
-from autoagent0.core.verifier import PassiveVerifier
+from autoagent0.agent.designer import summarize_sources
+from autoagent0.agent.schemas import AgentStepTrace, OrchestratorDecision, SceneContext
+from autoagent0.agent.verifier import PassiveVerifier
 
 
 TRACE_SCHEMA_VERSION = "autoagent0.trace.v1"

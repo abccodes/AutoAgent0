@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Dict, Iterable, List, Sequence
 
-from autoagent0.core.schemas import DesignBatch, TrajectoryCandidate
+from autoagent0.agent.schemas import DesignBatch, TrajectoryCandidate
 
 
 def candidate_row_to_trajectory(row: Dict[str, Any]) -> TrajectoryCandidate:

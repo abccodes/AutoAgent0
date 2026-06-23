@@ -11,6 +11,6 @@ class LearnedExpertRef:
     client_module: str
 
 
-RAP_EXPERT = LearnedExpertRef(name="rap", client_module="planners.rap.client")
-DRIVOR_EXPERT = LearnedExpertRef(name="drivor", client_module="planners.drivor.client")
+RAP_EXPERT = LearnedExpertRef(name="rap", client_module="autoagent0.planners.rap.client")
+DRIVOR_EXPERT = LearnedExpertRef(name="drivor", client_module="autoagent0.planners.drivor.client")
 

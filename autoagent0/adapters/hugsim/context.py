@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Sequence, Tuple
 
-from autoagent0.core.schemas import SceneContext
+from autoagent0.agent.schemas import SceneContext
 
 
 VLM_CAMERA_ORDER = (

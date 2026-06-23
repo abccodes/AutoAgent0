@@ -10,7 +10,7 @@ from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import yaml
 
-from planners.common.rule_based_env import (
+from autoagent0.experts.rule_based_env import (
     RULE_BASED_ENV_DEFAULTS,
     RULE_BASED_ENV_FIELD_NAMES,
     get_prefixed_rule_based_env_value,

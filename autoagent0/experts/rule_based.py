@@ -5,7 +5,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from planners.common.rule_based_provider import (
+from autoagent0.experts.rule_based_provider import (
     RuleBasedMergeConfig,
     build_rule_based_candidate_rows,
     get_rule_based_proposals_and_scores,
@@ -18,8 +18,8 @@ class RuleBasedExpertRef:
     """Reference to the current external Rule-Planner integration."""
 
     name: str = "rule_based"
-    provider_module: str = "planners.common.rule_based_provider"
-    client_module: str = "planners.rule_based.client"
+    provider_module: str = "autoagent0.experts.rule_based_provider"
+    client_module: str = "autoagent0.planners.rule_based.client"
 
 
 RULE_BASED_EXPERT = RuleBasedExpertRef()

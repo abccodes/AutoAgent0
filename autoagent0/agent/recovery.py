@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from autoagent0.core.schemas import CritiqueResult, DesignChangeRequest
+from autoagent0.agent.schemas import CritiqueResult, DesignChangeRequest
 
 
 PHASE_DEFAULT_ACCEPTED = "default_accepted"

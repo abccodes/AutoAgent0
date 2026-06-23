@@ -30,7 +30,7 @@ from autoagent0.adapters.hugsim.overlays import (
     render_candidate_overlays as _aa_render_candidate_overlays,
     render_planner_gate_overlays as _aa_render_planner_gate_overlays,
 )
-from autoagent0.core.candidates import (
+from autoagent0.decision.candidates import (
     build_candidate_rows as _aa_build_candidate_rows,
     dedupe_gate_candidates as _aa_dedupe_gate_candidates,
     family_rows_for_planner_gate as _aa_family_rows_for_planner_gate,
@@ -40,7 +40,7 @@ from autoagent0.core.candidates import (
     select_representative_candidate_row as _aa_select_representative_candidate_row,
     summarize_candidate as _aa_summarize_candidate,
 )
-from autoagent0.core.orchestrator import (
+from autoagent0.agent.recovery import (
     coerce_critique_result as _aa_coerce_critique_result,
     coerce_candidate_scores as _aa_coerce_candidate_scores,
     coerce_intervention_decision as _aa_coerce_intervention_decision,
@@ -49,7 +49,7 @@ from autoagent0.core.orchestrator import (
     select_from_vlm_scores as _aa_select_from_vlm_scores,
     selected_path_reasoning as _aa_selected_path_reasoning,
 )
-from autoagent0.core.trace import build_agent_trace
+from autoagent0.agent.trace import build_agent_trace
 from autoagent0.prompts.orchestrator import (
     build_intervention_prompt as _aa_build_intervention_prompt,
     build_planner_gate_prompt as _aa_build_planner_gate_prompt,
@@ -122,8 +122,8 @@ class VLMSelectorConfig:
     include_default_candidates: bool = False
 
 
-# Compatibility facade: keep the historical planners.common.vlm_selector API
-# while resolving shared logic through AutoAgent0 modules.
+# Compatibility facade: re-export shared selection helpers resolved through the
+# AutoAgent0 modules so callers can import them from this single entry point.
 summarize_candidate = _aa_summarize_candidate
 path_length = _aa_path_length
 format_candidate_text = _aa_format_candidate_text
@@ -208,7 +208,10 @@ class VLMPlanSelector:
         elif backend == "local_transformers_subprocess":
             selector_factory = lambda: SubprocessQwen3TrajectorySelector(
                 python_bin=self.cfg.python_bin,
-                worker_script=Path(__file__).with_name("vlm_worker.py"),
+                # vlm_worker.py lives in autoagent0/vlm/; this file is in autoagent0/core/.
+                # Resolve the sibling-package path without importing the module (its
+                # top-level `transformers` import must stay out of this process).
+                worker_script=Path(__file__).resolve().parent.parent / "vlm" / "vlm_worker.py",
                 model_id=self.cfg.model_id,
                 device=self.cfg.device,
                 max_new_tokens=self.cfg.max_new_tokens,

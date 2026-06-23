@@ -6,8 +6,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-from autoagent0.core.candidates import select_representative_candidate_row
-from planners.common.task_overlay import draw_task_target_overlay
+from autoagent0.decision.candidates import select_representative_candidate_row
+from autoagent0.adapters.hugsim.task_overlay import draw_task_target_overlay
 
 
 PLAN_VIS_FORWARD_OFFSET_M = 4.5

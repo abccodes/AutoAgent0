@@ -5,8 +5,8 @@ from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 
-from autoagent0.core.designer import Designer
-from autoagent0.core.orchestrator import (
+from autoagent0.agent.designer import Designer
+from autoagent0.agent.recovery import (
     PHASE_DEFAULT_ACCEPTED,
     PHASE_DEFAULT_REJECTED,
     OrchestratorToolLog,
@@ -15,14 +15,14 @@ from autoagent0.core.orchestrator import (
     critique_requests_redesign,
     decide_final_recovery_action,
 )
-from autoagent0.core.planner_flow import (
+from autoagent0.agent.planner_flow import (
     LearnedPlannerSelection,
     default_selection_for_family,
     disabled_planner_gate_result,
     run_learned_planner_selection,
 )
-from autoagent0.core.trace import build_agent_trace
-from autoagent0.core.verifier import PassiveVerifier
+from autoagent0.agent.trace import build_agent_trace
+from autoagent0.agent.verifier import PassiveVerifier
 
 
 def _route_instruction_from_info(info: Dict[str, object]) -> str:

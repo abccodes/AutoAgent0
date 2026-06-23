@@ -4,7 +4,7 @@ import json
 import re
 from typing import Dict, List, Optional, Tuple
 
-from autoagent0.core.orchestrator import (
+from autoagent0.agent.recovery import (
     coerce_candidate_scores,
     coerce_intervention_decision,
     normalize_corrective_action,

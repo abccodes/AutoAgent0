@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from autoagent0.core.schemas import VerifierResult
+from autoagent0.agent.schemas import VerifierResult
 
 
 class PassiveVerifier:
