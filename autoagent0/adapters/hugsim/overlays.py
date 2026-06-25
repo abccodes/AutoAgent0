@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-from autoagent0.decision.candidates import select_representative_candidate_row
+from autoagent0.scorer.candidates import select_representative_candidate_row
 from autoagent0.adapters.hugsim.task_overlay import draw_task_target_overlay
 
 

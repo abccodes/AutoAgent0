@@ -25,7 +25,12 @@ from autoagent0.adapters.hugsim.geometry import (
     truncate_plan,
     world_points_to_current_local,
 )
-from autoagent0.decision.payloads import build_hugsim_plan_payload
+from autoagent0.scorer.payloads import build_hugsim_plan_payload
+from autoagent0.scorer.selection_strategies import (
+    ArgmaxStrategy,
+    RecoveryStrategy,
+    ScorerStrategy,
+)
 from autoagent0.experts.rule_based import (
     build_rule_based_candidate_rows,
     get_rule_based_proposals_and_scores,
@@ -100,7 +105,7 @@ class LearnedPlannerSelector:
         self,
         *,
         vlm_selector,
-        autoagent0_runtime,
+        runtime_name: str = "autoagent0",
         autoagent0_cfg,
         vlm_cfg,
         rule_based_merge_cfg,
@@ -114,7 +119,7 @@ class LearnedPlannerSelector:
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self.vlm_selector = vlm_selector
-        self.autoagent0_runtime = autoagent0_runtime
+        self.runtime_name = str(runtime_name)
         self.autoagent0_cfg = autoagent0_cfg
         self.vlm_cfg = vlm_cfg
         self.rule_based_merge_cfg = rule_based_merge_cfg
@@ -133,6 +138,9 @@ class LearnedPlannerSelector:
         self.previous_selected_score: Optional[float] = None
         self.previous_selected_timestamp: Optional[float] = None
         self.previous_selected_source: Optional[str] = None
+        self.argmax_strategy = ArgmaxStrategy(self)
+        self.scorer_strategy = ScorerStrategy(self)
+        self.recovery_strategy = RecoveryStrategy(self)
 
     # ------------------------------------------------------------------ payload
     def _build_plan_payload(self, proposals, scores, output_num_poses, *, topk=TOPK_PROPOSALS_TO_SEND, **kwargs) -> Dict[str, object]:
@@ -263,100 +271,28 @@ class LearnedPlannerSelector:
         proposals = np.asarray(proposals, dtype=np.float32)
         scores = np.asarray(scores, dtype=np.float32)
         output_num_poses = int(proposals.shape[1]) if proposals.ndim == 3 else 0
-        vlm_cfg = self.vlm_cfg
-
-        if not vlm_cfg.enabled:
-            best_idx = int(np.argmax(scores))
-            selected_plan = np.asarray(proposals[best_idx], dtype=np.float32)
-            selected_score = float(scores[best_idx])
-            selected_score_raw = selected_score
-            selected_row = {"source": self.current_source_name, "proposal_index": best_idx}
-            plan_payload = self._build_plan_payload(
-                proposals,
-                scores,
-                output_num_poses,
-                selected_idx=best_idx,
-                selected_source=self.plain_source,
-                topk=10,
-            )
+        if not self.vlm_cfg.enabled:
+            strategy = self.argmax_strategy
+        elif self.autoagent0_cfg.enabled:
+            strategy = self.recovery_strategy
         else:
-            reserved_candidate_slots = (
-                max(0, int(self.rule_based_merge_cfg.topk))
-                if self.rule_based_merge_cfg.enabled and not vlm_cfg.planner_gate_enabled
-                else 0
-            )
-            learned_candidate_rows, allow_carry_previous = self._build_learned_candidate_rows(
-                proposals, scores, output_num_poses, info, reserved_candidate_slots,
-            )
-            rule_based_candidate_rows = self._build_rule_based_candidate_rows(
-                obs, info, info_history, privileged_info, output_num_poses,
-            )
+            strategy = self.scorer_strategy
 
-            if self.autoagent0_cfg.enabled:
-                selection = self.autoagent0_runtime.select_final_actions_recovery_loop(
-                    frame_index=self.frame_index,
-                    camera_images=obs["rgb"],
-                    info=info,
-                    vlm_selector=self.vlm_selector,
-                    scores=scores,
-                    learned_candidate_rows=learned_candidate_rows,
-                    rule_based_candidate_rows=rule_based_candidate_rows,
-                    redesign_candidate_budget=self.autoagent0_cfg.redesign_candidate_budget,
-                    learned_source_name=self.current_source_name,
-                    learned_default_source=self.learned_default_source,
-                    score_fallback_key=self.score_fallback_key,
-                    planner_log_name=self.planner_log_name,
-                    logger=self.logger,
-                    strict_learned_argmax_lookup=self.strict_learned_argmax_lookup,
-                    fallback_mode=self.autoagent0_cfg.fallback_mode,
-                    max_redesign_attempts=self.autoagent0_cfg.max_redesign_attempts,
-                )
-            else:
-                selection = self.autoagent0_runtime.select_final_actions(
-                    frame_index=self.frame_index,
-                    camera_images=obs["rgb"],
-                    info=info,
-                    vlm_selector=self.vlm_selector,
-                    scores=scores,
-                    learned_candidate_rows=learned_candidate_rows,
-                    rule_based_candidate_rows=rule_based_candidate_rows,
-                    rule_based_merge_enabled=self.rule_based_merge_cfg.enabled,
-                    planner_gate_enabled=vlm_cfg.planner_gate_enabled,
-                    vlm_enabled=vlm_cfg.enabled,
-                    display_default_trajectories=vlm_cfg.display_default_trajectories,
-                    include_default_candidates=vlm_cfg.include_default_candidates,
-                    allow_carry_previous=allow_carry_previous,
-                    previous_selected_source=self.previous_selected_source,
-                    learned_source_name=self.current_source_name,
-                    learned_default_source=self.learned_default_source,
-                    score_fallback_key=self.score_fallback_key,
-                    planner_log_name=self.planner_log_name,
-                    logger=self.logger,
-                    strict_learned_argmax_lookup=self.strict_learned_argmax_lookup,
-                    q_key_prefix=self.q_key_prefix,
-                )
-            selected_row = selection.selected_row
-            selected_plan = selection.selected_plan
-            selected_score = selection.selected_score
-            selected_score_raw = selection.selected_score_raw
-            self.frame_index += 1
-            plan_payload = self._build_plan_payload(
-                proposals,
-                scores,
-                output_num_poses,
-                selected_idx=None if selection.selected_idx is None else int(selection.selected_idx),
-                selected_source=selection.selected_source,
-                selection_debug=selection.selection_debug,
-                selected_plan_override=selected_plan,
-                selected_score_override=selected_score,
-                candidate_pool_rows=selection.candidate_rows,
-            )
-
-        self.previous_selected_plan = np.asarray(selected_plan, dtype=np.float32).copy()
-        self.previous_selected_pose = info_to_pose(info)
-        self.previous_selected_score = selected_score_raw
-        self.previous_selected_timestamp = float(info.get("timestamp", 0.0))
-        self.previous_selected_source = str(
-            selected_row.get("source", self.plain_source if not vlm_cfg.enabled else "vlm_selected")
+        outcome = strategy.select(
+            proposals=proposals,
+            scores=scores,
+            output_num_poses=output_num_poses,
+            obs=obs,
+            info=info,
+            info_history=info_history,
+            privileged_info=privileged_info,
         )
-        return plan_payload
+        if outcome.advance_frame:
+            self.frame_index += 1
+
+        self.previous_selected_plan = np.asarray(outcome.selected_plan, dtype=np.float32).copy()
+        self.previous_selected_pose = info_to_pose(info)
+        self.previous_selected_score = outcome.selected_score_raw
+        self.previous_selected_timestamp = float(info.get("timestamp", 0.0))
+        self.previous_selected_source = outcome.selected_source
+        return outcome.plan_payload

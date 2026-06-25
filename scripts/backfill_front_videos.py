@@ -10,7 +10,7 @@ from moviepy import ImageSequenceClip
 
 sys.path.append(os.getcwd())
 
-from planners.common.candidate_visuals import get_candidate_visual_style
+from autoagent0.adapters.hugsim.candidate_visuals import get_candidate_visual_style
 from sim.utils.sim_utils import (
     get_camera_c2w,
     local_plan_to_front_world,

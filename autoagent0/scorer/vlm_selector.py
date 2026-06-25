@@ -30,7 +30,7 @@ from autoagent0.adapters.hugsim.overlays import (
     render_candidate_overlays as _aa_render_candidate_overlays,
     render_planner_gate_overlays as _aa_render_planner_gate_overlays,
 )
-from autoagent0.decision.candidates import (
+from autoagent0.scorer.candidates import (
     build_candidate_rows as _aa_build_candidate_rows,
     dedupe_gate_candidates as _aa_dedupe_gate_candidates,
     family_rows_for_planner_gate as _aa_family_rows_for_planner_gate,
@@ -40,7 +40,7 @@ from autoagent0.decision.candidates import (
     select_representative_candidate_row as _aa_select_representative_candidate_row,
     summarize_candidate as _aa_summarize_candidate,
 )
-from autoagent0.agent.recovery import (
+from autoagent0.vlm.parsing import (
     coerce_critique_result as _aa_coerce_critique_result,
     coerce_candidate_scores as _aa_coerce_candidate_scores,
     coerce_intervention_decision as _aa_coerce_intervention_decision,
@@ -49,7 +49,7 @@ from autoagent0.agent.recovery import (
     select_from_vlm_scores as _aa_select_from_vlm_scores,
     selected_path_reasoning as _aa_selected_path_reasoning,
 )
-from autoagent0.agent.trace import build_agent_trace
+from autoagent0.scorer.agent_trace import build_agent_trace
 from autoagent0.prompts.orchestrator import (
     build_intervention_prompt as _aa_build_intervention_prompt,
     build_planner_gate_prompt as _aa_build_planner_gate_prompt,

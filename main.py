@@ -3,7 +3,7 @@
 
 Wires the three layers together: launches the requested planner subprocess
 (``autoagent0/planners``), builds the pipeline-side selector
-(``autoagent0/decision`` + ``autoagent0/agent``), and drives the simulator loop
+(``autoagent0/scorer``), and drives the simulator loop
 (``autoagent0/orchestration/loop``).
 
 Each planner subprocess only runs inference and returns ``(proposals, scores)``
@@ -19,6 +19,7 @@ from argparse import ArgumentParser
 from collections import deque
 from pathlib import Path
 
+import numpy as np
 from omegaconf import OmegaConf
 
 sys.path.append(os.getcwd())
@@ -36,10 +37,13 @@ from autoagent0.adapters.hugsim.results import (
     resolve_output_model_slug,
 )
 from autoagent0.config import build_prefixed_autoagent0_env, resolve_autoagent0_config
-from autoagent0.decision.planner_selection import LearnedPlannerSelector
-from autoagent0.agent.runtime import AutoAgent0Runtime
-from autoagent0.decision.vlm_selector import VLMPlanSelector, VLMSelectorConfig
-from autoagent0.experts.rule_based import resolve_rule_based_merge_config
+from autoagent0.scorer.planner_selection import LearnedPlannerSelector
+from autoagent0.scorer.vlm_selector import VLMPlanSelector, VLMSelectorConfig
+from autoagent0.experts.rule_based import (
+    get_rule_based_proposals_and_scores,
+    resolve_rule_based_merge_config,
+)
+from autoagent0.experts.rule_based_provider import rule_based_to_hugsim_plan
 from autoagent0.experts.rule_based_env import build_prefixed_rule_based_env
 from autoagent0.vlm.vlm_env import (
     VLM_ENV_DEFAULTS,
@@ -48,8 +52,8 @@ from autoagent0.vlm.vlm_env import (
     get_prefixed_env_value,
 )
 
-# Per-planner selection labels (mirror the legacy clients' arguments to
-# AutoAgent0Runtime). All three now share LearnedPlannerSelector.
+# Per-planner selection labels (mirror the legacy clients' arguments). All three
+# now share LearnedPlannerSelector.
 PLANNER_SPECS = {
     "rap": {
         "runtime_name": "rap",
@@ -189,7 +193,6 @@ def _build_selector(cfg, output, ad: str):
 
     vlm_selector = VLMPlanSelector(vlm_cfg, Path(output))
     vlm_selector.preload()
-    autoagent0_runtime = AutoAgent0Runtime(runtime_name=spec["runtime_name"], logger=logging)
     logging.info(
         "pipeline %s selector: vlm_enabled=%s autoagent0_enabled=%s rule_merge_enabled=%s",
         ad, vlm_cfg.enabled, autoagent0_cfg.enabled, rule_based_merge_cfg.enabled,
@@ -197,7 +200,7 @@ def _build_selector(cfg, output, ad: str):
 
     selector = LearnedPlannerSelector(
         vlm_selector=vlm_selector,
-        autoagent0_runtime=autoagent0_runtime,
+        runtime_name=spec["runtime_name"],
         autoagent0_cfg=autoagent0_cfg,
         vlm_cfg=vlm_cfg,
         rule_based_merge_cfg=rule_based_merge_cfg,
@@ -211,6 +214,56 @@ def _build_selector(cfg, output, ad: str):
         logger=logging.getLogger(f"{ad}_selection"),
     )
     return selector, vlm_selector, rule_based_merge_cfg
+
+
+def _build_recover_plan(selector, rule_based_merge_cfg):
+    """Build the loop's recovery hook (full pipeline on rule-based proposals).
+
+    When the closed loop's verifier rejects the learned trajectory, this regenerates
+    proposals with the rule-based planner and runs them through the SAME selection
+    pipeline as the normal path -- candidate pool + VLM scorer / agentic recovery
+    loop -- via ``selector.select``. Returns a HUGSIM plan payload, or None if the
+    rule-based planner yields nothing (the loop then keeps the learned plan).
+    Defensive: any failure degrades to None rather than raising.
+
+    Only wired when VLM is enabled; with VLM disabled the loop does not recover.
+    """
+
+    def recover_plan(obs, info, info_history, privileged_info, output_num_poses):
+        try:
+            # rule-based trajectory
+            proposals, scores, _ = get_rule_based_proposals_and_scores(
+                rule_based_merge_cfg,
+                obs=obs,
+                info=info,
+                info_history=deque(info_history, maxlen=len(info_history) or None),
+                privileged_agents=privileged_info,
+                output_num_poses=output_num_poses,
+                topk=rule_based_merge_cfg.topk,
+            )
+            if scores is None or len(scores) == 0:
+                return None
+            proposals_hugsim = np.stack(
+                [
+                    rule_based_to_hugsim_plan(np.asarray(proposals[idx])[:output_num_poses])
+                    for idx in range(len(proposals))
+                ],
+                axis=0,
+            ).astype(np.float32)
+            # memory agent: select actions recovery loop
+            return selector.select(
+                proposals=proposals_hugsim,
+                scores=scores,
+                obs=obs,
+                info=info,
+                info_history=info_history,
+                privileged_info=privileged_info,
+            )
+        except Exception:
+            logging.getLogger("closed_loop").exception("rule-based recovery failed")
+            return None
+
+    return recover_plan
 
 
 if __name__ == "__main__":
@@ -274,6 +327,14 @@ if __name__ == "__main__":
     extra_env = _build_launch_env(cfg, ad)
 
     selector, vlm_selector, rule_based_merge_cfg = _build_selector(cfg, output, ad)
+    # Recovery runs the rule-based proposals through the full selection pipeline
+    # (incl. the agentic recovery loop). Only meaningful with VLM enabled; with VLM
+    # disabled there is no recovery and the loop keeps the learned plan.
+    recover_plan = (
+        _build_recover_plan(selector, rule_based_merge_cfg)
+        if selector.vlm_cfg.enabled
+        else None
+    )
 
     info_history = deque(maxlen=4)
 
@@ -307,6 +368,7 @@ if __name__ == "__main__":
             planner_process=process,
             plan_adapter=plan_adapter,
             ad_name=ad,
+            recover_plan=recover_plan,
         )
         check_alive(process)
     except Exception:

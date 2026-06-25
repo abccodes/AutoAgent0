@@ -1,25 +1,25 @@
-"""Base class for action verifiers."""
+"""Base class for trajectory verifiers."""
 from abc import ABC, abstractmethod
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
 
 class BaseVerifier(ABC):
-    """Scores a control action before it is applied to the environment.
+    """Scores a planned trajectory before it is turned into a control action.
 
-    Subclasses implement :meth:`score`, which receives the finalized action dict
-    (same format as the one passed to ``env.step``, i.e. ``{'acc', 'steer_rate'}``)
-    and returns a scalar score where higher means "safer / more trustworthy". The
-    closed loop treats a score below its threshold as a rejected action that must be
-    replaced by a recovery action.
+    Subclasses implement :meth:`score`, which receives the selected trajectory
+    (the local plan, shape ``[T, 2]``) and returns a scalar score where higher
+    means "safer / more trustworthy". The closed loop treats a score below its
+    threshold as a rejected trajectory that must be replaced via recovery (e.g.
+    regenerating with a different planner).
     """
 
     @abstractmethod
-    def score(self, action: Mapping[str, Any], current_info: Optional[Mapping[str, Any]] = None) -> float:
-        """Return a scalar score for ``action`` (higher is better).
+    def score(self, trajectory: Any, current_info: Optional[Any] = None) -> float:
+        """Return a scalar score for ``trajectory`` (higher is better).
 
         Args:
-            action: The finalized control action, e.g. ``{'acc': ..., 'steer_rate': ...}``.
-            current_info: Optional environment info for the current step, in case the
-                verifier needs context beyond the action itself.
+            trajectory: The selected local plan, shape ``[T, 2]``.
+            current_info: Optional environment info for the current step, in case
+                the verifier needs context beyond the trajectory itself.
         """
         raise NotImplementedError

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 
 @dataclass(frozen=True)
@@ -13,27 +13,6 @@ class SceneContext:
     timestamp: float = 0.0
     task_instruction: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class TrajectoryCandidate:
-    """Normalized view of a candidate row produced by an expert backend."""
-
-    source: str
-    local_plan: Any
-    proposal_index: Optional[int] = None
-    proposal_score: Optional[float] = None
-    candidate_index: Optional[Any] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class DesignBatch:
-    """Candidates generated for one control step."""
-
-    learned: List[TrajectoryCandidate] = field(default_factory=list)
-    rule_based: List[TrajectoryCandidate] = field(default_factory=list)
-    combined: List[TrajectoryCandidate] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -50,27 +29,6 @@ class OrchestratorDecision:
 
 
 @dataclass(frozen=True)
-class PlannerToolCall:
-    """SceneSmith-style planner tool call for trace/debug output."""
-
-    name: str
-    arguments: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class CritiqueResult:
-    """Structured result from the active AutoAgent0 critic."""
-
-    accepted: bool
-    severity_score: float
-    corrective_action: str
-    confidence: Optional[float] = None
-    reasoning: Optional[str] = None
-    error: Optional[str] = None
-    raw: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class DesignChangeRequest:
     """Request issued after critic rejection to expand/revise candidates."""
 
@@ -82,17 +40,6 @@ class DesignChangeRequest:
     allocation_strategy: str
     include_learned: bool = True
     include_rule_based: bool = True
-
-
-@dataclass(frozen=True)
-class FinalActionSelection:
-    """Final selected action metadata for the active AutoAgent0 path."""
-
-    selected_source: str
-    selected_planner: str
-    selected_candidate_index: Optional[int] = None
-    fallback_selected: bool = False
-    fallback_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)

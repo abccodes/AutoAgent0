@@ -13,3 +13,6 @@ apex
 # pixi environments
 .pixi
 *.egg-info
+datasets/
+outputs/
+released_assets/
