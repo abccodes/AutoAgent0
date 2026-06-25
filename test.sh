@@ -8,7 +8,7 @@ SCENARIO_PATH="/home/jiageng/AutoAgent0/released_assets/scenarios/nuscenes/scene
 # Same invocation as test.sh, but drives the new-architecture pipeline.py:
 # the RAP subprocess only does inference (returns proposals+scores) and all
 # selection happens pipeline-side.
-CUDA_VISIBLE_DEVICES=2 pixi run python pipeline.py \
+CUDA_VISIBLE_DEVICES=2 pixi run python main.py \
   --scenario_path "$SCENARIO_PATH" \
   --base_path "/home/jiageng/AutoAgent0/configs/sim/nuscenes_base_local.yaml" \
   --camera_path "/home/jiageng/AutoAgent0/configs/sim/nuscenes_camera.yaml" \

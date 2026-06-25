@@ -62,6 +62,7 @@ from autoagent0.adapters.hugsim.candidate_visuals import get_candidate_visual_st
 from autoagent0.adapters.hugsim.task_overlay import draw_task_target_overlay
 from autoagent0.vlm.vlm_env import build_prefixed_vlm_env
 from autoagent0.experts.rule_based_env import build_prefixed_rule_based_env
+from autoagent0.verifiers import DummyVerifier
 
 FRONT_CAM_NAME = 'CAM_FRONT'
 REFERENCE_COLOR = (255, 230, 0)
@@ -71,6 +72,9 @@ PLAN_VIS_FORWARD_OFFSET_M = 4.5
 VIS_PLAN_MIN_PATH_M = 0.5
 VIS_PLAN_HOLD_FRAMES = 10**9
 PLAN_REPLAN_EVERY_STEPS = 2
+# Minimum verifier score for an action to be accepted; below this the loop must
+# fall back to recovery action selection.
+VERIFIER_SCORE_THRESHOLD = 0.5
 
 
 def _resolve_scene_model_path(model_base, scene_name):
@@ -418,7 +422,15 @@ def _open_scene_fifos(output, obs, info, include_privileged_pipe) -> SceneFifos:
     )
 
 
-def _request_plan(current_obs, current_info, privileged_info, fifos, planner_process, plan_adapter, include_privileged_pipe):
+def planner_trajectory_generate(current_obs, current_info, privileged_info, fifos, planner_process, include_privileged_pipe):
+    """Generate trajectory proposals from the planner subprocess.
+
+    Sends the current observation to the planner over the obs FIFO and reads back the
+    raw plan payload it produces (the minimal ``(proposals, scores)`` response, or the
+    full legacy plan payload). This is purely the *generation* half of planning: no
+    candidate selection happens here. Use :func:`trajectory_select` on the result to
+    pick the final trajectory.
+    """
     raise_if_process_exited(planner_process, "preparing planner request")
     # Ensure expected camera keys exist and fill missing ones with black frames.
     try:
@@ -457,15 +469,26 @@ def _request_plan(current_obs, current_info, privileged_info, fifos, planner_pro
     )
     write_pipe_message_file(fifos.obs_pipe_writer, plan_request_payload)
     print(f"[plan_request] wrote t={time.time():.6f}")
-    plan_payload = read_pipe_message_file(
+    raw_plan_payload = read_pipe_message_file(
         fifos.plan_pipe_reader,
         producer_process=planner_process,
         timeout_sec=fifos.plan_response_timeout_sec,
     )
     print(f"[plan_response] received t={time.time():.6f}")
-    if plan_adapter is not None and plan_payload is not None and plan_payload != 'Done':
-        plan_payload = plan_adapter(plan_payload, current_obs, current_info, privileged_info)
-    return plan_payload
+    return raw_plan_payload
+
+
+def trajectory_select(raw_plan_payload, plan_adapter, current_obs, current_info, privileged_info):
+    """Select a single trajectory from the planner-generated proposals.
+
+    When a ``plan_adapter`` (the pipeline-side selector) is provided it turns the raw
+    ``(proposals, scores)`` response from :func:`planner_trajectory_generate` into the
+    final plan payload. When no adapter is given the planner's payload is used as-is
+    (legacy behaviour, where the planner subprocess already performs selection).
+    """
+    if plan_adapter is not None and raw_plan_payload is not None and raw_plan_payload != 'Done':
+        return plan_adapter(raw_plan_payload, current_obs, current_info, privileged_info)
+    return raw_plan_payload
 
 
 def _parse_plan_payload(plan_payload, cnt, current_info) -> PlanDecision:
@@ -712,6 +735,7 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
     # full plan payload). pipeline.py passes an adapter that turns the new minimal
     # (proposals, scores) response into a plan payload via the pipeline-side selector.
 
+    # Create the HUGSIM simulator env and reset to the first observation + run bookkeeping.
     env = gymnasium.make('hugsim_env/HUGSim-v0', cfg=cfg, output=output)
 
     observations_save, infos_save = [], []
@@ -721,8 +745,10 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
     cnt = 0
     save_data = {'type': 'closeloop', 'frames': []}
 
+    # Open the obs/plan FIFOs to the planner subprocess and send the preflight handshake.
     fifos = _open_scene_fifos(output, obs, info, include_privileged_pipe)
 
+    # Init overlay-hold state, the (empty) plan decision, the overlay-image dir, and demo-task state.
     last_valid_overlay_plan = None
     last_valid_overlay_pose = None
     last_valid_overlay_plan_stale_frames = 0
@@ -735,11 +761,15 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
     demo_overlay_records = []
     demo_task_info = None
     demo_completion_reason = None
+    # Verifier that gates each control command before it is applied to the sim.
+    verifier = DummyVerifier()
     while not done:
 
+        # Re-reset the env if the previous step returned no observation.
         if obs is None or info is None:
             obs, info = env.reset()
             privileged_info = _get_privileged_info(env) if include_privileged_pipe else None
+        # Snapshot the current frame; stop early if a stop/park demo task is complete.
         current_obs, current_info = obs, info
         infos_save.append(current_info)
         if is_stop_task_complete(current_info):
@@ -753,11 +783,17 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
 
         print('ego pose', current_info['ego_pos'])
 
+        # Every N steps (or when no plan is held) query the planner, run selection,
+        # and parse the result into a PlanDecision; otherwise reuse the held decision.
         should_replan = (cnt % PLAN_REPLAN_EVERY_STEPS == 0) or (decision.selected_plan is None)
         if should_replan:
-            plan_payload = _request_plan(
+            raw_plan_payload = planner_trajectory_generate(
                 current_obs, current_info, privileged_info, fifos,
-                planner_process, plan_adapter, include_privileged_pipe,
+                planner_process, include_privileged_pipe,
+            )
+            plan_payload = trajectory_select(
+                raw_plan_payload, plan_adapter,
+                current_obs, current_info, privileged_info,
             )
             decision = _parse_plan_payload(plan_payload, cnt, current_info)
         plan_traj = decision.selected_plan
@@ -806,6 +842,17 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
 
             action = {'acc': acc, 'steer_rate': steer_rate}
             action = apply_demo_task_action_override(action, current_info)
+
+            action_score = verifier.score(action, current_info)
+            if action_score < VERIFIER_SCORE_THRESHOLD:
+                # The action was rejected by the verifier. Recovery action selection
+                # is not implemented yet; for now signal that the loop must take that
+                # path instead of stepping with a bad action.
+                raise NotImplementedError(
+                    f"action verifier score {action_score} < threshold "
+                    f"{VERIFIER_SCORE_THRESHOLD}; recovery select action not implemented yet"
+                )
+
             obs, reward, terminated, truncated, info = env.step(action)
             if include_privileged_pipe:
                 privileged_info = _get_privileged_info(env)
