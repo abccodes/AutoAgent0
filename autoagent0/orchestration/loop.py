@@ -722,6 +722,20 @@ def _finalize_and_evaluate(output, save_data, observations_save, infos_save, dem
         json.dump(results, f)
 
 
+def _compute_obj_velocities(current_info, prev_info):
+    curr_boxes = current_info.get("obj_boxes", [])
+    if prev_info is None:
+        return [[0.0, 0.0]] * len(curr_boxes)
+    prev_boxes = prev_info.get("obj_boxes", [])
+    dt = current_info.get("timestamp", 0.0) - prev_info.get("timestamp", 0.0)
+    if dt <= 0.0 or len(curr_boxes) != len(prev_boxes):
+        return [[0.0, 0.0]] * len(curr_boxes)
+    return [
+        [(c[0] - p[0]) / dt, (c[1] - p[1]) / dt]
+        for c, p in zip(curr_boxes, prev_boxes)
+    ]
+
+
 def _verify_plan_decision(decision, verifier, current_info):
     """Return whether the selected trajectory passes verification, plus its score."""
     plan_traj = decision.selected_plan
@@ -798,6 +812,8 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
         # camera streams
         current_obs, current_info = obs, info
         infos_save.append(current_info)
+        _prev_info = infos_save[-2] if len(infos_save) >= 2 else None
+        current_info["obj_vels"] = _compute_obj_velocities(current_info, _prev_info)
         if is_stop_task_complete(current_info):
             demo_completion_reason = 'stop_reached'
             done = True
