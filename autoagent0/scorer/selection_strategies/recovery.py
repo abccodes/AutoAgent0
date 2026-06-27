@@ -6,12 +6,21 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from autoagent0.scorer.agent_schemas import DesignChangeRequest
+from autoagent0.scorer.agent_schemas import DesignChangeRequest, FrameUncertainty
 from autoagent0.scorer.agent_trace import OrchestratorToolLog, attach_recovery_trace
 from autoagent0.scorer.selection_strategies.base import (
     BaseSelectionStrategy,
     LearnedPlannerSelection,
     SelectionOutcome,
+)
+from autoagent0.scorer.uncertainty import (
+    ROUTING_ZONE_LEAN_RULE_BASED,
+    ROUTING_ZONE_NORMAL,
+    ROUTING_ZONE_RULE_BASED_FALLBACK,
+    classify_routing_zone,
+    compute_cross_family_disagreement,
+    compute_intra_learned_disagreement,
+    compute_mode_count,
 )
 
 
@@ -94,6 +103,20 @@ class RecoveryStrategy(BaseSelectionStrategy):
         default_idx = default_row.get("proposal_index")
         default_score, default_score_raw = self._score_from_row(default_row, sel.score_fallback_key)
 
+        frame_uncertainty = self._maybe_compute_frame_uncertainty(
+            learned_candidate_rows=learned_candidate_rows,
+            rule_based_candidate_rows=rule_based_candidate_rows,
+            default_row=default_row,
+        )
+        if frame_uncertainty is not None:
+            tool_log.record(
+                "compute_uncertainty",
+                intra_learned_m=frame_uncertainty.intra_learned_m,
+                cross_family_m=frame_uncertainty.cross_family_m,
+                mode_count=frame_uncertainty.mode_count,
+                routing_zone=frame_uncertainty.routing_zone,
+            )
+
         tool_log.record(
             "request_critique",
             phase="default",
@@ -127,6 +150,7 @@ class RecoveryStrategy(BaseSelectionStrategy):
                     "fallback_selected_idx": int(default_selected_index),
                     "fallback_selected_source": default_selected_source,
                     "planner_gate_selected_planner": "learned",
+                    "autoagent0_frame_uncertainty": self._frame_uncertainty_debug(frame_uncertainty),
                 }
             )
             selection = LearnedPlannerSelection(
@@ -166,6 +190,7 @@ class RecoveryStrategy(BaseSelectionStrategy):
             redesign_candidate_budget=sel.autoagent0_cfg.redesign_candidate_budget,
             available_rule_based_count=len(rule_based_candidate_rows),
             has_rule_based_candidates=bool(rule_based_candidate_rows),
+            frame_uncertainty=frame_uncertainty,
         )
         tool_log.record(
             "request_design_change",
@@ -320,6 +345,7 @@ class RecoveryStrategy(BaseSelectionStrategy):
                     "allocation_strategy": design_change_request.allocation_strategy,
                     "include_learned": design_change_request.include_learned,
                     "include_rule_based": design_change_request.include_rule_based,
+                    "routing_mode": design_change_request.routing_mode,
                 },
                 "autoagent0_redesign_request": {
                     "reason": design_change_request.reason,
@@ -330,7 +356,9 @@ class RecoveryStrategy(BaseSelectionStrategy):
                     "allocation_strategy": design_change_request.allocation_strategy,
                     "include_learned": design_change_request.include_learned,
                     "include_rule_based": design_change_request.include_rule_based,
+                    "routing_mode": design_change_request.routing_mode,
                 },
+                "autoagent0_frame_uncertainty": self._frame_uncertainty_debug(frame_uncertainty),
                 "autoagent0_revised_candidate_count": len(expanded_rows),
                 "autoagent0_requested_learned_candidate_count": design_change_request.learned_budget,
                 "autoagent0_requested_rule_based_candidate_count": design_change_request.rule_based_budget,
@@ -427,29 +455,120 @@ class RecoveryStrategy(BaseSelectionStrategy):
             return False
         return bool(should_redesign)
 
-    @staticmethod
     def _build_design_change_request(
+        self,
         critique_result: Dict[str, object],
         *,
         redesign_candidate_budget: int,
         available_rule_based_count: int,
         has_rule_based_candidates: bool,
+        frame_uncertainty: Optional[FrameUncertainty] = None,
     ) -> DesignChangeRequest:
         corrective_action = critique_result.get("autoagent0_critique_corrective_action")
         rejection_reason = critique_result.get("autoagent0_critique_reasoning") or "vlm_critic_requested_redesign"
         candidate_budget = max(1, int(redesign_candidate_budget))
         learned_budget = 8
         rule_based_budget = 5 if has_rule_based_candidates else 0
+        allocation_strategy = "learned8_rule5_static_v1"
+        routing_mode = ROUTING_ZONE_NORMAL
+
+        if frame_uncertainty is not None and has_rule_based_candidates:
+            zone = frame_uncertainty.routing_zone
+            if zone == ROUTING_ZONE_RULE_BASED_FALLBACK:
+                learned_budget = 0
+                rule_based_budget = candidate_budget
+                allocation_strategy = (
+                    f"rule_based_only_uncertainty_intra{frame_uncertainty.intra_learned_m:.2f}"
+                    f"_cross{frame_uncertainty.cross_family_m:.2f}"
+                    f"_modes{frame_uncertainty.mode_count}"
+                )
+                routing_mode = ROUTING_ZONE_RULE_BASED_FALLBACK
+            elif zone == ROUTING_ZONE_LEAN_RULE_BASED:
+                shift = max(1, learned_budget // 2)
+                learned_budget = max(0, learned_budget - shift)
+                rule_based_budget = max(rule_based_budget, candidate_budget - learned_budget)
+                allocation_strategy = f"{allocation_strategy}_lean_rule_based"
+                routing_mode = ROUTING_ZONE_LEAN_RULE_BASED
+
+        if not has_rule_based_candidates:
+            rule_based_budget = 0
+            allocation_strategy = f"{allocation_strategy}_no_rule_based_available"
+
         return DesignChangeRequest(
             reason=str(rejection_reason),
             corrective_action=None if corrective_action is None else str(corrective_action),
             candidate_budget=candidate_budget,
             learned_budget=learned_budget,
             rule_based_budget=rule_based_budget,
-            allocation_strategy="learned8_rule5_static_v1",
+            allocation_strategy=allocation_strategy,
             include_learned=True,
             include_rule_based=bool(has_rule_based_candidates and int(available_rule_based_count) > 0),
+            routing_mode=routing_mode,
         )
+
+    def _maybe_compute_frame_uncertainty(
+        self,
+        *,
+        learned_candidate_rows: Sequence[Dict[str, object]],
+        rule_based_candidate_rows: Sequence[Dict[str, object]],
+        default_row: Dict[str, object],
+    ) -> Optional[FrameUncertainty]:
+        cfg = self.selector.autoagent0_cfg
+        if not getattr(cfg, "uncertainty_enabled", False):
+            return None
+
+        horizon = int(getattr(cfg, "uncertainty_horizon_steps", 0)) or None
+        intra = compute_intra_learned_disagreement(
+            learned_candidate_rows,
+            horizon_steps=horizon,
+        )
+        cross = compute_cross_family_disagreement(
+            default_row,
+            rule_based_candidate_rows,
+            horizon_steps=horizon,
+        )
+        modes = compute_mode_count(
+            learned_candidate_rows,
+            k_max=int(cfg.uncertainty_mode_k_max),
+            horizon_steps=horizon,
+            backend=str(cfg.uncertainty_kmeans_backend),
+        )
+        zone = classify_routing_zone(
+            intra["disagreement_m"],
+            cross["disagreement_m"],
+            modes["mode_count"],
+            t_intra=float(cfg.uncertainty_t_intra),
+            t_cross=float(cfg.uncertainty_t_cross),
+            mode_count_high=int(cfg.uncertainty_mode_count_high),
+        )
+        return FrameUncertainty(
+            intra_learned_m=float(intra["disagreement_m"]),
+            cross_family_m=float(cross["disagreement_m"]),
+            mode_count=int(modes["mode_count"]),
+            routing_zone=zone,
+            metadata={
+                "intra": intra,
+                "cross": cross,
+                "modes": modes,
+                "thresholds": {
+                    "t_intra": float(cfg.uncertainty_t_intra),
+                    "t_cross": float(cfg.uncertainty_t_cross),
+                    "mode_count_high": int(cfg.uncertainty_mode_count_high),
+                },
+            },
+        )
+
+    @staticmethod
+    def _frame_uncertainty_debug(frame_uncertainty: Optional[FrameUncertainty]) -> Optional[Dict[str, Any]]:
+        if frame_uncertainty is None:
+            return None
+        return {
+            "intra_learned_m": frame_uncertainty.intra_learned_m,
+            "cross_family_m": frame_uncertainty.cross_family_m,
+            "mode_count": frame_uncertainty.mode_count,
+            "routing_zone": frame_uncertainty.routing_zone,
+            "metadata": frame_uncertainty.metadata,
+        }
 
     @staticmethod
     def _build_expanded_design(
