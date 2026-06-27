@@ -62,7 +62,7 @@ from autoagent0.adapters.hugsim.candidate_visuals import get_candidate_visual_st
 from autoagent0.adapters.hugsim.task_overlay import draw_task_target_overlay
 from autoagent0.vlm.vlm_env import build_prefixed_vlm_env
 from autoagent0.experts.rule_based_env import build_prefixed_rule_based_env
-from autoagent0.verifiers import TTCVerifier
+from autoagent0.verifiers import PDMSVerifier
 
 FRONT_CAM_NAME = 'CAM_FRONT'
 REFERENCE_COLOR = (255, 230, 0)
@@ -803,7 +803,11 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
     demo_overlay_records = []
     demo_task_info = None
     demo_completion_reason = None
-    verifier = TTCVerifier(scene_ply_path=os.path.join(output, 'scene.ply'), timestep=0.5)
+    verifier = PDMSVerifier(
+        scene_ply_path=os.path.join(output, 'scene.ply'),
+        ground_ply_path=os.path.join(output, 'ground.ply'),
+        timestep=0.5,
+    )
     while not done:
 
         if obs is None or info is None:

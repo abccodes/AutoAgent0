@@ -5,6 +5,6 @@ turned into a control action. The loop rejects trajectories whose score falls
 below a threshold and recovers by regenerating the plan with a different planner.
 """
 from autoagent0.verifiers.base import BaseVerifier
-from autoagent0.verifiers.dummy import TTCVerifier
+from autoagent0.verifiers.dummy import PDMSVerifier, VerificationResult
 
-__all__ = ["BaseVerifier", "TTCVerifier"]
+__all__ = ["BaseVerifier", "PDMSVerifier", "VerificationResult"]
