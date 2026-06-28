@@ -136,7 +136,10 @@ def _load_rule_based_service(cfg: RuleBasedMergeConfig):
     if repo_root_str not in sys.path:
         sys.path.insert(0, repo_root_str)
 
-    from privileged_planner.service import PrivilegedPlannerService
+    try:
+        from privileged_planner_sd.service import PrivilegedPlannerService
+    except ImportError:  # older Rule-Planner layout
+        from privileged_planner.service import PrivilegedPlannerService
 
     with cfg.config_path.open("r", encoding="utf-8") as fh:
         planner_cfg = yaml.safe_load(fh) or {}
