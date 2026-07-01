@@ -404,6 +404,42 @@ class ScoreCalculator:
                     return 0.0  # Collision detected
         return 1.0
 
+    def no_collision_detail(self, ego_box, planned_traj, obs_lists, scene_xyz):
+        """Like :meth:`_calculate_no_collision` but returns *why* it failed.
+
+        Returns a dict ``{passed, step, type, obstacle}`` describing the first
+        colliding step along ``planned_traj`` (instead of just a 0/1 score), so a
+        failure-conditioned recovery planner can react to what was hit:
+
+        - ``passed``   -- ``True`` if the whole trajectory is collision-free.
+        - ``step``     -- index into ``planned_traj`` where the first hit occurs.
+        - ``type``     -- ``"background"`` (static scene) or ``"obstacle"`` (a car).
+        - ``obstacle`` -- the hit obstacle box ``[x, y, z, w, l, h, yaw]`` when the
+          type is ``"obstacle"``; ``None`` for background hits.
+
+        The geometry mirrors :meth:`_calculate_no_collision` exactly so the verdict
+        agrees with the score used elsewhere.
+        """
+        ego_x, ego_y, z, ego_w, ego_l, ego_h, ego_yaw = ego_box
+        ego_verts_local = ego_verts_canonic * np.array([ego_l, ego_w, ego_h])
+        for idx in range(planned_traj.shape[0]):
+            ego_x, ego_y, ego_yaw = planned_traj[idx]
+            ego_trans_mat = np.eye(4)
+            ego_trans_mat[:3, :3] = SCR.from_euler('z', ego_yaw).as_matrix()
+            ego_trans_mat[:3, 3] = np.array([ego_x, ego_y, z])
+            ego_verts_global = (ego_trans_mat[:3, :3] @ ego_verts_local.T).T + ego_trans_mat[:3, 3]
+            ego_verts_global = torch.from_numpy(ego_verts_global).float().cuda()
+            if bg_collision_det(scene_xyz, ego_verts_global):
+                return {"passed": False, "step": idx, "type": "background", "obstacle": None}
+            ego_poly = create_rectangle(ego_x, ego_y, ego_w, ego_l, ego_yaw)
+            obs_list = obs_lists[idx if idx < len(obs_lists) else -1]
+            for obs in obs_list:
+                obs_x, obs_y, _, obs_w, obs_l, _, obs_yaw = obs
+                obs_poly = create_rectangle(obs_x, obs_y, obs_w, obs_l, obs_yaw)
+                if ego_poly.intersects(obs_poly):
+                    return {"passed": False, "step": idx, "type": "obstacle", "obstacle": list(obs)}
+        return {"passed": True, "step": None, "type": None, "obstacle": None}
+
     def _single_frame_no_collision(self, ego_box, obs_list, scene_xyz, timestamp):
         ego_x, ego_y, z, ego_w, ego_l, ego_h, ego_yaw = ego_box
         ego_verts_local = ego_verts_canonic * np.array([ego_l, ego_w, ego_h])
