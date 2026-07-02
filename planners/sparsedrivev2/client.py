@@ -1516,13 +1516,12 @@ def main() -> int:
     LOG.info("Starting SparseDrive adapter")
 
     # Env vars
-    repo_root = Path(os.environ.get("SPARSEDRIVE_REPO_ROOT", os.environ.get("DRIVOR_REPO_ROOT", ""))).expanduser().resolve()
-    checkpoint = os.environ.get("SPARSEDRIVE_CHECKPOINT", os.environ.get("DRIVOR_CHECKPOINT", ""))
-    dino = os.environ.get("SPARSEDRIVE_DINO", "")
+    repo_root = Path(os.environ["SPARSEDRIVE_REPO_ROOT"]).expanduser().resolve()
+    checkpoint = os.environ["SPARSEDRIVE_CHECKPOINT"]
     device_name = os.environ.get("SPARSEDRIVE_DEVICE", os.environ.get("DRIVOR_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"))
     device = torch.device(device_name)
 
-    LOG.info("Repo root: %s, checkpoint: %s, dino: %s, device: %s", repo_root, checkpoint, dino, device)
+    LOG.info("Repo root: %s, checkpoint: %s, device: %s", repo_root, checkpoint, device)
 
     # Add repo root to sys.path (already done above)
     sys.path.insert(0, str(repo_root))
