@@ -63,6 +63,7 @@ from autoagent0.adapters.hugsim.task_overlay import draw_task_target_overlay
 from autoagent0.vlm.vlm_env import build_prefixed_vlm_env
 from autoagent0.experts.rule_based_env import build_prefixed_rule_based_env
 from autoagent0.verifiers import PDMSVerifier
+from autoagent0.verifiers.semantic import SemanticVerifier, apply_semantic_verifier_to_decision
 
 FRONT_CAM_NAME = 'CAM_FRONT'
 REFERENCE_COLOR = (255, 230, 0)
@@ -72,6 +73,7 @@ PLAN_VIS_FORWARD_OFFSET_M = 4.5
 VIS_PLAN_MIN_PATH_M = 0.5
 VIS_PLAN_HOLD_FRAMES = 10**9
 PLAN_REPLAN_EVERY_STEPS = 2
+SEMANTIC_VERIFY_EVERY_STEPS = 10
 VERIFIER_SCORE_THRESHOLD = 0.5
 
 
@@ -779,7 +781,7 @@ def _recover_plan_decision(
     return _parse_plan_payload(recovered_payload, cnt, current_info)
 
 
-def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, planner_process=None, plan_adapter=None, ad_name=None, recover_plan=None):
+def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, planner_process=None, plan_adapter=None, ad_name=None, recover_plan=None, semantic_verifier=None, semantic_feedback_holder=None):
     env = gymnasium.make('hugsim_env/HUGSim-v0', cfg=cfg, output=output)
 
     observations_save, infos_save = [], []
@@ -808,6 +810,11 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
         ground_ply_path=os.path.join(output, 'ground.ply'),
         timestep=0.5,
     )
+    if semantic_verifier is not None and semantic_verifier.cfg.enabled:
+        semantic_verifier.preload()
+    last_semantic_feedback = None
+    if semantic_feedback_holder is None:
+        semantic_feedback_holder = {}
     while not done:
 
         if obs is None or info is None:
@@ -854,6 +861,48 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
                     current_obs, current_info, infos_save, privileged_info, cnt,
                 )
         plan_traj = decision.selected_plan
+
+        should_semantic_verify = (
+            semantic_verifier is not None
+            and semantic_verifier.cfg.enabled
+            and decision.selected_plan is not None
+            and cnt % SEMANTIC_VERIFY_EVERY_STEPS == 0
+        )
+        if should_semantic_verify:
+            previous_feedback = None
+            if isinstance(last_semantic_feedback, dict) and not last_semantic_feedback.get("accepted", True):
+                previous_feedback = last_semantic_feedback.get("rejection_reason")
+
+            recover_fn = None
+            if semantic_verifier.cfg.gate_on_reject and recover_plan is not None:
+                def _recover_semantic_decision(current_decision):
+                    return _recover_plan_decision(
+                        current_decision,
+                        VERIFIER_SCORE_THRESHOLD - 1.0,
+                        recover_plan,
+                        current_obs,
+                        current_info,
+                        infos_save,
+                        privileged_info,
+                        cnt,
+                    )
+                recover_fn = _recover_semantic_decision
+
+            semantic_outcome = apply_semantic_verifier_to_decision(
+                semantic_verifier,
+                decision=decision,
+                camera_images=current_obs["rgb"],
+                current_info=current_info,
+                frame_index=cnt,
+                previous_feedback=previous_feedback,
+                recover_decision_fn=recover_fn,
+            )
+            decision = semantic_outcome.decision
+            semantic_feedback = semantic_outcome.feedback
+            if semantic_feedback is not None:
+                last_semantic_feedback = semantic_feedback
+                semantic_feedback_holder["feedback"] = semantic_feedback
+            plan_traj = decision.selected_plan
 
         if plan_traj is not None:
             imu_plan_traj = plan_traj[:, [1, 0]]
