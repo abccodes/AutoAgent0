@@ -11,60 +11,46 @@ if [[ "${CUDA_ID}" != "inherit" ]]; then
     export CUDA_VISIBLE_DEVICES="${CUDA_ID}"
 fi
 
-# Debug: surface key env and paths for troubleshooting torch/LD issues
-echo "LAUNCH DEBUG: CUDA_ID=${CUDA_ID} OUTPUT_DIR=${OUTPUT_DIR}"
-echo "LAUNCH DEBUG: initial LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-unset}"
-echo "LAUNCH DEBUG: (SparseDriveV2 env vars will be shown after defaults are applied)"
 # Provided by HUGSIM closed_loop.py via extra_env
 : "${SPARSEDRIVE_PYTHON_BIN:=python}"
 : "${SPARSEDRIVE_REPO_ROOT:?SPARSEDRIVE_REPO_ROOT is not set}"
 : "${SPARSEDRIVE_CHECKPOINT:?SPARSEDRIVE_CHECKPOINT is not set}"
 : "${SPARSEDRIVE_DEVICE:=cuda}"
-#disable since we don't have a valid yaml from sparsedrive out of the box, and the default config should be fine.
-# : "${SPARSEDRIVE_CONFIG:?SPARSEDRIVE_CONFIG is not set}"
 
-# Optional: if you add config composition
-# : "${SPARSEDRIVE_CONFIG_DIR:?SPARSEDRIVE_CONFIG_DIR is not set}"
-# : "${SPARSEDRIVE_EXPERIMENT:?SPARSEDRIVE_EXPERIMENT is not set}"
+echo "LAUNCH DEBUG: CUDA_ID=${CUDA_ID} OUTPUT_DIR=${OUTPUT_DIR}"
+echo "LAUNCH DEBUG: SPARSEDRIVE_PYTHON_BIN=${SPARSEDRIVE_PYTHON_BIN}"
+echo "LAUNCH DEBUG: SPARSEDRIVE_REPO_ROOT=${SPARSEDRIVE_REPO_ROOT}"
+echo "LAUNCH DEBUG: SPARSEDRIVE_CHECKPOINT=${SPARSEDRIVE_CHECKPOINT}"
 
-export PYTHONPATH="${HUGSIM_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
-
-# Ensure the Sparsedrive env's torch CUDA libs resolve before system/HUGSIM copies.
-echo "LAUNCH DEBUG: SPARSEDRIVE_PYTHON_BIN=${SPARSEDRIVE_PYTHON_BIN:-unset}"
+# Build sanitized env for SparseDrive child process only.
 SPARSEDRIVE_ENV_ROOT="$(cd "$(dirname "${SPARSEDRIVE_PYTHON_BIN}")/.." && pwd)"
-echo "LAUNCH DEBUG: SPARSEDRIVE_ENV_ROOT=${SPARSEDRIVE_ENV_ROOT}"
-SPARSEDRIVE_TORCH_LIB_DIR="${SPARSEDRIVE_ENV_ROOT}/lib/python3.8/site-packages/torch/lib"
+SPARSEDRIVE_PY_VER="$("${SPARSEDRIVE_PYTHON_BIN}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+SPARSEDRIVE_TORCH_LIB_DIR="${SPARSEDRIVE_ENV_ROOT}/lib/python${SPARSEDRIVE_PY_VER}/site-packages/torch/lib"
+
+# Keep HUGSIM import path for planners/common, but sanitize all conflicting runtime vars.
+export PYTHONPATH="${HUGSIM_ROOT}"
+
+# Remove variables known to cause cross-env contamination.
+unset PIP_PREFIX || true
+unset PIP_TARGET || true
+unset PYTHONHOME || true
+
+# Start with conda env libs only.
 if [[ -d "${SPARSEDRIVE_TORCH_LIB_DIR}" ]]; then
-  export LD_LIBRARY_PATH="${SPARSEDRIVE_TORCH_LIB_DIR}:${SPARSEDRIVE_ENV_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  export LD_LIBRARY_PATH="${SPARSEDRIVE_TORCH_LIB_DIR}:${SPARSEDRIVE_ENV_ROOT}/lib"
+else
+  export LD_LIBRARY_PATH="${SPARSEDRIVE_ENV_ROOT}/lib"
 fi
 
-echo "LAUNCH DEBUG: SPARSEDRIVE_PYTHON_BIN=${SPARSEDRIVE_PYTHON_BIN:-unset}"
-echo "LAUNCH DEBUG: SPARSEDRIVE_REPO_ROOT=${SPARSEDRIVE_REPO_ROOT:-unset}"
-echo "LAUNCH DEBUG: SPARSEDRIVE_CHECKPOINT=${SPARSEDRIVE_CHECKPOINT:-unset}"
+# Ensure conda env bin is first.
+export PATH="${SPARSEDRIVE_ENV_ROOT}/bin:${PATH}"
 
-echo "LAUNCH DEBUG: SPARSEDRIVE_TORCH_LIB_DIR=${SPARSEDRIVE_TORCH_LIB_DIR} (exists=$( [[ -d \"${SPARSEDRIVE_TORCH_LIB_DIR}\" ]] && echo true || echo false ))"
-echo "LAUNCH DEBUG: LD_LIBRARY_PATH after adding drivor torch lib=${LD_LIBRARY_PATH:-unset}"
-
-# Prevent the DrivoR env from accidentally loading HUGSIM pixi torch libs.
-if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
-  CLEANED_LD_LIBRARY_PATH="$(python3 - <<'PY'
-import os
-entries = os.environ.get("LD_LIBRARY_PATH", "").split(":")
-filtered = [entry for entry in entries if "/HUGSIM/.pixi/" not in entry]
-print(":".join(filtered))
-PY
-)"
-  if [[ -n "${CLEANED_LD_LIBRARY_PATH}" ]]; then
-    export LD_LIBRARY_PATH="${CLEANED_LD_LIBRARY_PATH}"
-  else
-    unset LD_LIBRARY_PATH
-  fi
-fi
-
-echo "LAUNCH DEBUG: LD_LIBRARY_PATH after cleaning HUGSIM entries=${LD_LIBRARY_PATH:-unset}"
-
-echo "LAUNCH DEBUG: Environment summary (CUDA/LD/PYTHONPATH):"
-env | grep -E 'CUDA|LD_LIBRARY_PATH|PYTHONPATH' || true
+echo "LAUNCH DEBUG: SPARSEDRIVE_ENV_ROOT=${SPARSEDRIVE_ENV_ROOT}"
+echo "LAUNCH DEBUG: SPARSEDRIVE_PY_VER=${SPARSEDRIVE_PY_VER}"
+echo "LAUNCH DEBUG: SPARSEDRIVE_TORCH_LIB_DIR=${SPARSEDRIVE_TORCH_LIB_DIR} (exists=$( [[ -d "${SPARSEDRIVE_TORCH_LIB_DIR}" ]] && echo true || echo false ))"
+echo "LAUNCH DEBUG: PYTHONPATH=${PYTHONPATH:-unset}"
+echo "LAUNCH DEBUG: LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-unset}"
+echo "LAUNCH DEBUG: PATH(head)=$(echo "${PATH}" | cut -d: -f1-3)"
 
 cd "${SPARSEDRIVE_REPO_ROOT}"
 
