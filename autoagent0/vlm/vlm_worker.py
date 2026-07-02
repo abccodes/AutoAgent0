@@ -55,12 +55,14 @@ def main() -> int:
 
     import torch
 
+    force_cpu_offload = os.environ.get("PLANNER_VLM_FORCE_CPU_OFFLOAD", "").strip().lower() in {"1", "true", "yes"}
     requested_device = str(args.device).strip().lower()
     if requested_device == "auto":
-        requested_device = "cuda" if torch.cuda.is_available() else "cpu"
+        if force_cpu_offload:
+            requested_device = "cpu"
+        else:
+            requested_device = "cuda" if torch.cuda.is_available() else "cpu"
     enable_thinking = str(args.enable_thinking).strip().lower() in {"1", "true", "yes", "on"}
-
-    force_cpu_offload = os.environ.get("PLANNER_VLM_FORCE_CPU_OFFLOAD", "").strip().lower() in {"1", "true", "yes"}
     use_qwen36_loader = _is_qwen36_model(args.model_id)
 
     load_started = time.time()
@@ -82,11 +84,32 @@ def main() -> int:
             **model_kwargs,
         )
     else:
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            args.model_id,
-            dtype="auto",
+        model_kwargs = {
+            "dtype": "auto",
+            "low_cpu_mem_usage": True,
+        }
+        use_device_map = (
+            force_cpu_offload
+            or requested_device in {"auto", "cpu"}
         )
-        model.to(requested_device)
+        if requested_device == "cpu":
+            model_kwargs["device_map"] = "cpu"
+            model = Qwen3VLForConditionalGeneration.from_pretrained(
+                args.model_id,
+                **model_kwargs,
+            )
+        elif use_device_map:
+            model_kwargs["device_map"] = "auto"
+            model = Qwen3VLForConditionalGeneration.from_pretrained(
+                args.model_id,
+                **model_kwargs,
+            )
+        else:
+            model = Qwen3VLForConditionalGeneration.from_pretrained(
+                args.model_id,
+                dtype="auto",
+            )
+            model.to(requested_device)
     model.eval()
     _log(f"model_load_done elapsed_sec={time.time() - load_started:.3f}")
     processor_started = time.time()

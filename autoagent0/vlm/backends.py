@@ -17,6 +17,15 @@ from autoagent0.vlm.parsing import normalize_token_usage, try_parse_json
 
 LOG = logging.getLogger(__name__)
 
+_SUBPROCESS_CUDA_VISIBLE_DEVICES: Optional[str] = None
+
+
+def set_vlm_subprocess_cuda_visible_devices(gpu_index: Optional[str]) -> None:
+    """Pin the VLM worker subprocess to one physical GPU without touching the parent process."""
+    global _SUBPROCESS_CUDA_VISIBLE_DEVICES
+    value = str(gpu_index).strip() if gpu_index is not None else ""
+    _SUBPROCESS_CUDA_VISIBLE_DEVICES = value or None
+
 
 class Qwen3TrajectorySelector:
     def __init__(self, model_id: str, device: str, max_new_tokens: int) -> None:
@@ -150,6 +159,12 @@ class SubprocessQwen3TrajectorySelector:
             return self._proc
         worker_log_path = self.worker_script.with_name("vlm_worker.stderr.log")
         self._stderr_file = worker_log_path.open("a", encoding="utf-8")
+        env = os.environ.copy()
+        device_for_worker = self.device
+        if _SUBPROCESS_CUDA_VISIBLE_DEVICES is not None:
+            env["CUDA_VISIBLE_DEVICES"] = _SUBPROCESS_CUDA_VISIBLE_DEVICES
+            if str(device_for_worker).startswith("cuda"):
+                device_for_worker = "cuda:0"
         self._proc = subprocess.Popen(
             [
                 self.python_bin,
@@ -158,7 +173,7 @@ class SubprocessQwen3TrajectorySelector:
                 "--model-id",
                 self.model_id,
                 "--device",
-                self.device,
+                device_for_worker,
                 "--max-new-tokens",
                 str(self.max_new_tokens),
                 "--temperature",
@@ -175,7 +190,7 @@ class SubprocessQwen3TrajectorySelector:
             stderr=self._stderr_file,
             text=True,
             bufsize=1,
-            env=os.environ.copy(),
+            env=env,
         )
         self._ready = False
         self._stdout_buffer = ""

@@ -16,3 +16,6 @@ apex
 datasets/
 outputs/
 released_assets/
+
+# runtime worker logs
+*.stderr.log

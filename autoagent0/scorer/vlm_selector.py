@@ -44,6 +44,7 @@ from autoagent0.vlm.parsing import (
     coerce_critique_result as _aa_coerce_critique_result,
     coerce_candidate_scores as _aa_coerce_candidate_scores,
     coerce_intervention_decision as _aa_coerce_intervention_decision,
+    coerce_semantic_verifier_result as _aa_coerce_semantic_verifier_result,
     intervention_severity_band as _aa_intervention_severity_band,
     normalize_corrective_action as _aa_normalize_corrective_action,
     select_from_vlm_scores as _aa_select_from_vlm_scores,
@@ -57,6 +58,7 @@ from autoagent0.prompts.orchestrator import (
     _summarize_gate_candidates as _aa_summarize_gate_candidates,
 )
 from autoagent0.prompts.critic import build_critic_prompt as _aa_build_critic_prompt
+from autoagent0.prompts.semantic_verifier import build_semantic_verifier_prompt as _aa_build_semantic_verifier_prompt
 from autoagent0.prompts.planner import build_final_action_selection_prompt as _aa_build_final_action_selection_prompt
 from autoagent0.vlm.backends import (
     Qwen3TrajectorySelector,
@@ -428,6 +430,117 @@ class VLMPlanSelector:
         }
         if self.cfg.save_debug_artifacts:
             result_path = self.debug_dir / f"{frame_stem}_autoagent0_{stage}_critique.json"
+            result_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+        else:
+            for temp_path in temp_paths:
+                temp_path.unlink(missing_ok=True)
+        return result
+
+    def verify_semantic_track(
+        self,
+        *,
+        frame_index: int,
+        camera_images: Dict[str, np.ndarray],
+        info: Dict[str, object],
+        candidate_row: Dict[str, object],
+        previous_feedback: Optional[str] = None,
+    ) -> Dict[str, object]:
+        route_instruction = resolve_route_instruction(info)
+        task_target_hint = describe_task_target_hint(info)
+        camera_order = resolve_vlm_camera_order(self.cfg.camera_mode or "front_only")
+        timestamp = float(info.get("timestamp", 0.0))
+        candidate_rows = build_candidate_rows(
+            [candidate_row],
+            current_ego_speed_mps=extract_current_ego_speed_mps(info),
+        )
+
+        def _fallback_result(error: Optional[str]) -> Dict[str, object]:
+            return {
+                "semantic_verifier_accepted": True,
+                "semantic_verifier_on_track": True,
+                "semantic_verifier_confidence": None,
+                "semantic_verifier_reasoning": "Semantic verifier unavailable; keeping current plan.",
+                "semantic_verifier_error": error,
+                "semantic_verifier_elapsed_sec": 0.0,
+                "semantic_verifier_token_usage": _empty_token_usage(),
+                "semantic_verifier_raw": None,
+                "route_instruction": route_instruction,
+                "frame_index": frame_index,
+                "timestamp": timestamp,
+            }
+
+        if not self.cfg.enabled:
+            return _fallback_result("semantic_verifier_disabled")
+        selector = self._ensure_selector()
+        if selector is None:
+            return _fallback_result(self._disabled_reason or "selector_unavailable")
+
+        frame_stem = f"frame_{frame_index:04d}"
+        temp_paths: List[Path] = []
+        overlays = render_candidate_overlays(
+            camera_images,
+            info,
+            candidate_rows,
+            camera_order=camera_order,
+        )
+        image_paths = self._write_stage_overlays(
+            frame_stem=frame_stem,
+            suffix="semantic_verifier",
+            overlays=overlays,
+            camera_order=camera_order,
+            temp_paths=temp_paths,
+        )
+        prompt = _aa_build_semantic_verifier_prompt(
+            candidate_rows[0],
+            route_instruction,
+            task_target_hint=task_target_hint,
+            previous_feedback=previous_feedback,
+            camera_order=camera_order,
+        )
+        try:
+            inference_result = selector.infer_prompt(
+                image_paths=image_paths,
+                prompt=prompt,
+                max_new_tokens=self.cfg.max_new_tokens,
+                timeout_sec=self.cfg.timeout_sec,
+            )
+        except Exception as exc:
+            LOG.exception("Semantic verifier failed")
+            inference_result = {
+                "raw_output": "",
+                "parsed_output": None,
+                "elapsed_sec": 0.0,
+                "prompt": prompt,
+                "error": str(exc),
+                "token_usage": _empty_token_usage(),
+            }
+
+        elapsed_sec = float(inference_result.get("elapsed_sec", 0.0))
+        token_usage = _normalize_token_usage(inference_result.get("token_usage"))
+        parsed = _aa_coerce_semantic_verifier_result(inference_result.get("parsed_output"))
+        error = parsed.error
+        if elapsed_sec > self.cfg.timeout_sec:
+            error = f"semantic_verifier_timeout:{elapsed_sec:.3f}"
+        elif inference_result.get("error"):
+            error = str(inference_result.get("error"))
+        accepted = bool(parsed.on_track) if error is None else True
+
+        result = {
+            "semantic_verifier_accepted": accepted,
+            "semantic_verifier_on_track": accepted,
+            "semantic_verifier_confidence": parsed.confidence,
+            "semantic_verifier_reasoning": parsed.reasoning,
+            "semantic_verifier_error": error,
+            "semantic_verifier_elapsed_sec": elapsed_sec,
+            "semantic_verifier_token_usage": token_usage,
+            "semantic_verifier_raw": parsed.raw or inference_result.get("parsed_output"),
+            "semantic_verifier_result": inference_result,
+            "route_instruction": route_instruction,
+            "frame_index": frame_index,
+            "timestamp": timestamp,
+        }
+        if self.cfg.save_debug_artifacts:
+            result_path = self.debug_dir / f"{frame_stem}_semantic_verifier.json"
             result_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
         else:
             for temp_path in temp_paths:
