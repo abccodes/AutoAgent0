@@ -51,6 +51,7 @@ from autoagent0.vlm.vlm_env import (
     build_prefixed_vlm_env,
     get_prefixed_env_value,
 )
+from autoagent0.verifiers.semantic import SemanticVerifier
 
 # Per-planner selection labels (mirror the legacy clients' arguments). All three
 # now share LearnedPlannerSelector.
@@ -300,8 +301,11 @@ if __name__ == "__main__":
     )
 
     planner_output_suffix = ad
-    if planner_config.get(ad, {}).get("vlm", {}).get("enabled", False):
-        planner_output_suffix = planner_config.get(ad, {}).get("output_suffix", f"{ad}_vlm")
+    pc = planner_config.get(ad, {})
+    if pc.get("vlm", {}).get("enabled", False):
+        planner_output_suffix = pc.get("output_suffix", f"{ad}_vlm")
+    elif pc.get("semantic_verifier", {}).get("enabled", False):
+        planner_output_suffix = pc.get("output_suffix", f"{ad}_semantic_verifier")
     output_root_override = os.environ.get("BENCHMARK_OUTPUT_ROOT_OVERRIDE", "").strip()
     if output_root_override:
         cfg.base.output_dir = output_root_override
@@ -327,12 +331,19 @@ if __name__ == "__main__":
     extra_env = _build_launch_env(cfg, ad)
 
     selector, vlm_selector, rule_based_merge_cfg = _build_selector(cfg, output, ad)
+    pc = cfg.planner[ad]
+    semantic_verifier = SemanticVerifier.from_planner_config(
+        pc,
+        output,
+        planner_python_bin=pc.get("python_bin", "python"),
+    )
+    semantic_feedback_holder: dict = {}
     # Recovery runs the rule-based proposals through the full selection pipeline
     # (incl. the agentic recovery loop). Only meaningful with VLM enabled; with VLM
     # disabled there is no recovery and the loop keeps the learned plan.
     recover_plan = (
         _build_recover_plan(selector, rule_based_merge_cfg)
-        if selector.vlm_cfg.enabled
+        if selector.vlm_cfg.enabled or semantic_verifier.cfg.gate_on_reject
         else None
     )
 
@@ -341,11 +352,15 @@ if __name__ == "__main__":
     def plan_adapter(raw_response, current_obs, current_info, privileged_info):
         proposals, scores = raw_response
         info_history.append(dict(current_info))
+        info_for_select = dict(current_info)
+        semantic_feedback = semantic_feedback_holder.get("feedback")
+        if semantic_feedback:
+            info_for_select["semantic_verifier_feedback"] = semantic_feedback
         return selector.select(
             proposals=proposals,
             scores=scores,
             obs=current_obs,
-            info=current_info,
+            info=info_for_select,
             info_history=list(info_history),
             privileged_info=privileged_info,
         )
@@ -369,6 +384,8 @@ if __name__ == "__main__":
             plan_adapter=plan_adapter,
             ad_name=ad,
             recover_plan=recover_plan,
+            semantic_verifier=semantic_verifier,
+            semantic_feedback_holder=semantic_feedback_holder,
         )
         check_alive(process)
     except Exception:

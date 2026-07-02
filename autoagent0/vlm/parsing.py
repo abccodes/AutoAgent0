@@ -245,6 +245,63 @@ def coerce_critique_result(parsed: object) -> CritiqueResult:
     )
 
 
+@dataclass(frozen=True)
+class SemanticVerifierParseResult:
+    """Structured result parsed from the semantic verifier VLM output."""
+
+    on_track: bool
+    confidence: Optional[float] = None
+    reasoning: Optional[str] = None
+    error: Optional[str] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
+def coerce_semantic_verifier_result(parsed: object) -> SemanticVerifierParseResult:
+    if not isinstance(parsed, dict):
+        return SemanticVerifierParseResult(
+            on_track=True,
+            error="semantic_verifier_output_invalid",
+        )
+
+    raw_on_track = parsed.get("on_track")
+    if raw_on_track is None:
+        raw_on_track = parsed.get("accepted")
+    if not isinstance(raw_on_track, bool):
+        return SemanticVerifierParseResult(
+            on_track=True,
+            error="semantic_verifier_on_track_missing",
+            raw=dict(parsed),
+        )
+
+    confidence = None
+    if parsed.get("confidence") is not None:
+        try:
+            confidence = float(parsed.get("confidence"))
+        except Exception:
+            return SemanticVerifierParseResult(
+                on_track=bool(raw_on_track),
+                error="semantic_verifier_confidence_invalid",
+                raw=dict(parsed),
+            )
+        if not (0.0 <= confidence <= 1.0):
+            return SemanticVerifierParseResult(
+                on_track=bool(raw_on_track),
+                error=f"semantic_verifier_confidence_out_of_range:{confidence}",
+                raw=dict(parsed),
+            )
+
+    reasoning = parsed.get("reasoning")
+    if reasoning is not None and not isinstance(reasoning, str):
+        reasoning = str(reasoning)
+
+    return SemanticVerifierParseResult(
+        on_track=bool(raw_on_track),
+        confidence=confidence,
+        reasoning=reasoning,
+        raw=dict(parsed),
+    )
+
+
 def select_from_vlm_scores(
     candidate_rows: Sequence[Dict[str, object]],
     vlm_scores: Sequence[float],

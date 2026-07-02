@@ -1,0 +1,26 @@
+drivor:
+  output_suffix: drivor_semantic_verifier_baseline
+  repo_root: /data/robert/DrivoR
+  checkpoint: /data/robert/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
+  dino: /data/robert/DrivoR/weights/vit_small_patch14_reg4_dinov2.lvd142m
+  python_bin: /data/robert/fail2drive/env/bin/python
+  config: /data/robert/DrivoR/navsim/planning/script/config/common/agent/drivoR.yaml
+  device: cuda
+  image_scale: 0.4
+
+  vlm:
+    enabled: false   # baseline argmax selection
+
+  semantic_verifier:
+    enabled: true
+    gate_on_reject: false
+    log_file_name: semantic_verifier.jsonl
+    backend: local_transformers_subprocess
+    model_id: Qwen/Qwen3-VL-8B-Instruct
+    python_bin: /data/robert/fail2drive/env_vlm/bin/python
+    device: auto
+    max_new_tokens: 128
+    timeout_sec: 600.0
+    preload_on_init: true
+    save_debug_artifacts: true
+    camera_mode: front_only

@@ -1,0 +1,9 @@
+drivor:
+  repo_root: /data/robert/DrivoR
+  checkpoint: /data/robert/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
+  dino: /data/robert/DrivoR/weights/vit_small_patch14_reg4_dinov2.lvd142m
+  python_bin: /data/robert/fail2drive/env/bin/python
+  config: /data/robert/DrivoR/navsim/planning/script/config/common/agent/drivoR.yaml
+
+  device: cuda
+  image_scale: 0.4
