@@ -25,7 +25,10 @@ if not RULE_BASED_REPO_ROOT:
     raise RuntimeError("RULE_BASED_REPO_ROOT must be set in environment")
 sys.path.insert(0, str(Path(RULE_BASED_REPO_ROOT).resolve()))
 
-from privileged_planner.service import PrivilegedPlannerService  # type: ignore
+try:
+    from privileged_planner_sd.service import PrivilegedPlannerService  # type: ignore
+except ImportError:  # older Rule-Planner layout
+    from privileged_planner.service import PrivilegedPlannerService  # type: ignore
 
 LOG = logging.getLogger("rule_based_adapter")
 

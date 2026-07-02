@@ -62,6 +62,25 @@ class VerifierResult:
     mode: str = "passive"
     rejection_reason: Optional[str] = None
     checks: Dict[str, Any] = field(default_factory=dict)
+    
+@dataclass(frozen=True)
+class SemanticVerifierResult:
+    """Post-selection semantic route/track check from the VLM verifier."""
+
+    accepted: bool
+    mode: str = "semantic_vlm"
+    rejection_reason: Optional[str] = None
+    confidence: Optional[float] = None
+    checks: Dict[str, Any] = field(default_factory=dict)
+
+    def to_debug_dict(self) -> Dict[str, Any]:
+        return {
+            "accepted": self.accepted,
+            "mode": self.mode,
+            "rejection_reason": self.rejection_reason,
+            "confidence": self.confidence,
+            "checks": self.checks,
+        }
 
 
 @dataclass(frozen=True)
@@ -73,10 +92,11 @@ class AgentStepTrace:
     designer: Dict[str, Any]
     orchestrator: OrchestratorDecision
     verifier: VerifierResult
+    semantic_verifier: Optional[SemanticVerifierResult] = None
     previous_verifier_feedback: Optional[Dict[str, Any]] = None
 
     def to_debug_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "scene": {
                 "frame_index": self.scene.frame_index,
@@ -103,3 +123,6 @@ class AgentStepTrace:
             },
             "previous_verifier_feedback": self.previous_verifier_feedback or {},
         }
+        if self.semantic_verifier is not None:
+            payload["semantic_verifier"] = self.semantic_verifier.to_debug_dict()
+        return payload
