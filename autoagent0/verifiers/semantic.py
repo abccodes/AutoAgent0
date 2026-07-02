@@ -6,14 +6,17 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 import numpy as np
 
 from autoagent0.adapters.hugsim.context import resolve_route_instruction
 from autoagent0.scorer.agent_schemas import SemanticVerifierResult
-from autoagent0.scorer.vlm_selector import VLMPlanSelector, VLMSelectorConfig
 from autoagent0.verifiers.geometric_route import compare_geometric_semantic_route
+
+if TYPE_CHECKING: 
+    from autoagent0.scorer.vlm_selector import VLMSelectorConfig
+
 from autoagent0.vlm.debug import append_jsonl
 from autoagent0.vlm.semantic_verifier_env import (
     SEMANTIC_VERIFIER_ENV_DEFAULTS,
@@ -77,6 +80,8 @@ def resolve_semantic_verifier_config(
 
 
 def _semantic_config_to_vlm_config(cfg: SemanticVerifierConfig) -> VLMSelectorConfig:
+    from autoagent0.scorer.vlm_selector import VLMSelectorConfig
+
     return VLMSelectorConfig(
         enabled=cfg.enabled,
         camera_mode=cfg.camera_mode,
@@ -108,6 +113,8 @@ class SemanticVerifier:
         self.output_dir = Path(output_dir)
         self._log_path = self.output_dir / cfg.log_file_name
         self._text_log_path = self.output_dir / "semantic_verifier.log"
+        from autoagent0.scorer.vlm_selector import VLMPlanSelector
+
         self._vlm_selector = VLMPlanSelector(
             _semantic_config_to_vlm_config(cfg),
             self.output_dir,
