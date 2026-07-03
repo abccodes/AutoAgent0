@@ -188,6 +188,12 @@ def _append_wrapped_text(lines, label, text, font, font_scale, thickness, max_wi
             lines.append(f"{continuation_prefix}{chunk}")
 
 
+def _append_colored_text(lines, label, text, color_bgr):
+    if text is None:
+        return
+    lines.append((f"{label}: {text}", color_bgr))
+
+
 def _normalize_overlay_source(selected_source):
     if selected_source is None:
         return None
@@ -231,19 +237,19 @@ def _resolve_selected_traj_text(frame_debug):
 
 def _build_front_overlay_lines(frame_idx, frame_debug, run_label, max_text_width):
     lines = [
-        f"run: {run_label}",
-        f"frame: {frame_idx}",
+        (f"run: {run_label}", (255, 255, 255)),
+        (f"frame: {frame_idx}", (255, 255, 255)),
     ]
     latency_record = frame_debug.get("latency_timeline_record") or {}
     route_instruction = latency_record.get("route_instruction")
     if route_instruction is not None:
-        lines.append(f"route: {route_instruction}")
+        lines.append((f"route: {route_instruction}", (255, 255, 255)))
     scoring_route = latency_record.get("scoring_route_instruction")
     if scoring_route is not None:
-        lines.append(f"scoring route: {scoring_route}")
+        lines.append((f"scoring route: {scoring_route}", (255, 255, 255)))
     selected_traj = _resolve_selected_traj_text(frame_debug)
     if selected_traj is not None:
-        lines.append(f"selected traj: {selected_traj}")
+        lines.append((f"selected traj: {selected_traj}", (255, 255, 255)))
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.39
     thickness = 1
@@ -252,19 +258,19 @@ def _build_front_overlay_lines(frame_idx, frame_debug, run_label, max_text_width
 
     if uses_intervention:
         should_intervene = latency_record.get("intervention_should_intervene")
-        lines.append(f"intervened: {_format_overlay_value(should_intervene)}")
+        lines.append((f"intervened: {_format_overlay_value(should_intervene)}", (255, 255, 255)))
         severity_score = latency_record.get("intervention_severity_score")
         severity_band = latency_record.get("intervention_severity_band")
         if severity_score is not None:
-            lines.append(f"intervention score: {_format_overlay_value(round(float(severity_score), 3))}")
+            lines.append((f"intervention score: {_format_overlay_value(round(float(severity_score), 3))}", (255, 255, 255)))
         if severity_band is not None:
-            lines.append(f"intervention band: {_format_overlay_value(severity_band)}")
+            lines.append((f"intervention band: {_format_overlay_value(severity_band)}", (255, 255, 255)))
         confidence = latency_record.get("intervention_confidence")
         if confidence is not None:
-            lines.append(f"intervention confidence: {_format_overlay_value(confidence)}")
+            lines.append((f"intervention confidence: {_format_overlay_value(confidence)}", (255, 255, 255)))
         corrective_action = latency_record.get("intervention_corrective_action")
         if should_intervene:
-            lines.append(f"corrective action: {_format_overlay_value(corrective_action)}")
+            lines.append((f"corrective action: {_format_overlay_value(corrective_action)}", (255, 255, 255)))
         _append_wrapped_text(
             lines,
             "intervention reasoning",
@@ -286,15 +292,15 @@ def _build_front_overlay_lines(frame_idx, frame_debug, run_label, max_text_width
     elif uses_vlm:
         adaptive_decision = frame_debug.get("adaptive_replan_decision")
         if adaptive_decision is not None:
-            lines.append(f"adaptive decision: {adaptive_decision}")
+            lines.append((f"adaptive decision: {adaptive_decision}", (255, 255, 255)))
         q_selected_source = frame_debug.get("q_selected_source")
         q_selected_idx = frame_debug.get("q_selected_idx")
         if q_selected_source is not None or q_selected_idx is not None:
-            lines.append(
+            lines.append((
                 "q selection: "
                 f"{_format_overlay_value(q_selected_source)}"
                 f" / {_format_overlay_value(q_selected_idx)}"
-            )
+            , (255, 255, 255)))
         _append_wrapped_text(
             lines,
             "vlm reasoning",
@@ -304,6 +310,20 @@ def _build_front_overlay_lines(frame_idx, frame_debug, run_label, max_text_width
             thickness,
             max_text_width,
         )
+
+    candidate_scores = frame_debug.get("overlay_candidate_scores")
+    if candidate_scores is None:
+        candidate_scores = frame_debug.get("candidate_pool_scores")
+    candidate_sources = frame_debug.get("overlay_candidate_sources")
+    if candidate_scores:
+        current_rank = 0
+        for rank, score in enumerate(candidate_scores):
+            source = None if not candidate_sources or rank >= len(candidate_sources) else candidate_sources[rank]
+            style = get_candidate_visual_style(source or 'current_rap', current_rank)
+            if source != 'carry_prev':
+                current_rank += 1
+            score_text = f"{rank}: {_format_overlay_value(score)}"
+            lines.append((score_text, style.color_bgr))
 
     return lines
 
@@ -321,10 +341,17 @@ def _draw_front_overlay_text(frame, lines):
     origin_x = 18
     origin_y = 18
 
-    line_sizes = [cv2.getTextSize(line, font, font_scale, thickness)[0] for line in lines]
+    normalized_lines = []
+    for item in lines:
+        if isinstance(item, tuple) and len(item) >= 2:
+            normalized_lines.append((str(item[0]), tuple(item[1])))
+        else:
+            normalized_lines.append((str(item), (255, 255, 255)))
+
+    line_sizes = [cv2.getTextSize(line, font, font_scale, thickness)[0] for line, _ in normalized_lines]
     max_width = max((size[0] for size in line_sizes), default=0)
     line_height = max((size[1] for size in line_sizes), default=0)
-    total_height = len(lines) * line_height + max(0, len(lines) - 1) * line_gap
+    total_height = len(normalized_lines) * line_height + max(0, len(normalized_lines) - 1) * line_gap
 
     box_x0 = origin_x - padding
     box_y0 = origin_y - padding
@@ -336,14 +363,14 @@ def _draw_front_overlay_text(frame, lines):
     cv2.addWeighted(overlay, 0.55, canvas, 0.45, 0, canvas)
 
     text_y = origin_y + line_height
-    for line in lines:
+    for line, color in normalized_lines:
         cv2.putText(
             canvas,
             line,
             (origin_x, text_y),
             font,
             font_scale,
-            (255, 255, 255),
+            color,
             thickness,
             lineType=cv2.LINE_AA,
         )
