@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Dict, Optional, Sequence
 
 from autoagent0.adapters.hugsim.context import describe_vlm_camera_inputs
-from autoagent0.scorer.candidates import format_candidate_text
 
 
 def build_semantic_verifier_prompt(
@@ -11,10 +10,11 @@ def build_semantic_verifier_prompt(
     route_instruction: str,
     *,
     task_target_hint: Optional[str] = None,
-    previous_feedback: Optional[str] = None,
     camera_order: Sequence[str] = ("CAM_FRONT",),
 ) -> str:
-    candidate_text = format_candidate_text([candidate_row])
+    candidate_text = (
+        f"- candidate_{candidate_row['candidate_index']} (the colored path overlaid on the image)"
+    )
     camera_line_1, camera_line_2 = describe_vlm_camera_inputs(camera_order)
     task_target_guidance = ""
     if task_target_hint:
@@ -22,13 +22,6 @@ def build_semantic_verifier_prompt(
 - Task target: "{task_target_hint}".
 - Treat the task target as additional route context when judging on-track behavior.
 """.strip()
-    feedback_guidance = ""
-    if previous_feedback:
-        feedback_guidance = f"""
-- Previous semantic verifier feedback: "{previous_feedback}".
-- Use it only if it is still relevant in the current frame.
-""".strip()
-
     return f"""
 You are the AutoAgent0 Semantic Verifier.
 
@@ -54,7 +47,6 @@ Reasoning:
 - Mention visible road/lane/intersection evidence and why the path is or is not on-track.
 
 {task_target_guidance}
-{feedback_guidance}
 
 Selected trajectory:
 {candidate_text}

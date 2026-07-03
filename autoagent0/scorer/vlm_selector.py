@@ -443,7 +443,6 @@ class VLMPlanSelector:
         camera_images: Dict[str, np.ndarray],
         info: Dict[str, object],
         candidate_row: Dict[str, object],
-        previous_feedback: Optional[str] = None,
     ) -> Dict[str, object]:
         route_instruction = resolve_route_instruction(info)
         task_target_hint = describe_task_target_hint(info)
@@ -494,7 +493,6 @@ class VLMPlanSelector:
             candidate_rows[0],
             route_instruction,
             task_target_hint=task_target_hint,
-            previous_feedback=previous_feedback,
             camera_order=camera_order,
         )
         try:

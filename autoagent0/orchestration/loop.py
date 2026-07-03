@@ -812,7 +812,6 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
     )
     if semantic_verifier is not None and semantic_verifier.cfg.enabled:
         semantic_verifier.preload()
-    last_semantic_feedback = None
     if semantic_feedback_holder is None:
         semantic_feedback_holder = {}
     while not done:
@@ -869,10 +868,6 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
             and cnt % SEMANTIC_VERIFY_EVERY_STEPS == 0
         )
         if should_semantic_verify:
-            previous_feedback = None
-            if isinstance(last_semantic_feedback, dict) and not last_semantic_feedback.get("accepted", True):
-                previous_feedback = last_semantic_feedback.get("rejection_reason")
-
             recover_fn = None
             if semantic_verifier.cfg.gate_on_reject and recover_plan is not None:
                 def _recover_semantic_decision(current_decision):
@@ -894,13 +889,11 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
                 camera_images=current_obs["rgb"],
                 current_info=current_info,
                 frame_index=cnt,
-                previous_feedback=previous_feedback,
                 recover_decision_fn=recover_fn,
             )
             decision = semantic_outcome.decision
             semantic_feedback = semantic_outcome.feedback
             if semantic_feedback is not None:
-                last_semantic_feedback = semantic_feedback
                 semantic_feedback_holder["feedback"] = semantic_feedback
             plan_traj = decision.selected_plan
 

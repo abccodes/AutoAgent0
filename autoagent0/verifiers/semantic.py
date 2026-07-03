@@ -208,7 +208,6 @@ class SemanticVerifier:
         info: Dict[str, object],
         local_plan: np.ndarray,
         selected_source: Optional[str] = None,
-        previous_feedback: Optional[str] = None,
     ) -> SemanticVerifierResult:
         route_instruction = resolve_route_instruction(info)
         candidate_row = {
@@ -223,7 +222,6 @@ class SemanticVerifier:
             camera_images=camera_images,
             info=info,
             candidate_row=candidate_row,
-            previous_feedback=previous_feedback,
         )
         self.last_debug = dict(debug)
         semantic_on_track = bool(debug.get("semantic_verifier_accepted", True))
@@ -322,7 +320,6 @@ def apply_semantic_verifier_to_decision(
     camera_images: Dict[str, np.ndarray],
     current_info: Dict[str, object],
     frame_index: int,
-    previous_feedback: Optional[str] = None,
     recover_decision_fn: Optional[Callable[[Any], Any]] = None,
 ) -> SemanticVerifierStepOutcome:
     """Run semantic verification on the selected plan and optionally recover it.
@@ -348,7 +345,6 @@ def apply_semantic_verifier_to_decision(
         info=current_info,
         local_plan=np.asarray(local_plan, dtype=np.float32),
         selected_source=decision.selected_source,
-        previous_feedback=previous_feedback,
     )
     semantic_debug = dict(semantic_verifier.last_debug)
     apply_semantic_verifier_debug(decision, semantic_debug)
