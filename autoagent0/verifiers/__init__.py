@@ -6,6 +6,7 @@ below a threshold and recovers by regenerating the plan with a different planner
 """
 from autoagent0.verifiers.base import BaseVerifier
 from autoagent0.verifiers.dummy import PDMSVerifier, VerificationResult
+from autoagent0.verifiers.ego_progress import EgoProgressReference
 
 from autoagent0.verifiers.semantic import (
     SemanticVerifier,
@@ -24,6 +25,7 @@ from autoagent0.verifiers.geometric_route import (
 
 __all__ = [
     "BaseVerifier",
+    "EgoProgressReference",
     "PDMSVerifier",
     "SemanticVerifier",
     "SemanticVerificationResult",

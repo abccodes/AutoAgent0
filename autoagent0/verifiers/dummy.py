@@ -2,14 +2,13 @@
 
 The composition is the two-tier PDMS form
 
-    PDMS = NC * DAC * (5*TTC + 2*Comfort) / 7
+   PDMS = NC * DAC * (5*TTC + 2*Comfort + 5*EP) / 12
 
-where NC and DAC are multiplicative hard gates and TTC/Comfort are soft terms
-in a weighted average.
 """
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 from autoagent0.verifiers.base import BaseVerifier
+from autoagent0.verifiers.ego_progress import EgoProgressReference
 from sim.utils.score_calculator import ScoreCalculator
 from sim.utils.sim_utils import traj_transform_to_global
 import open3d as o3d
@@ -17,7 +16,7 @@ import numpy as np
 import torch
 
 
-HD_SCORE_SOFT_WEIGHTS = {"ttc": 5.0, "c": 2.0}
+HD_SCORE_SOFT_WEIGHTS = {"ttc": 5.0, "c": 2.0, "ep": 5.0}
 
 
 def _project_obstacles(obs_list, obs_vels, t):
@@ -65,7 +64,13 @@ class PDMSVerifier(BaseVerifier):
     plus the static scene/ground point clouds loaded once at construction.
     """
     
-    def __init__(self, scene_ply_path: str, ground_ply_path: str, timestep: float = 0.5):
+    def __init__(
+        self,
+        scene_ply_path: str,
+        ground_ply_path: str,
+        timestep: float = 0.5,
+        ep_reference: Optional[EgoProgressReference] = None,
+    ):
         scene_xyz = np.asarray(o3d.io.read_point_cloud(scene_ply_path).points)
         scene_xyz = np.stack([scene_xyz[:, 2], -scene_xyz[:, 0], -scene_xyz[:, 1]], axis=1)
         self._scene_xyz = torch.from_numpy(scene_xyz).float().cuda()
@@ -74,6 +79,7 @@ class PDMSVerifier(BaseVerifier):
         self._ground_xy = np.stack([ground_xyz[:, 2], -ground_xyz[:, 0]], axis=1)
 
         self._timestep = timestep
+        self._ep_reference = ep_reference
         self._calc = ScoreCalculator(data={})
         self.last_result: Optional[VerificationResult] = None
 
@@ -152,9 +158,16 @@ class PDMSVerifier(BaseVerifier):
         ego_frame_traj = self._calc.transform_to_ego_frame(planned_traj, ego_box)
         comfort = self._calc._calculate_is_comfortable(ego_frame_traj, self._timestep)
 
+        soft = {"ttc": ttc, "c": comfort}
+        if self._ep_reference is not None:
+            # planned_traj[0] is the prepended current ego pose, so the plan
+            # spans (len - 1) * timestep seconds.
+            horizon_s = (planned_traj.shape[0] - 1) * self._timestep
+            soft["ep"] = self._ep_reference.ego_progress(planned_traj[:, :2], horizon_s)
+
         result = VerificationResult(
             gates={"nc": nc, "dac": dac},
-            soft={"ttc": ttc, "c": comfort},
+            soft=soft,
         )
         self.last_result = result
         return result

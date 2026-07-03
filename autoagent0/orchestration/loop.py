@@ -62,7 +62,7 @@ from autoagent0.adapters.hugsim.candidate_visuals import get_candidate_visual_st
 from autoagent0.adapters.hugsim.task_overlay import draw_task_target_overlay
 from autoagent0.vlm.vlm_env import build_prefixed_vlm_env
 from autoagent0.experts.rule_based_env import build_prefixed_rule_based_env
-from autoagent0.verifiers import PDMSVerifier
+from autoagent0.verifiers import EgoProgressReference, PDMSVerifier
 from autoagent0.verifiers.semantic import SemanticVerifier, apply_semantic_verifier_to_decision
 
 FRONT_CAM_NAME = 'CAM_FRONT'
@@ -74,7 +74,7 @@ VIS_PLAN_MIN_PATH_M = 0.5
 VIS_PLAN_HOLD_FRAMES = 10**9
 PLAN_REPLAN_EVERY_STEPS = 2
 SEMANTIC_VERIFY_EVERY_STEPS = 10
-VERIFIER_SCORE_THRESHOLD = 0.5
+VERIFIER_SCORE_THRESHOLD = 0.6 #0.5 without Ep to not reject marginal DAC 0.5
 
 
 def _resolve_scene_model_path(model_base, scene_name):
@@ -738,12 +738,66 @@ def _compute_obj_velocities(current_info, prev_info):
     ]
 
 
+
+EGO_PROGRESS_LOG_DT_FALLBACK = 0.5
+
+def _infer_log_frame_dt(model_path):
+    """Median CAM_FRONT timestamp spacing from the scene's meta_data.json.
+    ground_param.pkl poses are harvested one per CAM_FRONT frame of meta_data
+    (merge_depth_ground.py), so this is the pkl's true frame period.
+    """
+    try:
+        with open(os.path.join(model_path, 'meta_data.json'), 'r') as f:
+            meta = json.load(f)
+        ts = sorted(
+            frame['timestamp'] for frame in meta['frames']
+            if '/CAM_FRONT/' in frame.get('rgb_path', '') and 'timestamp' in frame
+        )
+        if len(ts) >= 2:
+            dt = float(np.median(np.diff(ts)))
+            if dt > 0:
+                return dt
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        pass
+    logging.getLogger("closed_loop").warning(
+        "could not infer log frame period from meta_data.json; "
+        "assuming %.2f s per pose for ego-progress", EGO_PROGRESS_LOG_DT_FALLBACK,
+    )
+    return EGO_PROGRESS_LOG_DT_FALLBACK
+
+
+def _build_ep_reference(cfg):
+    """Load the raw logged ego route as the ego-progress (EP) reference.
+
+    Reads ground_param.pkl directly rather than env.ground_model because
+    dense_cam_poses subdivides by distance and destroys the uniform frame
+    period the human-pace denominator needs. Positions are remapped to the
+    verifier/ego_box world frame: (x, y) = (raw z, -raw x).
+    """
+    try:
+        with open(os.path.join(cfg.model_path, 'ground_param.pkl'), 'rb') as f:
+            cam_poses, _, _ = pickle.load(f)
+    except (OSError, ValueError, pickle.UnpicklingError) as exc:
+        logging.getLogger("closed_loop").warning(
+            "ego-progress reference unavailable (%s); EP term disabled", exc,
+        )
+        return None
+    cam_poses = np.asarray(cam_poses)
+    route_xy = np.stack([cam_poses[:, 2, 3], -cam_poses[:, 0, 3]], axis=1)
+    return EgoProgressReference(route_xy, frame_dt=_infer_log_frame_dt(cfg.model_path))
+
+
 def _verify_plan_decision(decision, verifier, current_info):
     """Return whether the selected trajectory passes verification, plus its score."""
     plan_traj = decision.selected_plan
     if plan_traj is None:
         return True, None
     score = verifier.score(plan_traj, current_info)
+    result = verifier.last_result
+    if result is not None and "ep" in result.soft:
+        logging.getLogger("closed_loop").info(
+            "ego-progress %.3f (verifier score %.3f)", result.soft["ep"], score,
+        )
     return score >= VERIFIER_SCORE_THRESHOLD, score
 
 
@@ -809,6 +863,7 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
         scene_ply_path=os.path.join(output, 'scene.ply'),
         ground_ply_path=os.path.join(output, 'ground.ply'),
         timestep=0.5,
+        ep_reference=_build_ep_reference(cfg),
     )
     if semantic_verifier is not None and semantic_verifier.cfg.enabled:
         semantic_verifier.preload()
