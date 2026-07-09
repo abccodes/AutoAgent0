@@ -12,8 +12,8 @@ AUTOAGENT0_ENV_DEFAULTS: Dict[str, Any] = {
     "MAX_REDESIGN_ATTEMPTS": 1,
     "FALLBACK_MODE": "hold",
     "UNCERTAINTY_ENABLED": True,
-    "UNCERTAINTY_T_INTRA": 1.5,
-    "UNCERTAINTY_T_CROSS": 2.0,
+    "UNCERTAINTY_T_INTRA": 0.20,
+    "UNCERTAINTY_T_CROSS": 2.40,
     "UNCERTAINTY_MODE_K_MAX": 3,
     "UNCERTAINTY_MODE_COUNT_HIGH": 3,
     "UNCERTAINTY_HORIZON_STEPS": 0,
@@ -44,8 +44,8 @@ class AutoAgent0Config:
     max_redesign_attempts: int = 1
     fallback_mode: str = "hold"
     uncertainty_enabled: bool = True
-    uncertainty_t_intra: float = 1.5
-    uncertainty_t_cross: float = 2.0
+    uncertainty_t_intra: float = 0.20
+    uncertainty_t_cross: float = 2.40
     uncertainty_mode_k_max: int = 3
     uncertainty_mode_count_high: int = 3
     uncertainty_horizon_steps: int = 0

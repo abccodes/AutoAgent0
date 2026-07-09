@@ -323,21 +323,30 @@ def classify_routing_zone(
     t_cross: float,
     mode_count_high: int = 3,
 ) -> str:
-    """Combine the three uncertainty signals into a routing zone.
+    """Combine the three uncertainty signals into a routing zone (v2, danger-quadrant framing).
 
-    - rule_based_fallback: (intra_high AND cross_high) OR mode_count >= mode_count_high
-    - lean_rule_based: exactly one of {intra_high, cross_high} OR mode_count == 2
-    - normal: everything else
+    ``t_intra`` and ``t_cross`` are interpreted as **ceilings**: a signal is
+    "danger" when it falls *at or below* its threshold. This matches the
+    empirical finding on the drivor_autoagent0 calibration corpus
+    (~7.8k frames) that ``future_unsafe`` is enriched ~2.6x in the low-intra
+    AND low-cross quadrant — i.e., when the learned planner is confident and
+    agrees with rule-based, yet the scene is about to become unsafe. High
+    uncertainty on either axis is near or below base rate, so it no longer
+    triggers routing on its own.
+
+    - rule_based_fallback: (intra_danger AND cross_danger) OR mode_count >= mode_count_high
+    - lean_rule_based:     exactly one of {intra_danger, cross_danger} OR mode_count == 2
+    - normal:              everything else
     """
 
-    intra_high = float(intra_disagreement_m) >= float(t_intra)
-    cross_high = float(cross_disagreement_m) >= float(t_cross)
+    intra_danger = float(intra_disagreement_m) <= float(t_intra)
+    cross_danger = float(cross_disagreement_m) <= float(t_cross)
     modes = int(mode_count)
     modes_fallback = modes >= int(mode_count_high)
     modes_lean = modes >= 2 and not modes_fallback
 
-    if (intra_high and cross_high) or modes_fallback:
+    if (intra_danger and cross_danger) or modes_fallback:
         return ROUTING_ZONE_RULE_BASED_FALLBACK
-    if intra_high or cross_high or modes_lean:
+    if intra_danger or cross_danger or modes_lean:
         return ROUTING_ZONE_LEAN_RULE_BASED
     return ROUTING_ZONE_NORMAL
