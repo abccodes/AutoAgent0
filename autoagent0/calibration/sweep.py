@@ -196,3 +196,80 @@ def per_metric_grid(values: np.ndarray, points: int = 11) -> List[float]:
         seen.add(key)
         out.append(float(v))
     return out
+
+
+@dataclass
+class QuadrantResult:
+    """Score for a low-uncertainty danger quadrant (intra < t AND cross < t)."""
+
+    q_intra: float
+    q_cross: float
+    t_intra_low: float
+    t_cross_low: float
+    n_flagged: int
+    fraction_flagged: float
+    precision: float
+    recall: float
+    lift: float
+
+
+def quadrant_grid_search(
+    df: pd.DataFrame,
+    *,
+    q_intra_grid: Sequence[float] = (0.15, 0.20, 0.25, 0.33, 0.40),
+    q_cross_grid: Sequence[float] = (0.15, 0.20, 0.25, 0.33, 0.40),
+    label_col: str = "future_unsafe",
+    min_precision: float = 0.0,
+) -> Tuple[Optional[QuadrantResult], List[QuadrantResult]]:
+    """Sweep quantile-based thresholds for the low-uncertainty danger quadrant.
+
+    Empirically on drivor_autoagent0 the informative safety signature is
+    ``intra_m < t AND cross_m < t`` (learned is confident and agrees with rule-based
+    yet the scene still becomes unsafe). This sweep evaluates that AND-gate over a
+    grid of low-side percentiles and returns the (precision, lift) trade-off.
+    """
+
+    sub = df[["intra_m", "cross_m", label_col]].dropna()
+    if sub.empty:
+        return None, []
+    intra = sub["intra_m"].to_numpy(dtype=np.float64)
+    cross = sub["cross_m"].to_numpy(dtype=np.float64)
+    labels = sub[label_col].to_numpy(dtype=np.int64)
+    total_pos = int(labels.sum())
+    base_rate = float(labels.mean())
+    if base_rate <= 0.0:
+        return None, []
+
+    results: List[QuadrantResult] = []
+    for qi in q_intra_grid:
+        ti = float(np.quantile(intra, float(qi)))
+        for qc in q_cross_grid:
+            tc = float(np.quantile(cross, float(qc)))
+            flagged = (intra < ti) & (cross < tc)
+            n_flag = int(flagged.sum())
+            if n_flag == 0:
+                continue
+            tp = int(np.sum(flagged & (labels == 1)))
+            fp = n_flag - tp
+            precision = float(tp / n_flag)
+            recall = float(tp / total_pos) if total_pos else 0.0
+            lift = precision / base_rate
+            results.append(
+                QuadrantResult(
+                    q_intra=float(qi),
+                    q_cross=float(qc),
+                    t_intra_low=ti,
+                    t_cross_low=tc,
+                    n_flagged=n_flag,
+                    fraction_flagged=float(n_flag / len(labels)),
+                    precision=precision,
+                    recall=recall,
+                    lift=lift,
+                )
+            )
+
+    feasible = [r for r in results if r.precision >= min_precision and r.n_flagged > 0]
+    if not feasible:
+        return None, results
+    best = max(feasible, key=lambda r: (r.precision, r.recall))
+    return best, results

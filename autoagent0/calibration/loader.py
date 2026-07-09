@@ -75,10 +75,14 @@ def _max_silhouette(meta: Dict[str, Any]) -> Optional[float]:
 def _critic_rejected(frame: Dict[str, Any]) -> Optional[bool]:
     debug = frame.get("planner_debug") or {}
     payload = debug.get("autoagent0_default_critique")
-    if isinstance(payload, dict):
-        action = payload.get("action")
-        if isinstance(action, str):
-            return action.lower() in ("redesign", "reject", "intervene")
+    if not isinstance(payload, dict):
+        return None
+    rejected = payload.get("autoagent0_critique_rejected")
+    if isinstance(rejected, bool):
+        return rejected
+    accepted = payload.get("autoagent0_critique_accepted")
+    if isinstance(accepted, bool):
+        return not accepted
     return None
 
 
