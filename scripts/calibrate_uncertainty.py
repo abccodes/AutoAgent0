@@ -28,9 +28,11 @@ from autoagent0.calibration.loader import load_corpus  # noqa: E402
 from autoagent0.calibration.sweep import (  # noqa: E402
     GridResult,
     MetricROC,
+    QuadrantResult,
     joint_grid_search,
     metric_roc,
     per_metric_grid,
+    quadrant_grid_search,
 )
 
 
@@ -98,6 +100,8 @@ def render_markdown(
     best: GridResult | None,
     horizon_steps: int,
     target_recall: float,
+    quadrant_best: QuadrantResult | None = None,
+    quadrant_grid: List[QuadrantResult] | None = None,
 ) -> str:
     lines: List[str] = []
     lines.append("# Uncertainty calibration report\n")
@@ -147,6 +151,34 @@ def render_markdown(
         lines.append(f"- precision={best.precision:.3f}, recall={best.recall:.3f}, f1={best.f1:.3f}")
         lines.append(f"- fraction routed to lean/fallback={best.fraction_lean_or_fallback:.3f}")
         lines.append("\nCurrent defaults: " + ", ".join(f"`{k}={v}`" for k, v in CURRENT_DEFAULTS.items()))
+    lines.append("")
+
+    lines.append("## Danger-quadrant sweep (inverted framing: intra_m < t AND cross_m < t)\n")
+    lines.append(
+        "The `future_unsafe` label is empirically enriched in the low-intra + low-cross "
+        "quadrant. This sweep reports the trade-off across quantile-based thresholds."
+    )
+    if quadrant_grid:
+        lines.append("")
+        lines.append("| q_intra | q_cross | t_intra_low | t_cross_low | flagged | %corpus | precision | recall | lift |")
+        lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for r in quadrant_grid:
+            lines.append(
+                f"| {r.q_intra:.2f} | {r.q_cross:.2f} | {r.t_intra_low:.3f} | {r.t_cross_low:.3f} | "
+                f"{r.n_flagged} | {r.fraction_flagged*100:.1f}% | "
+                f"{r.precision:.3f} | {r.recall:.3f} | {r.lift:.2f}x |"
+            )
+        lines.append("")
+    if quadrant_best is not None:
+        lines.append(
+            f"Best quadrant: `intra_m < {quadrant_best.t_intra_low:.3f} AND cross_m < {quadrant_best.t_cross_low:.3f}` "
+            f"(q_intra={quadrant_best.q_intra:.2f}, q_cross={quadrant_best.q_cross:.2f}) → "
+            f"precision={quadrant_best.precision:.3f}, recall={quadrant_best.recall:.3f}, "
+            f"lift={quadrant_best.lift:.2f}x, "
+            f"flagged={quadrant_best.fraction_flagged*100:.1f}%."
+        )
+    else:
+        lines.append("No quadrant produced any flagged frames.")
     return "\n".join(lines) + "\n"
 
 
@@ -202,6 +234,8 @@ def main() -> int:
         target_recall=args.target_recall,
     )
 
+    quadrant_best, quadrant_grid = quadrant_grid_search(df)
+
     report_json = {
         "horizon_steps": args.horizon_steps,
         "target_recall": args.target_recall,
@@ -223,12 +257,24 @@ def main() -> int:
         "grid_search": [asdict(g) for g in grid],
         "intra_grid": intra_grid,
         "cross_grid": cross_grid,
+        "quadrant_best": asdict(quadrant_best) if quadrant_best else None,
+        "quadrant_grid": [asdict(q) for q in quadrant_grid],
     }
     with open(os.path.join(args.out_dir, "calibration_report.json"), "w") as fh:
         json.dump(report_json, fh, indent=2)
 
     with open(os.path.join(args.out_dir, "calibration_report.md"), "w") as fh:
-        fh.write(render_markdown(df, rocs, best, args.horizon_steps, args.target_recall))
+        fh.write(
+            render_markdown(
+                df,
+                rocs,
+                best,
+                args.horizon_steps,
+                args.target_recall,
+                quadrant_best=quadrant_best,
+                quadrant_grid=quadrant_grid,
+            )
+        )
 
     with open(os.path.join(args.out_dir, "recommended_config.diff"), "w") as fh:
         fh.write(render_diff(best))
