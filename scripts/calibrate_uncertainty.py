@@ -37,8 +37,8 @@ from autoagent0.calibration.sweep import (  # noqa: E402
 
 
 CURRENT_DEFAULTS = {
-    "t_intra": 1.5,
-    "t_cross": 2.0,
+    "t_intra": 0.20,
+    "t_cross": 2.40,
     "mode_count_high": 3,
     "silhouette_min": 0.25,
 }
@@ -59,7 +59,7 @@ def write_histograms(df: pd.DataFrame, out_dir: str) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    for metric, default in (("intra_m", 1.5), ("cross_m", 2.0), ("max_silhouette", 0.25)):
+    for metric, default in (("intra_m", 0.20), ("cross_m", 2.40), ("max_silhouette", 0.25)):
         series = df[metric].dropna()
         if series.empty:
             continue
