@@ -104,27 +104,28 @@ run_worker() {
         local scene_log="${WORKER_LOG_DIR}/${scene_slug}.worker${worker_id}.log"
 
         echo "[${AB_CONFIG} worker ${worker_id} gpu ${gpu_id}] run ${scene}"
-        CUDA_VISIBLE_DEVICES="${gpu_id}" \
-        REPO_ROOT="${REPO_ROOT}" \
-        BASELINE_ID="${BASELINE_ID}" \
-        BASELINE_SUITE="full" \
-        BASELINE_RUN_TYPE="${BASELINE_RUN_TYPE}" \
-        BASELINE_RUN_VARIANT="${RUN_VARIANT_TAG}" \
-        PLANNER_NAME="${PLANNER_NAME}" \
-        PLANNER_PATH="${PLANNER_PATH_REL}" \
-        SCENARIO_PATH="${scene}" \
-        BASE_PATH="${BASE_PATH}" \
-        HUGSIM_PYTHON_BIN="${HUGSIM_PYTHON_BIN}" \
-        SIM_CUDA="inherit" \
-        AD_CUDA="inherit" \
-        SETUP_VLM_ENV=0 \
-        PLANNER_VLM_PRELOAD_LOCK_PATH="${VLM_PRELOAD_LOCK_PATH}" \
-        HUGSIM_PLAN_RESPONSE_TIMEOUT_SEC="${PLAN_RESPONSE_TIMEOUT_SEC}" \
-        DRIVOR_DEVICE_OVERRIDE="cuda:0" \
-        RAP_DEVICE_OVERRIDE="cuda:0" \
-        PLANNER_VLM_DEVICE_OVERRIDE="cuda:0" \
-        if ! bash scripts/baselines/common/run_single_nuscenes_scene.sh "${PLANNER_NAME}" "${scene}" inherit inherit \
-                > "${scene_log}" 2>&1; then
+        if ! CUDA_VISIBLE_DEVICES="${gpu_id}" \
+            REPO_ROOT="${REPO_ROOT}" \
+            BASELINE_ID="${BASELINE_ID}" \
+            BASELINE_SUITE="full" \
+            BASELINE_RUN_TYPE="${BASELINE_RUN_TYPE}" \
+            BASELINE_RUN_VARIANT="${RUN_VARIANT_TAG}" \
+            PLANNER_NAME="${PLANNER_NAME}" \
+            PLANNER_PATH="${PLANNER_PATH_REL}" \
+            SCENARIO_PATH="${scene}" \
+            BASE_PATH="${BASE_PATH}" \
+            HUGSIM_PYTHON_BIN="${HUGSIM_PYTHON_BIN}" \
+            SIM_CUDA="inherit" \
+            AD_CUDA="inherit" \
+            SETUP_VLM_ENV=0 \
+            PLANNER_VLM_PRELOAD_LOCK_PATH="${VLM_PRELOAD_LOCK_PATH}" \
+            HUGSIM_PLAN_RESPONSE_TIMEOUT_SEC="${PLAN_RESPONSE_TIMEOUT_SEC}" \
+            DRIVOR_DEVICE_OVERRIDE="cuda:0" \
+            RAP_DEVICE_OVERRIDE="cuda:0" \
+            PLANNER_VLM_DEVICE_OVERRIDE="cuda:0" \
+            bash scripts/baselines/common/run_single_nuscenes_scene.sh "${PLANNER_NAME}" "${scene}" inherit inherit \
+                > "${scene_log}" 2>&1
+        then
             echo "[${AB_CONFIG} worker ${worker_id}] FAILED ${scene} (see ${scene_log})"
         fi
     done
