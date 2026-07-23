@@ -123,8 +123,10 @@ run_worker() {
         DRIVOR_DEVICE_OVERRIDE="cuda:0" \
         RAP_DEVICE_OVERRIDE="cuda:0" \
         PLANNER_VLM_DEVICE_OVERRIDE="cuda:0" \
-        bash scripts/baselines/common/run_single_nuscenes_scene.sh "${PLANNER_NAME}" "${scene}" inherit inherit \
-            > "${scene_log}" 2>&1
+        if ! bash scripts/baselines/common/run_single_nuscenes_scene.sh "${PLANNER_NAME}" "${scene}" inherit inherit \
+                > "${scene_log}" 2>&1; then
+            echo "[${AB_CONFIG} worker ${worker_id}] FAILED ${scene} (see ${scene_log})"
+        fi
     done
 }
 
