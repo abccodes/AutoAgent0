@@ -55,7 +55,7 @@ export PYTHONUNBUFFERED=1
 
 cd "${REPO_ROOT}"
 
-mapfile -t SCENES < <(find "${SCENARIO_DIR}" -maxdepth 1 -type f -name '*.yaml' | sort)
+mapfile -t SCENES < <(find -L "${SCENARIO_DIR}" -maxdepth 1 -type f -name '*.yaml' | sort)
 if [[ "${#SCENES[@]}" -eq 0 ]]; then
     echo "no scenarios found under ${SCENARIO_DIR}" >&2
     exit 1
