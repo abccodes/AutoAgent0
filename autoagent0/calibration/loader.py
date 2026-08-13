@@ -13,7 +13,13 @@ import pandas as pd
 
 from autoagent0.calibration.labels import (
     annotate_frames_with_score_details,
-    compute_future_unsafe_label,
+    compute_future_failure_labels,
+)
+from autoagent0.calibration.features import (
+    post_selection_features,
+    raw_observation_features,
+    score_features,
+    temporal_change,
 )
 
 
@@ -104,28 +110,48 @@ def load_run(run_dir: str, *, horizon_steps: int = 20) -> pd.DataFrame:
     if isinstance(details, dict):
         annotate_frames_with_score_details(frames, details)
 
-    labels = compute_future_unsafe_label(frames, horizon_steps=horizon_steps)
+    labels = compute_future_failure_labels(frames, horizon_steps=horizon_steps)
     run_id = os.path.relpath(run_dir, os.path.dirname(os.path.dirname(run_dir)))
+    run_name = os.path.basename(run_dir)
+    scene_group = run_name.split("_", 1)[0]
 
     rows: List[Dict[str, Any]] = []
+    previous_selected_world: Optional[np.ndarray] = None
     for idx, frame in enumerate(frames):
         unc = _frame_uncertainty(frame)
         if unc is None:
             continue
         meta = unc.get("metadata") or {}
+        debug = frame.get("planner_debug") or {}
+        change, previous_selected_world = temporal_change(
+            debug.get("local_plan"),
+            debug.get("overlay_plan_origin_pose"),
+            previous_selected_world,
+        )
         rows.append(
             {
                 "run_id": run_id,
                 "run_dir": run_dir,
+                "scene_group": scene_group,
                 "frame_idx": int(idx),
+                "timestamp_sec": _safe_float(frame.get("time_stamp")),
                 "intra_m": _safe_float(unc.get("intra_learned_m")),
                 "cross_m": _safe_float(unc.get("cross_family_m")),
                 "mode_count": int(unc.get("mode_count") or 1),
                 "max_silhouette": _max_silhouette(meta),
                 "zone": str(unc.get("routing_zone") or ""),
-                "future_unsafe": int(labels[idx]) if idx < len(labels) else 0,
+                "future_unsafe": int(labels["future_unsafe"][idx]),
+                "future_collision": int(labels["future_collision"][idx]),
+                "future_nc_failure": int(labels["future_nc_failure"][idx]),
+                "future_dac_failure": int(labels["future_dac_failure"][idx]),
+                "unsafe_now": int(labels["unsafe_now"][idx]),
+                "steps_to_unsafe": labels["steps_to_unsafe"][idx],
                 "critic_rejected": _critic_rejected(frame),
                 "collision_now": bool(frame.get("collision", False)),
+                "temporal_selected_change_m": change,
+                **score_features(debug.get("topk_scores")),
+                **post_selection_features(debug),
+                **raw_observation_features(debug),
             }
         )
 
@@ -134,15 +160,41 @@ def load_run(run_dir: str, *, horizon_steps: int = 20) -> pd.DataFrame:
             columns=[
                 "run_id",
                 "run_dir",
+                "scene_group",
                 "frame_idx",
+                "timestamp_sec",
                 "intra_m",
                 "cross_m",
                 "mode_count",
                 "max_silhouette",
                 "zone",
                 "future_unsafe",
+                "future_collision",
+                "future_nc_failure",
+                "future_dac_failure",
+                "unsafe_now",
+                "steps_to_unsafe",
                 "critic_rejected",
                 "collision_now",
+                "temporal_selected_change_m",
+                "score_entropy",
+                "effective_candidate_count",
+                "score_margin_normalized",
+                "post_dispersion_m",
+                "post_pairwise_mean_m",
+                "post_pairwise_p90_m",
+                "post_endpoint_mean_m",
+                "post_primitive_distance_m",
+                "raw_candidate_count",
+                "raw_dispersion_m",
+                "raw_dispersion_normalized",
+                "raw_pairwise_mean_m",
+                "raw_pairwise_p90_m",
+                "raw_endpoint_mean_m",
+                "raw_score_entropy",
+                "raw_effective_candidate_count",
+                "raw_score_margin_normalized",
+                "raw_primitive_distance_m",
             ]
         )
     return pd.DataFrame(rows)
@@ -177,4 +229,6 @@ def load_corpus(roots: Iterable[str], *, horizon_steps: int = 20) -> pd.DataFram
             frames.append(df)
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    columns = list(dict.fromkeys(column for frame in frames for column in frame.columns))
+    populated = [frame.dropna(axis=1, how="all") for frame in frames]
+    return pd.concat(populated, ignore_index=True).reindex(columns=columns)

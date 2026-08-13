@@ -189,6 +189,54 @@ Default full-benchmark methods:
 - `rap_impl_a`
 - `rap_impl_b`
 
+### Offline uncertainty benchmark
+
+Use saved `data.pkl` and `eval.json` artifacts to screen uncertainty features
+without starting the simulator:
+
+```bash
+python scripts/benchmark_uncertainty_offline.py \
+  --runs /path/to/hugsim/run-root \
+  --horizon-steps 20 \
+  --folds 5 \
+  --seed 17 \
+  --min-coverage 0.05 \
+  --max-coverage 0.15 \
+  --event-horizons 5 10 20 \
+  --event-merge-gap-steps 5 \
+  --out-dir /path/to/offline-report
+```
+
+The benchmark groups every difficulty variant of a NuScenes scene into the
+same fold. Thresholds are selected on training folds only. Its primary cohort
+excludes frames already failing collision, NC, or DAC so reported lead time
+measures prediction rather than detection of an active failure. Event metrics
+merge failure frames separated by short safe gaps so score-threshold flicker is
+not counted as multiple independent failures.
+
+Outputs:
+- `benchmark.md`: summary, feature availability, fixed-policy comparison, and
+  held-out feature ablations;
+- `benchmark.json`: fold assignments, thresholds, metrics, and provenance;
+- `corpus_enriched.parquet`: decomposed labels and recoverable features;
+- `oof_predictions.parquet`: held-out predictions for plotting or error review;
+- `horizon_sweep.csv`: frame- and event-level metrics at each lookahead;
+- `scene_breakdown.csv`: per-scene-family generalization diagnostics;
+- `event_review.csv` and `frame_review_cases.csv`: concrete detections, misses,
+  and false alerts for video review.
+
+Historical post-selection trajectory features are diagnostics only. They are
+not valid substitutes for the raw planner proposal set and are excluded from
+the primary predictive models.
+
+For the next passive DrivoR collection, use
+`configs/planners/autoagent0/calibration/drivor_uncertainty_observe.yaml`. It
+computes uncertainty and stores `autoagent0_uncertainty_observation`, including
+the raw learned proposal tensor, learned scores, available rule proposals, and
+the executed baseline proposal. `uncertainty_policy_mode: observe` guarantees
+that uncertainty does not modify recovery candidate allocation. Existing
+active-policy ablations use `uncertainty_policy_mode: active`.
+
 ## Dataset And Output Layout
 
 Shared dataset roots:

@@ -108,6 +108,13 @@ class RecoveryStrategy(BaseSelectionStrategy):
             rule_based_candidate_rows=rule_based_candidate_rows,
             default_row=default_row,
         )
+        uncertainty_observation = self._uncertainty_observation_debug(
+            proposals=proposals,
+            scores=scores,
+            rule_based_candidate_rows=rule_based_candidate_rows,
+            default_row=default_row,
+            frame_uncertainty=frame_uncertainty,
+        )
         if frame_uncertainty is not None:
             tool_log.record(
                 "compute_uncertainty",
@@ -151,6 +158,7 @@ class RecoveryStrategy(BaseSelectionStrategy):
                     "fallback_selected_source": default_selected_source,
                     "planner_gate_selected_planner": "learned",
                     "autoagent0_frame_uncertainty": self._frame_uncertainty_debug(frame_uncertainty),
+                    "autoagent0_uncertainty_observation": uncertainty_observation,
                 }
             )
             selection = LearnedPlannerSelection(
@@ -190,7 +198,7 @@ class RecoveryStrategy(BaseSelectionStrategy):
             redesign_candidate_budget=sel.autoagent0_cfg.redesign_candidate_budget,
             available_rule_based_count=len(rule_based_candidate_rows),
             has_rule_based_candidates=bool(rule_based_candidate_rows),
-            frame_uncertainty=frame_uncertainty,
+            frame_uncertainty=self._routing_uncertainty(frame_uncertainty),
         )
         tool_log.record(
             "request_design_change",
@@ -359,6 +367,7 @@ class RecoveryStrategy(BaseSelectionStrategy):
                     "routing_mode": design_change_request.routing_mode,
                 },
                 "autoagent0_frame_uncertainty": self._frame_uncertainty_debug(frame_uncertainty),
+                "autoagent0_uncertainty_observation": uncertainty_observation,
                 "autoagent0_revised_candidate_count": len(expanded_rows),
                 "autoagent0_requested_learned_candidate_count": design_change_request.learned_budget,
                 "autoagent0_requested_rule_based_candidate_count": design_change_request.rule_based_budget,
@@ -555,8 +564,62 @@ class RecoveryStrategy(BaseSelectionStrategy):
                     "t_cross": float(cfg.uncertainty_t_cross),
                     "mode_count_high": int(cfg.uncertainty_mode_count_high),
                 },
+                "policy_mode": str(getattr(cfg, "uncertainty_policy_mode", "active")),
             },
         )
+
+    def _uncertainty_policy_active(self) -> bool:
+        cfg = self.selector.autoagent0_cfg
+        return bool(
+            getattr(cfg, "uncertainty_enabled", False)
+            and str(getattr(cfg, "uncertainty_policy_mode", "active")).lower() == "active"
+        )
+
+    def _routing_uncertainty(
+        self, frame_uncertainty: Optional[FrameUncertainty]
+    ) -> Optional[FrameUncertainty]:
+        return frame_uncertainty if self._uncertainty_policy_active() else None
+
+    def _uncertainty_observation_debug(
+        self,
+        *,
+        proposals: np.ndarray,
+        scores: np.ndarray,
+        rule_based_candidate_rows: Sequence[Dict[str, object]],
+        default_row: Dict[str, object],
+        frame_uncertainty: Optional[FrameUncertainty],
+    ) -> Optional[Dict[str, Any]]:
+        if frame_uncertainty is None:
+            return None
+        cfg = self.selector.autoagent0_cfg
+        return {
+            "schema_version": "autoagent0.uncertainty_observation.v1",
+            "policy_mode": str(getattr(cfg, "uncertainty_policy_mode", "active")),
+            "affects_candidate_allocation": self._uncertainty_policy_active(),
+            "learned_proposals": np.asarray(proposals, dtype=np.float32).tolist(),
+            "learned_scores": np.asarray(scores, dtype=np.float32).reshape(-1).tolist(),
+            "rule_based_proposals": [
+                np.asarray(row.get("execution_plan", row.get("local_plan", [])), dtype=np.float32).tolist()
+                for row in rule_based_candidate_rows
+            ],
+            "rule_based_scores": [
+                float(row.get("proposal_score", 0.0)) for row in rule_based_candidate_rows
+            ],
+            "baseline_proposal": {
+                "source": default_row.get("source"),
+                "proposal_index": default_row.get("proposal_index"),
+                "proposal_score": float(default_row.get("proposal_score", 0.0)),
+                "plan": np.asarray(
+                    default_row.get("execution_plan", default_row.get("local_plan", [])),
+                    dtype=np.float32,
+                ).tolist(),
+            },
+            "uncertainty": self._frame_uncertainty_debug(frame_uncertainty),
+            "counterfactual_verifier": {
+                "available": False,
+                "reason": "legacy_hugsim_recovery_path_has_no_per_candidate_pdms_verifier",
+            },
+        }
 
     @staticmethod
     def _frame_uncertainty_debug(frame_uncertainty: Optional[FrameUncertainty]) -> Optional[Dict[str, Any]]:

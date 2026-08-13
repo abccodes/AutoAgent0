@@ -15,7 +15,7 @@ drivor:
     max_redesign_attempts: 3
     fallback_mode: hold
     uncertainty_enabled: true
-    uncertainty_policy_mode: active
+    uncertainty_policy_mode: observe
     uncertainty_t_intra: 0.2
     uncertainty_t_cross: 2.4
     uncertainty_mode_k_max: 3

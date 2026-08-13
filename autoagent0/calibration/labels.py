@@ -24,15 +24,62 @@ def _per_timestep_score_array(frame: Dict[str, Any], key: str) -> np.ndarray:
 
 
 def _frame_is_unsafe(frame: Dict[str, Any]) -> bool:
-    if bool(frame.get("collision", False)):
-        return True
+    components = frame_failure_components(frame)
+    return any(components.values())
+
+
+def frame_failure_components(frame: Dict[str, Any]) -> Dict[str, bool]:
+    """Return the auditable collision/NC/DAC failure flags for one frame."""
+
     nc = _per_timestep_score_array(frame, "nc")
     dac = _per_timestep_score_array(frame, "dac")
-    if nc.size and float(nc.min()) < UNSAFE_NC_THRESHOLD:
-        return True
-    if dac.size and float(dac.min()) < UNSAFE_DAC_THRESHOLD:
-        return True
-    return False
+    return {
+        "collision": bool(frame.get("collision", False)),
+        "nc_failure": bool(nc.size and float(nc.min()) < UNSAFE_NC_THRESHOLD),
+        "dac_failure": bool(dac.size and float(dac.min()) < UNSAFE_DAC_THRESHOLD),
+    }
+
+
+def compute_future_failure_labels(
+    frames: Sequence[Dict[str, Any]],
+    *,
+    horizon_steps: int = 20,
+) -> Dict[str, List[Any]]:
+    """Return decomposed current/future failures and time to the next unsafe frame."""
+
+    components = [frame_failure_components(frame) for frame in frames]
+    unsafe = [any(item.values()) for item in components]
+    horizon = max(1, int(horizon_steps))
+    labels: Dict[str, List[Any]] = {
+        "unsafe_now": [int(value) for value in unsafe],
+        "collision_now": [int(item["collision"]) for item in components],
+        "nc_failure_now": [int(item["nc_failure"]) for item in components],
+        "dac_failure_now": [int(item["dac_failure"]) for item in components],
+        "future_unsafe": [],
+        "future_collision": [],
+        "future_nc_failure": [],
+        "future_dac_failure": [],
+        "steps_to_unsafe": [],
+    }
+    future_keys = {
+        "future_collision": "collision",
+        "future_nc_failure": "nc_failure",
+        "future_dac_failure": "dac_failure",
+    }
+    for idx in range(len(frames)):
+        window_end = min(len(frames), idx + horizon)
+        labels["future_unsafe"].append(int(any(unsafe[idx:window_end])))
+        for output_key, component_key in future_keys.items():
+            labels[output_key].append(
+                int(any(item[component_key] for item in components[idx:window_end]))
+            )
+        next_offsets = [
+            offset
+            for offset, value in enumerate(unsafe[idx:window_end])
+            if value
+        ]
+        labels["steps_to_unsafe"].append(next_offsets[0] if next_offsets else None)
+    return labels
 
 
 def compute_future_unsafe_label(
@@ -47,14 +94,9 @@ def compute_future_unsafe_label(
     has annotated the run; otherwise we fall back to the scalar `collision` flag.
     """
 
-    n = len(frames)
-    raw = [_frame_is_unsafe(frames[i]) for i in range(n)]
-    horizon = max(1, int(horizon_steps))
-    labels: List[int] = []
-    for i in range(n):
-        window_end = min(n, i + horizon)
-        labels.append(int(any(raw[i:window_end])))
-    return labels
+    return compute_future_failure_labels(
+        frames, horizon_steps=horizon_steps
+    )["future_unsafe"]
 
 
 def annotate_frames_with_score_details(

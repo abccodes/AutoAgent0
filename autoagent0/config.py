@@ -12,6 +12,7 @@ AUTOAGENT0_ENV_DEFAULTS: Dict[str, Any] = {
     "MAX_REDESIGN_ATTEMPTS": 1,
     "FALLBACK_MODE": "hold",
     "UNCERTAINTY_ENABLED": True,
+    "UNCERTAINTY_POLICY_MODE": "active",
     "UNCERTAINTY_T_INTRA": 0.20,
     "UNCERTAINTY_T_CROSS": 2.40,
     "UNCERTAINTY_MODE_K_MAX": 3,
@@ -27,6 +28,7 @@ AUTOAGENT0_ENV_FIELD_NAMES: Dict[str, str] = {
     "MAX_REDESIGN_ATTEMPTS": "max_redesign_attempts",
     "FALLBACK_MODE": "fallback_mode",
     "UNCERTAINTY_ENABLED": "uncertainty_enabled",
+    "UNCERTAINTY_POLICY_MODE": "uncertainty_policy_mode",
     "UNCERTAINTY_T_INTRA": "uncertainty_t_intra",
     "UNCERTAINTY_T_CROSS": "uncertainty_t_cross",
     "UNCERTAINTY_MODE_K_MAX": "uncertainty_mode_k_max",
@@ -44,6 +46,7 @@ class AutoAgent0Config:
     max_redesign_attempts: int = 1
     fallback_mode: str = "hold"
     uncertainty_enabled: bool = True
+    uncertainty_policy_mode: str = "active"
     uncertainty_t_intra: float = 0.20
     uncertainty_t_cross: float = 2.40
     uncertainty_mode_k_max: int = 3
@@ -105,4 +108,7 @@ def resolve_autoagent0_config(
     values["uncertainty_horizon_steps"] = max(0, int(values["uncertainty_horizon_steps"]))
     values["uncertainty_t_intra"] = float(values["uncertainty_t_intra"])
     values["uncertainty_t_cross"] = float(values["uncertainty_t_cross"])
+    values["uncertainty_policy_mode"] = str(values["uncertainty_policy_mode"]).strip().lower()
+    if values["uncertainty_policy_mode"] not in {"observe", "active"}:
+        raise ValueError("uncertainty_policy_mode must be 'observe' or 'active'")
     return AutoAgent0Config(**values)
