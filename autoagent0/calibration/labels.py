@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
+from shapely.geometry import Polygon as ShapelyPolygon
 
 
 UNSAFE_NC_THRESHOLD = 1.0
@@ -28,13 +29,97 @@ def _frame_is_unsafe(frame: Dict[str, Any]) -> bool:
     return any(components.values())
 
 
+def _executed_collision(frame: Dict[str, Any]) -> bool:
+    outcome = frame.get("execution_outcome")
+    if isinstance(outcome, dict) and "collision" in outcome:
+        return bool(outcome["collision"])
+    if "collision_after_step" in frame:
+        return bool(frame["collision_after_step"])
+    return bool(frame.get("collision", False))
+
+
+def _oriented_rectangle(box: Sequence[float]) -> ShapelyPolygon:
+    x, y, _z, width, length, _height, yaw = box
+    cos_yaw, sin_yaw = np.cos(yaw), np.sin(yaw)
+    x_offsets = np.asarray([length / 2, length / 2, -length / 2, -length / 2])
+    y_offsets = np.asarray([width / 2, -width / 2, -width / 2, width / 2])
+    points = np.stack(
+        [
+            x + x_offsets * cos_yaw - y_offsets * sin_yaw,
+            y + x_offsets * sin_yaw + y_offsets * cos_yaw,
+        ],
+        axis=1,
+    )
+    return ShapelyPolygon(points)
+
+
+def planned_object_overlap_evidence(
+    frames: Sequence[Dict[str, Any]], frame_idx: int
+) -> Optional[bool]:
+    """Replay only the object-box portion of evaluator NC for one saved plan.
+
+    ``False`` on an evaluator NC failure implies a static-background failure.
+    ``True`` only proves that an object overlap exists somewhere in the plan;
+    static geometry may still be the evaluator's first failure.
+    """
+
+    try:
+        frame = frames[frame_idx]
+        ego_box = np.asarray(frame["ego_box"], dtype=np.float64)
+        plan_payload = frame["planned_traj"]
+        trajectory = np.asarray(plan_payload["traj"], dtype=np.float64)
+        timestep = float(plan_payload["timestep"])
+        timestamp = float(frame["time_stamp"])
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    if trajectory.ndim != 2 or trajectory.shape[0] < 1 or trajectory.shape[1] < 3:
+        return None
+
+    planned = np.concatenate((ego_box[[0, 1, 6]][None], trajectory[:, :3]), axis=0)
+    if np.linalg.norm(planned[-1, :2] - planned[0, :2]) < 1.0:
+        planned[:, 2] = planned[0, 2]
+
+    planned_last_timestamp = timestamp + len(trajectory) * timestep
+    observation_lists: List[List[Sequence[float]]] = []
+    current_timestamp = timestamp
+    current_frame_idx = frame_idx
+    while current_timestamp <= planned_last_timestamp + 1e-5:
+        if current_frame_idx >= len(frames):
+            break
+        observed_frame = frames[current_frame_idx]
+        observed_timestamp = observed_frame.get("time_stamp")
+        if observed_timestamp is not None and abs(
+            current_timestamp - float(observed_timestamp)
+        ) < 1e-5:
+            boxes = observed_frame.get("obj_boxes") or []
+            names = observed_frame.get("obj_names") or ["car"] * len(boxes)
+            observation_lists.append(
+                [box for box, name in zip(boxes, names) if name == "car"]
+            )
+            current_timestamp += timestep
+        current_frame_idx += 1
+
+    ego_width, ego_length, ego_height = ego_box[3], ego_box[4], ego_box[5]
+    for step, (x, y, yaw) in enumerate(planned):
+        ego_polygon = _oriented_rectangle(
+            [x, y, ego_box[2], ego_width, ego_length, ego_height, yaw]
+        )
+        if not observation_lists:
+            obstacles = []
+        else:
+            obstacles = observation_lists[min(step, len(observation_lists) - 1)]
+        if any(ego_polygon.intersects(_oriented_rectangle(box)) for box in obstacles):
+            return True
+    return False
+
+
 def frame_failure_components(frame: Dict[str, Any]) -> Dict[str, bool]:
     """Return the auditable collision/NC/DAC failure flags for one frame."""
 
     nc = _per_timestep_score_array(frame, "nc")
     dac = _per_timestep_score_array(frame, "dac")
     return {
-        "collision": bool(frame.get("collision", False)),
+        "collision": _executed_collision(frame),
         "nc_failure": bool(nc.size and float(nc.min()) < UNSAFE_NC_THRESHOLD),
         "dac_failure": bool(dac.size and float(dac.min()) < UNSAFE_DAC_THRESHOLD),
     }
@@ -101,13 +186,13 @@ def compute_future_unsafe_label(
 
 def annotate_frames_with_score_details(
     frames: Sequence[Dict[str, Any]],
-    details: Dict[float, Dict[str, float]],
+    details: Dict[float, Dict[str, Any]],
 ) -> None:
     """Merge per-timestamp score dict from eval.json into the corresponding frames.
 
     `details` is keyed by timestamp (float). Each frame has its own `time_stamp`.
-    We attach the matching score dict under `frame['score_details']` so that
-    `_frame_is_unsafe` finds the per-timestep arrays.
+    Numeric score terms remain one-element arrays for compatibility with older
+    logs. Evaluator provenance such as NC failure type and step stays typed.
     """
 
     if not details:
@@ -121,5 +206,6 @@ def annotate_frames_with_score_details(
         if scores is None:
             continue
         frame["score_details"] = {
-            key: [float(value)] for key, value in scores.items()
+            key: [float(value)] if key in {"nc", "dac", "ttc", "c", "pdms"} else value
+            for key, value in scores.items()
         }

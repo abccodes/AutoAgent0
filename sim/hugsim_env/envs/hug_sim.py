@@ -307,12 +307,14 @@ class HUGSimEnv(gymnasium.Env):
             reward = -100
 
         rc, dist = self.route_completion
-        if dist > 10:
+        route_departure = bool(dist > 10)
+        if route_departure:
             terminated=True
             print('Far from preset trajectory')
             reward = -50
             
-        if rc >= 1:
+        route_complete = bool(rc >= 1)
+        if route_complete:
             terminated = True
             print('Complete')
             reward = 1000
@@ -321,5 +323,17 @@ class HUGSimEnv(gymnasium.Env):
         info = self._get_info()
         info['rc'] = rc
         info['collision'] = bg_collision or fg_collision
+        info['background_collision'] = bool(bg_collision)
+        info['foreground_collision'] = bool(fg_collision)
+        info['route_departure'] = route_departure
+        info['route_complete'] = route_complete
+        if bg_collision or fg_collision:
+            info['termination_reason'] = 'collision'
+        elif route_departure:
+            info['termination_reason'] = 'route_departure'
+        elif route_complete:
+            info['termination_reason'] = 'route_complete'
+        else:
+            info['termination_reason'] = None
         
         return observation, reward, terminated, False, info

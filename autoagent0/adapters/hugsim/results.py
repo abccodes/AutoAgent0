@@ -7,6 +7,49 @@ import re
 from typing import Any, Dict
 
 
+def attach_execution_outcome(
+    frame: Dict[str, Any],
+    next_info: Any,
+    *,
+    reward: Any,
+    terminated: bool,
+    truncated: bool,
+    runner_timeout: bool = False,
+) -> None:
+    """Attach the result of executing ``frame``'s action to that frame.
+
+    HUGSIM records the observation and plan before calling ``env.step``. Keeping
+    the resulting state here prevents terminal collisions from disappearing
+    when the closed-loop runner exits immediately after the step.
+    """
+
+    info = next_info if isinstance(next_info, dict) else {}
+    collision = bool(info.get("collision", False))
+    termination_reason = info.get("termination_reason")
+    if termination_reason is None and runner_timeout:
+        termination_reason = "runner_timeout"
+    elif termination_reason is None and truncated:
+        termination_reason = "truncated"
+    elif termination_reason is None and terminated:
+        termination_reason = "terminated"
+    outcome = {
+        "next_timestamp": info.get("timestamp"),
+        "reward": float(reward),
+        "terminated": bool(terminated),
+        "truncated": bool(truncated),
+        "runner_timeout": bool(runner_timeout),
+        "collision": collision,
+        "background_collision": bool(info.get("background_collision", False)),
+        "foreground_collision": bool(info.get("foreground_collision", False)),
+        "route_departure": bool(info.get("route_departure", False)),
+        "route_complete": bool(info.get("route_complete", False)),
+        "termination_reason": termination_reason,
+        "route_completion": info.get("rc"),
+    }
+    frame["execution_outcome"] = outcome
+    frame["collision_after_step"] = collision
+
+
 def slugify_model_name(value: Any, default: str = "model") -> str:
     value = "" if value is None else str(value).strip()
     if not value:

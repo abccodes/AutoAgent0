@@ -111,6 +111,7 @@ def render_report(
         f"- Routes: **{df['run_id'].nunique()}**",
         f"- Scene groups: **{df['scene_group'].nunique()}** (all variants kept in one fold)",
         f"- Label horizon: **{args.horizon_steps} frames**",
+        "- Primary historical target: future evaluator plan-risk (NC/DAC), not observed physical contact",
         "- Alert rates use recorded simulator timestamps (CLI frame duration is only a fallback)",
         f"- CV: **{args.folds} folds**, seed **{args.seed}**",
         f"- Operating coverage selected on training folds: **{args.min_coverage:.0%}-{args.max_coverage:.0%}**",
@@ -124,8 +125,21 @@ def render_report(
         lines.append(f"| {label} | {df[label].mean():.3f} |")
     lines.extend([
         "",
-        f"Primary evaluation excludes the **{int(df['unsafe_now'].sum())} frames already failing NC/DAC/collision**. "
+        f"Primary evaluation excludes the **{int(df['unsafe_now'].sum())} frames whose current plan fails NC/DAC or whose executed action records collision**. "
         f"The future-unsafe rate in the remaining cohort is **{evaluated_df['future_unsafe'].mean():.3f}**.",
+    ])
+    historical_nc = df[(df["nc_failure_now"] == 1) & df["nc_failure_type"].isna()]
+    object_overlap = int(historical_nc["nc_object_overlap_evidence"].eq(True).sum())
+    background_only = int(historical_nc["nc_object_overlap_evidence"].eq(False).sum())
+    lines.extend([
+        "",
+        "## NC provenance",
+        "",
+        f"The legacy corpus has **{len(historical_nc)} NC-failing frames** without exact failure-type metadata. "
+        f"Object-box replay finds overlap evidence in **{object_overlap}**; the other **{background_only}** "
+        "have no object overlap and therefore imply a static-background NC failure. An overlap is evidence, "
+        "not an exact cause, because static geometry may fail earlier in the same plan.",
+        "New evaluator outputs record the exact first `nc_failure_type` and `nc_failure_step`.",
     ])
     lines.extend(["", "## Feature availability", "", "| feature | available |", "|---|---:|"])
     for feature in RECOVERABLE_FEATURES + RAW_PROPOSAL_FEATURES + POST_SELECTION_FEATURES:
@@ -149,7 +163,7 @@ def render_report(
         )
     lines.extend([
         "",
-        "The all-frame column reproduces the historical label semantics. Predictive columns require the current frame to be safe, so lead time is greater than zero.",
+        "The all-frame column reproduces the historical plan-risk label semantics. Predictive columns require the current frame to be safe, so lead time is greater than zero.",
     ])
     lines.extend([
         "",
@@ -236,7 +250,10 @@ def render_report(
         "## Interpretation limits",
         "",
         "- This corpus was collected under the legacy active uncertainty policy, not passive observation.",
-        "- The target is future closed-loop failure, not the current AgenticDriving `coverage_rescue` target.",
+        "- Historical `nc` is a counterfactual collision check over the saved multi-step plan; it is not physical contact at that frame.",
+        "- Historical frames were saved before `env.step`, so terminal collisions and route departures were not retained. New runs record `execution_outcome`.",
+        "- Static evaluator NC uses `scene.ply`, whose export is broader than the opacity-filtered point set used for physical simulator collision. Background-only NC may therefore be conservative evaluator risk rather than contact risk.",
+        "- The target is future evaluator plan-risk, not the current AgenticDriving `coverage_rescue` target.",
         "- Saved trajectory pools are post-selection and cannot reproduce the current proposal geometry exactly.",
         "- Results support feature screening and experiment design; they do not replace a held-out live A/B run.",
     ])
@@ -390,6 +407,11 @@ def main() -> int:
             "event_horizons": args.event_horizons,
             "frame_dt_sec": args.frame_dt_sec,
             "event_merge_gap_steps": args.event_merge_gap_steps,
+            "label_semantics": {
+                "nc": "saved multi-step plan intersects evaluator background or obstacle geometry",
+                "collision": "post-step physical collision when execution_outcome is available; pre-step legacy fallback otherwise",
+                "historical_limitation": "terminal post-step outcomes were not saved in the legacy corpus",
+            },
         },
         "dataset": {
             "frames": len(df),

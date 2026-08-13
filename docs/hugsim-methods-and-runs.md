@@ -209,10 +209,21 @@ python scripts/benchmark_uncertainty_offline.py \
 
 The benchmark groups every difficulty variant of a NuScenes scene into the
 same fold. Thresholds are selected on training folds only. Its primary cohort
-excludes frames already failing collision, NC, or DAC so reported lead time
-measures prediction rather than detection of an active failure. Event metrics
-merge failure frames separated by short safe gaps so score-threshold flicker is
-not counted as multiple independent failures.
+excludes frames whose current saved plan fails NC/DAC or whose executed action
+records collision, so reported lead time measures prediction rather than
+detection of an active failure. Event metrics merge failure frames separated by
+short safe gaps so score-threshold flicker is not counted as multiple
+independent failures.
+
+Evaluator NC is a counterfactual geometric check over the saved multi-step
+plan, not an observed collision at the current frame. Legacy runs also saved
+the frame before `env.step`, so their terminal physical outcome is unavailable.
+New runs attach the post-step outcome to the originating frame, including
+collision subtype, reward, route status, timeout, and termination reason, and
+new `eval.json` files identify the first NC failure type and trajectory step.
+The static evaluator uses the broader exported `scene.ply`, whereas physical
+background collision uses an opacity-filtered point set. Keep official NC for
+benchmark comparability and describe it as evaluator plan-risk.
 
 Outputs:
 - `benchmark.md`: summary, feature availability, fixed-policy comparison, and

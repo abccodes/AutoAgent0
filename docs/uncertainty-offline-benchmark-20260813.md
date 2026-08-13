@@ -8,9 +8,17 @@ whether saved uncertainty signals predict future evaluator NC failure. Scene
 variants remain grouped during five-fold cross-validation, and thresholds are
 selected on training folds only.
 
-The predictive cohort excludes 573 frames already failing NC, DAC, or
-collision. All 573 current failures are evaluator NC failures; none has a saved
-simulator collision flag and none is a DAC failure.
+The predictive cohort excludes 573 frames whose saved plans already fail NC,
+DAC, or collision. All 573 current failures are evaluator NC failures; none has
+a saved simulator collision flag and none is a DAC failure.
+
+An implementation audit showed that this is not evidence that the evaluator
+invented 573 physical collisions. Evaluator NC rolls the saved multi-step plan
+through static and object geometry, whereas `frame["collision"]` is sampled
+before that frame's action is executed. The returned post-step state was never
+attached to the frame, and a terminal collision therefore exited the loop
+without being saved. The historical target is future evaluator plan-risk, not
+confirmed future physical contact.
 
 ## Main results
 
@@ -35,6 +43,31 @@ including parked vehicles and construction cones. Other evaluator NC/TTC
 failures occurred on visually open pavement while `frame["collision"]` remained
 false, sometimes without recorded object boxes. The historical target should
 therefore be described as an evaluator NC event, not a confirmed collision.
+
+## Label audit
+
+- All 7,775 historical frames lack a saved post-step execution outcome.
+- No route reached the 401-frame runner timeout; 30/94 ended below 90% route
+  completion, but the saved artifacts cannot distinguish collision from route
+  departure for those endings.
+- 545/573 NC-failing frames also fail evaluator TTC; 28 fail NC alone.
+- Replaying the evaluator's object-box geometry finds planned object-overlap
+  evidence in 360/573 NC-failing frames. The other 213 have no object overlap
+  and therefore must be static-background NC failures. For the 360 overlap
+  cases, the old artifacts cannot establish whether static geometry failed at
+  an earlier trajectory step.
+
+The runner now records the post-step reward, terminal flags, collision subtype,
+route status, and termination reason under `execution_outcome`. New evaluator
+outputs also retain `nc_failure_type` and `nc_failure_step`. These additions do
+not alter NC, DAC, TTC, PDMS, control, or uncertainty routing.
+
+There is also a static-geometry difference in the existing benchmark: physical
+HUGSIM background collision uses an opacity-filtered point set, while evaluator
+NC uses the broader exported `scene.ply`. This helps explain why some
+background-only NC events are not visually obvious. We retain the official NC
+calculation for comparability and report it as evaluator plan-risk rather than
+silently redefining the benchmark.
 
 ## Decision
 

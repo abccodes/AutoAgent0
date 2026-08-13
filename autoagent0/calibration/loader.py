@@ -14,6 +14,8 @@ import pandas as pd
 from autoagent0.calibration.labels import (
     annotate_frames_with_score_details,
     compute_future_failure_labels,
+    frame_failure_components,
+    planned_object_overlap_evidence,
 )
 from autoagent0.calibration.features import (
     post_selection_features,
@@ -92,6 +94,16 @@ def _critic_rejected(frame: Dict[str, Any]) -> Optional[bool]:
     return None
 
 
+def _execution_outcome(frame: Dict[str, Any]) -> Dict[str, Any]:
+    outcome = frame.get("execution_outcome")
+    return outcome if isinstance(outcome, dict) else {}
+
+
+def _score_detail(frame: Dict[str, Any], key: str) -> Any:
+    details = frame.get("score_details")
+    return details.get(key) if isinstance(details, dict) else None
+
+
 def load_run(run_dir: str, *, horizon_steps: int = 20) -> pd.DataFrame:
     data_pkl = os.path.join(run_dir, "data.pkl")
     eval_json = os.path.join(run_dir, "eval.json")
@@ -123,6 +135,13 @@ def load_run(run_dir: str, *, horizon_steps: int = 20) -> pd.DataFrame:
             continue
         meta = unc.get("metadata") or {}
         debug = frame.get("planner_debug") or {}
+        outcome = _execution_outcome(frame)
+        failure_components = frame_failure_components(frame)
+        object_overlap_evidence = (
+            planned_object_overlap_evidence(frames, idx)
+            if labels["nc_failure_now"][idx]
+            else None
+        )
         change, previous_selected_world = temporal_change(
             debug.get("local_plan"),
             debug.get("overlay_plan_origin_pose"),
@@ -145,9 +164,19 @@ def load_run(run_dir: str, *, horizon_steps: int = 20) -> pd.DataFrame:
                 "future_nc_failure": int(labels["future_nc_failure"][idx]),
                 "future_dac_failure": int(labels["future_dac_failure"][idx]),
                 "unsafe_now": int(labels["unsafe_now"][idx]),
+                "nc_failure_now": int(labels["nc_failure_now"][idx]),
+                "dac_failure_now": int(labels["dac_failure_now"][idx]),
                 "steps_to_unsafe": labels["steps_to_unsafe"][idx],
                 "critic_rejected": _critic_rejected(frame),
-                "collision_now": bool(frame.get("collision", False)),
+                "collision_now": failure_components["collision"],
+                "execution_outcome_available": bool(outcome),
+                "terminated_after_step": bool(outcome.get("terminated", False)),
+                "truncated_after_step": bool(outcome.get("truncated", False)),
+                "runner_timeout_after_step": bool(outcome.get("runner_timeout", False)),
+                "termination_reason": outcome.get("termination_reason"),
+                "nc_failure_type": _score_detail(frame, "nc_failure_type"),
+                "nc_failure_step": _safe_float(_score_detail(frame, "nc_failure_step")),
+                "nc_object_overlap_evidence": object_overlap_evidence,
                 "temporal_selected_change_m": change,
                 **score_features(debug.get("topk_scores")),
                 **post_selection_features(debug),
@@ -173,9 +202,19 @@ def load_run(run_dir: str, *, horizon_steps: int = 20) -> pd.DataFrame:
                 "future_nc_failure",
                 "future_dac_failure",
                 "unsafe_now",
+                "nc_failure_now",
+                "dac_failure_now",
                 "steps_to_unsafe",
                 "critic_rejected",
                 "collision_now",
+                "execution_outcome_available",
+                "terminated_after_step",
+                "truncated_after_step",
+                "runner_timeout_after_step",
+                "termination_reason",
+                "nc_failure_type",
+                "nc_failure_step",
+                "nc_object_overlap_evidence",
                 "temporal_selected_change_m",
                 "score_entropy",
                 "effective_candidate_count",

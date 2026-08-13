@@ -566,8 +566,9 @@ class ScoreCalculator:
                 planned_traj, frame['ego_box'])
             # breakpoint()
 
-            score_nc = self._calculate_no_collision(
+            nc_detail = self.no_collision_detail(
                 frame['ego_box'], planned_traj, obs_lists, self.data['scene_xyz'])
+            score_nc = 1.0 if nc_detail['passed'] else 0.0
             score_dac = self._calculate_drivable_area_compliance(
                 self.data['ground_xy'], planned_traj, ego_w, ego_l)
             
@@ -589,13 +590,21 @@ class ScoreCalculator:
 
             score_pdms = score_nc*score_dac*(score_weight['ttc']*score_ttc+score_weight['c']*score_c)/(
                 score_weight['ttc']+score_weight['c'])
-            score_list[timestamp] = {'nc': score_nc, 'dac': score_dac,
-                                     'ttc': score_ttc, 'c': score_c, 'pdms': score_pdms}
+            score_list[timestamp] = {
+                'nc': score_nc,
+                'dac': score_dac,
+                'ttc': score_ttc,
+                'c': score_c,
+                'pdms': score_pdms,
+                'nc_failure_type': nc_detail['type'],
+                'nc_failure_step': nc_detail['step'],
+            }
         
-        totals = {metric: 0 for metric in next(iter(score_list.values()))}
+        aggregate_metrics = ('nc', 'dac', 'ttc', 'c', 'pdms')
+        totals = {metric: 0 for metric in aggregate_metrics}
         for scores in score_list.values():
-            for metric, value in scores.items():
-                totals[metric] += value
+            for metric in aggregate_metrics:
+                totals[metric] += scores[metric]
 
         # avg scores
         num_entries = len(score_list)

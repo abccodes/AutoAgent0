@@ -12,8 +12,11 @@ from autoagent0.calibration.features import (
     temporal_change,
 )
 from autoagent0.calibration.labels import compute_future_failure_labels
+from autoagent0.calibration.labels import annotate_frames_with_score_details
+from autoagent0.calibration.labels import planned_object_overlap_evidence
 from autoagent0.calibration.offline import make_group_folds
 from autoagent0.calibration.offline import event_metrics
+from autoagent0.adapters.hugsim.results import attach_execution_outcome
 from autoagent0.config import AutoAgent0Config, build_prefixed_autoagent0_env
 from autoagent0.scorer.agent_schemas import FrameUncertainty
 from autoagent0.scorer.selection_strategies.recovery import RecoveryStrategy
@@ -49,6 +52,64 @@ class LabelTest(unittest.TestCase):
         self.assertEqual(labels["future_collision"], [0, 1, 1])
         self.assertEqual(labels["future_nc_failure"], [1, 1, 0])
         self.assertEqual(labels["steps_to_unsafe"], [1, 0, 0])
+
+    def test_post_step_collision_overrides_pre_step_snapshot(self) -> None:
+        frame = {
+            "collision": False,
+            "score_details": {"nc": [1.0], "dac": [1.0]},
+        }
+        attach_execution_outcome(
+            frame,
+            {
+                "timestamp": 0.25,
+                "collision": True,
+                "background_collision": True,
+                "termination_reason": "collision",
+                "rc": 0.4,
+            },
+            reward=-100,
+            terminated=True,
+            truncated=False,
+        )
+        labels = compute_future_failure_labels([frame], horizon_steps=1)
+        self.assertEqual(labels["collision_now"], [1])
+        self.assertTrue(frame["execution_outcome"]["terminated"])
+        self.assertFalse(frame["execution_outcome"]["runner_timeout"])
+        self.assertEqual(frame["execution_outcome"]["termination_reason"], "collision")
+
+    def test_evaluator_nc_metadata_is_not_coerced_to_float(self) -> None:
+        frames = [{"time_stamp": 0.0}]
+        annotate_frames_with_score_details(
+            frames,
+            {
+                0.0: {
+                    "nc": 0.0,
+                    "dac": 1.0,
+                    "nc_failure_type": "background",
+                    "nc_failure_step": 4,
+                }
+            },
+        )
+        self.assertEqual(frames[0]["score_details"]["nc"], [0.0])
+        self.assertEqual(frames[0]["score_details"]["nc_failure_type"], "background")
+        self.assertEqual(frames[0]["score_details"]["nc_failure_step"], 4)
+
+    def test_historical_object_overlap_replay(self) -> None:
+        ego_box = [0.0, 0.0, 0.0, 2.0, 4.0, 1.5, 0.0]
+        frame = {
+            "time_stamp": 0.0,
+            "ego_box": ego_box,
+            "obj_boxes": [[4.0, 0.0, 0.0, 2.0, 4.0, 1.5, 0.0]],
+            "obj_names": ["car"],
+            "planned_traj": {
+                "traj": [[2.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+                "timestep": 0.5,
+            },
+        }
+        self.assertTrue(planned_object_overlap_evidence([frame], 0))
+        frame["obj_boxes"] = []
+        frame["obj_names"] = []
+        self.assertFalse(planned_object_overlap_evidence([frame], 0))
 
 
 class SplitTest(unittest.TestCase):

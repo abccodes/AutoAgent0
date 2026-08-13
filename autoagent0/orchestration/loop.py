@@ -47,6 +47,7 @@ from autoagent0.adapters.hugsim.demo_tasks import (
     summarize_demo_overlay,
 )
 from autoagent0.adapters.hugsim.results import (
+    attach_execution_outcome,
     build_run_performance,
     prefix_output_dir_with_model,
     resolve_output_model_slug,
@@ -998,10 +999,19 @@ def run_closed_loop(cfg, output, run_label, include_privileged_pipe=False, plann
             action = apply_demo_task_action_override(action, current_info)
 
             obs, reward, terminated, truncated, info = env.step(action)
+            cnt += 1
+            runner_timeout = cnt > 400
+            attach_execution_outcome(
+                save_data['frames'][-1],
+                info,
+                reward=reward,
+                terminated=terminated,
+                truncated=truncated,
+                runner_timeout=runner_timeout,
+            )
             if include_privileged_pipe:
                 privileged_info = _get_privileged_info(env)
-            cnt += 1
-            done = terminated or truncated or cnt > 400
+            done = terminated or truncated or runner_timeout
 
         else:
             done = True
