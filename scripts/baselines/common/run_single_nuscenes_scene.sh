@@ -30,6 +30,50 @@ print(str(cfg.get("data_type", "nuscenes")).strip().lower())
 PY
 }
 
+preflight_hugsim_assets() {
+    local base_path="$1"
+    local scenario_path="$2"
+    local python_bin="$3"
+    "${python_bin}" - <<'PY' "${base_path}" "${scenario_path}"
+import os
+import sys
+from omegaconf import OmegaConf
+
+base_path, scenario_path = sys.argv[1:]
+base = OmegaConf.load(base_path)
+scenario = OmegaConf.load(scenario_path)
+model_base = os.path.expanduser(str(base.get("model_base", "")))
+realcar_path = os.path.expanduser(str(base.get("realcar_path", "")))
+scene_name = str(scenario.scene_name)
+
+missing = []
+if not os.path.isdir(model_base):
+    missing.append(f"processed scene root: {model_base}")
+if not os.path.isdir(realcar_path):
+    missing.append(f"3DRealCar root: {realcar_path}")
+if missing:
+    raise SystemExit("missing HUGSIM assets:\n- " + "\n- ".join(missing))
+
+direct = os.path.join(model_base, scene_name)
+candidates = []
+if os.path.isfile(os.path.join(direct, "cfg.yaml")):
+    candidates.append(direct)
+else:
+    for root, dirs, _files in os.walk(model_base):
+        if scene_name not in dirs:
+            continue
+        candidate = os.path.join(root, scene_name)
+        if os.path.isfile(os.path.join(candidate, "cfg.yaml")):
+            candidates.append(candidate)
+if len(candidates) != 1:
+    detail = "not found" if not candidates else f"ambiguous: {candidates}"
+    raise SystemExit(
+        f"processed scene {scene_name!r} {detail} under model_base={model_base!r}"
+    )
+print(f"scene_model_path={candidates[0]}")
+PY
+}
+
 default_base_path_for_dataset() {
     local data_type="$1"
     case "${data_type}" in
@@ -131,6 +175,8 @@ if [[ ! -f "${PLANNER_PATH}" ]]; then
     echo "missing planner config: ${PLANNER_PATH}" >&2
     exit 1
 fi
+
+preflight_hugsim_assets "${BASE_PATH}" "${SCENARIO_PATH}" "${HUGSIM_PYTHON_BIN}"
 
 mkdir -p /bigdata/aidan/outputs/benchmark/out
 
