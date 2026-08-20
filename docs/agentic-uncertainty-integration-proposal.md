@@ -2,152 +2,158 @@
 
 ## Purpose
 
-How the uncertainty work can contribute to the current AgenticDriving system.
-It is intended to confirm that the role and research direction make sense
-before we complete the AgenticDriving integration.
+This document summarizes how the uncertainty work fits into AgenticDriving,
+what is already implemented, what has been validated, and what remains. The
+detailed engineering and benchmark checklist is in the
+[technical plan](agentic-uncertainty-technical-plan.md).
 
 ## Recommendation
 
-Treat uncertainty as an anticipatory event signal for the high-level
-orchestrator. It should identify planner states that may need more evaluation,
-semantic reasoning, or recovery consideration. It should not replace the final
-trajectory verifier or directly authorize vehicle control.
+Use uncertainty near term as a pre-selection coverage monitor: when the
+planner's proposal distribution resembles cases where the normal candidate
+budget misses an admissible trajectory, evaluate more existing candidates with
+PDMS. This is a bounded response that does not generate a new trajectory or
+bypass the final verifier.
 
-The HUGSIM work shows that we can compute this signal passively, preserve the
-planner's original decision, and enrich for future plan risk. It does not yet
-show that the signal improves closed-loop driving or that its thresholds
-transfer to CARLA/Fail2Drive. I propose an observe-only AgenticDriving
-integration before any active intervention.
+Longer term, the same monitor could become an event signal for the high-level
+orchestrator, requesting semantic review or recovery consideration. That
+broader role should be evaluated only after the coverage policy is calibrated
+and tested in CARLA/Fail2Drive.
 
-## Where it fits in agentic system
+## Current status
 
-A trajectory verifier evaluates one selected trajectory. The uncertainty
-mechanism instead evaluates the planner's full proposal distribution and its
-agreement with alternative planning branches. These are complementary signals:
+| Work | Repository status | What it does | Validation |
+|---|---|---|---|
+| Recovery-stage uncertainty | Merged in current AgenticDriving `main` | Computes learned spread, rule-based disagreement, and mode count after recovery begins; changes the redesign candidate mix | Code and calibration tooling are merged; it is not an anticipatory signal |
+| Pre-selection CARLA monitor | Implemented locally in commit `24f8c68`; not merged | Runs before candidate scoring with `off`, `observe`, and `active` modes; active mode expands PDMS candidate coverage | Five focused unit tests pass; no CARLA routes or calibrated artifact yet |
+| HUGSIM passive monitor | Completed in the HUGSIM/DrivoR stack | Records proposal-distribution signals without changing the selected trajectory | 1,911 frames across 38 routes; grouped offline analysis completed |
 
-- the verifier asks whether the current trajectory is admissible;
-- uncertainty asks whether the system should gather more evidence before
-  trusting the normal planning path.
+The pre-selection code is based on AgenticDriving commit `504d123`. Current
+AgenticDriving `main` is `613120c`, eight commits ahead. The code is not
+discarded, but it must be ported onto current `main` and smoke-tested before
+CARLA data collection.
+
+## Where it fits
+
+A verifier evaluates the exact trajectory selected for execution. The
+uncertainty monitor evaluates whether the normal candidate-scoring budget is
+likely to be sufficient.
 
 ```text
 Planner proposals and scores
             |
-       +----+----------------+
-       |                     |
-       v                     v
- normal selection     uncertainty signal
-       |                     |
-       v                     v
- final verifier       temporal confirmation
-       |                     |
-       +----------+----------+
-                  v
-             orchestrator
-                  |
-       execute / evaluate more / recover
-                  |
-                  v
-       exact final trajectory verifier
+            v
+   pre-selection uncertainty
+            |
+     +------+------+
+     |             |
+     v             v
+ normal PDMS    expanded PDMS
+ coverage       coverage when active
+     |             |
+     +------+------+
+            v
+    selected trajectory
+            |
+            v
+       final verifier
+            |
+       execute/recover
 ```
+
+In `observe` mode, expanded scoring runs only as a shadow calculation and the
+normal winner is preserved. In `active` mode, a calibrated and temporally
+confirmed event increases the existing PDMS candidate budget. Every resulting
+trajectory still passes through the normal final verifier.
+
+This top-level monitor should replace or explicitly supersede the old
+uncertainty-based routing inside recovery. Running both policies without clear
+ownership would make the evaluation difficult to interpret.
 
 ## Method
 
-### Planner-distribution signal
+### Proposal-distribution features
 
-At planning tick `t`, the learned planner produces candidate trajectories
+At planning tick `t`, the learned planner emits candidate trajectories
 `tau_i` and native scores `q_i`:
 
 ```text
 C_t = {(tau_i, q_i)} for i = 1, ..., M
 ```
 
-All uncertainty features are computed from this original proposal distribution
-before top-k truncation, recovery generation, VLM selection, or
-uncertainty-based candidate allocation.
+The CARLA monitor receives this original proposal set before candidate scoring.
+For bounded runtime, it can compute distribution features over the highest
+scored `N` candidates, currently 32, while recording that truncation. This
+feature cap does not alter the planner's candidates or selected trajectory.
 
-First, planner scores are converted into softmax weights:
-
-```text
-w_i = exp(q_i / temperature) / sum_j exp(q_j / temperature)
-```
-
-We then measure how much the weighted proposals spread around their mean at
-each future horizon step:
+Scores are standardized to reduce planner-scale sensitivity and converted to
+weights:
 
 ```text
-mu_h       = sum_i w_i * tau_i[h]
-rms_h      = sqrt(sum_i w_i * ||tau_i[h] - mu_h||^2)
-U_intra(t) = mean_h rms_h
+z_i = (q_i - mean(q)) / std(q)
+w_i = exp(z_i) / sum_j exp(z_j)
 ```
 
-`U_intra` describes concentration in trajectory space. It is not a safety
-score by itself: high spread can represent legitimate multimodality, while low
-spread can represent either an easy scene or confident failure.
-
-### Cross-planner and contextual evidence
-
-HUGSIM also compares the best learned trajectory with the nearest independent
-Rule-Planner trajectory:
+The weighted spatial spread is:
 
 ```text
-U_cross(t) = min_r mean_h ||tau_learned[h] - tau_rule_r[h]||
+mu_h          = sum_i w_i * tau_i[h]
+rms_h         = sqrt(sum_i w_i * ||tau_i[h] - mu_h||^2)
+dispersion(t) = mean_h rms_h
 ```
 
-In AgenticDriving, we propose logging disagreement between the end-to-end and
-target-region/PDMS branch winners during normal driving. When recovery
-candidates exist, disagreement with verified primitive or rule candidates can
-be recorded separately. These measures require new AgenticDriving calibration
-because they do not have the same distribution as the HUGSIM Rule-Planner
-signal.
+The monitor also records normalized dispersion, pairwise and endpoint
+distance, normalized score entropy, effective candidate count, top-score
+margin, proposal mode count, change from the previous selected trajectory, and
+distance from the best learned trajectory to the nearest recovery primitive.
+Unavailable features are represented explicitly rather than as zero.
 
-We also retain proposal mode count, score entropy, top-score margin, proposal
-dispersion, selected-trajectory change, and verifier margins. These provide
-context for distinguishing useful multimodality, ordinary agreement, and
-potential planner collapse.
+### Calibration target
 
-### Consensus risk and temporal confirmation
-
-The strongest HUGSIM result came from a low-disagreement region:
+The HUGSIM analysis found that future risk was enriched when learned and
+rule-based trajectories both had low disagreement:
 
 ```text
 consensus_risk = (U_intra <= T_intra) AND (U_cross <= T_cross)
 ```
 
-This result is better interpreted as **consensus risk** than conventional
-high-variance uncertainty: the learned and alternative planners agree, but
-similar agreement has historically preceded a future safety failure. It may
-capture shared blind spots or confident mode collapse.
+This is better interpreted as confident consensus risk or a shared blind spot,
+not conventional high-variance uncertainty. It is useful evidence, but HUGSIM
+thresholds do not transfer directly to AgenticDriving.
 
-A frame-level signal should not immediately change behavior. Alerts pass
-through a deterministic temporal filter:
+The implemented CARLA path instead trains a planner- and perception-specific
+logistic artifact against a measurable coverage target:
 
 ```text
-NORMAL -> WATCH -> CONFIRMED -> COOLDOWN -> NORMAL
+coverage_rescue =
+    normal PDMS winner fails admission
+    AND shadow expanded-budget winner passes
 ```
 
-Only persistent or accumulated evidence becomes a confirmed event. Cooldowns,
-hysteresis, freshness checks, and route-level budgets prevent repeated tool
-calls. Timing uses simulator time rather than wall time.
+Calibration uses grouped out-of-fold predictions so paired ID/tail routes and
+route repetitions do not leak between training and evaluation. Active mode
+requires an artifact whose schema, planner, and perception source match the
+runtime configuration.
 
-### Agentic response
+### Temporal policy and authority
 
-| Verifier | Uncertainty event | Proposed response |
-|---|---|---|
-| Pass | None | Execute the admitted trajectory |
-| Pass | Unconfirmed | Log only |
-| Pass | Confirmed | Request more scoring or asynchronous semantic review |
-| Pass | Confirmed plus independent confirmation | Consider existing recovery path |
-| Reject | Any state | Use existing deterministic recovery |
-| No admitted recovery | Any state | Controlled braking or hold |
+A single high-risk frame does not expand coverage. The implementation requires
+a configured number of consecutive high-risk ticks to activate expansion and
+a configured number of low-risk ticks to release it.
 
-Uncertainty may request additional evaluation and provide structured evidence
-to the Critic, Designer, and recovery memory. It cannot bypass verification,
-declare a trajectory safe, generate arbitrary waypoints, or execute a VLM
-suggestion.
+| Mode | Behavior |
+|---|---|
+| `off` | Original scoring path; no monitor |
+| `observe` | Log features and shadow expanded scoring; execute the original winner |
+| `active` | Apply calibrated hysteresis and expand existing PDMS coverage |
 
-## Evidence to date
+The monitor can change only the number of existing candidates evaluated. It
+cannot generate arbitrary waypoints, declare a trajectory safe, invoke recovery
+directly, or bypass the verifier.
 
-### Passive HUGSIM corpus
+## HUGSIM evidence
+
+### Passive corpus
 
 | Property | Result |
 |---|---:|
@@ -161,14 +167,10 @@ suggestion.
 | Mean route RC | 0.5974 |
 | Mean route HDScore | 0.5224 |
 
-All 1,911 frames retained the full 64-proposal DrivoR distribution, preserved
-the original DrivoR argmax, left candidate allocation unchanged, and recorded
-post-step outcomes.
+All frames retained the 64-proposal DrivoR distribution, preserved the DrivoR
+argmax, left candidate allocation unchanged, and recorded post-step outcomes.
 
 ### Passive control comparison
-
-Two monitor-off and two passive-observe repeats used the same five routes,
-checkpoint, controller, seed, deterministic Torch settings, and GPU assignment.
 
 | Metric | Off mean | Passive mean | Passive - off |
 |---|---:|---:|---:|
@@ -180,14 +182,10 @@ checkpoint, controller, seed, deterministic Torch settings, and GPU assignment.
 | Wall time per frame | 2.286 s | 2.550 s | +11.5% |
 
 Repeated routes diverged by planning frame 2 despite deterministic controls.
-The small score differences therefore do not establish a passive performance
-effect. The tested implementation added 11.5% wall-time overhead.
+The small score differences do not establish a passive performance effect. The
+tested HUGSIM implementation added 11.5% wall-time overhead.
 
-### Risk prediction
-
-The primary grouped cohort contained 1,614 currently safe frames with a 14.5%
-future plan-risk rate. Variants of each base scene remained in the same
-cross-validation fold.
+### Grouped prediction
 
 | Predictor | Precision | Recall | Coverage | Lift | OOF AUROC |
 |---|---:|---:|---:|---:|---:|
@@ -204,26 +202,24 @@ cross-validation fold.
 | False alerts | 2.64 / simulator minute |
 | Median first-warning lead | 2 planning frames |
 
-The signal identifies a higher-risk subset, but the present precision, alert
-rate, and warning lead are not sufficient for direct intervention. These
-results support passive integration and further calibration, not an active
-route-performance claim.
+The HUGSIM signal enriches for future risk, but its precision, false-alert rate,
+and warning lead are not sufficient for direct intervention. These results
+justify continued passive work, not an AgenticDriving route-benefit claim.
 
 ## Next steps
 
-The first AgenticDriving version should compute uncertainty in the normal
-planning loop and run in observe-only mode. It should log the original proposal
-distribution, branch disagreement, temporal state, and verifier context while
-proving that selection and control remain unchanged.
+First, port `24f8c68` onto current AgenticDriving `main`, reconcile it with
+the merged recovery-stage implementation, and rerun unit and integration tests.
+Then run small `off` and `observe` CARLA smoke tests to verify selection
+invariance, telemetry completeness, and runtime overhead.
 
-We would then collect passive CARLA/Fail2Drive data, calibrate each planner
-family on grouped ID/tail routes, and evaluate on unseen route groups. If the
-signal achieves acceptable event recall, precision, warning lead, and runtime
-cost, its first active use should be additional scoring or asynchronous
-semantic review. Direct recovery should be considered only later, with
-independent confirmation and the existing final verifier.
+Next, collect a larger passive Fail2Drive corpus, keeping paired routes and
+repetitions in the same statistical group. Calibrate the coverage-rescue
+artifact separately for each planner/perception stack and reserve unseen routes
+for evaluation.
 
-The benchmark should compare the current system, passive observation,
-uncertainty-gated evaluation, and a later bounded recovery canary. Route
-utility, PDMS, completion, collisions, departures, deadlock, false alerts,
-warning lead, tool calls, and latency should be reported over repeated runs.
+Finally, compare `off` against `active` candidate-coverage expansion using
+repeated routes. Report route utility, PDMS, completion, collisions, departures,
+timeouts, coverage rescues, intervention frequency, and latency. Only after
+that policy demonstrates route-level value should uncertainty be evaluated as
+a trigger for semantic review or recovery.
