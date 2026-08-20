@@ -1,0 +1,36 @@
+drivor:
+  output_suffix: /drivor_autoagent0
+  launch_path: ./planners/drivor/launch.sh
+  repo_root: /bigdata/aidan/DrivoR
+  checkpoint: /bigdata/aidan/DrivoR/weights/checkpoints/drivor_Nav1_25epochs.pth
+  dino: /bigdata/aidan/DrivoR/weights/vit_small_patch14_reg4_dinov2.lvd142m
+  python_bin: /bigdata/aidan/.home/envs/drivor/bin/python3.8
+  config: /bigdata/aidan/DrivoR/navsim/planning/script/config/common/agent/drivoR.yaml
+  device: cuda
+  image_scale: 0.4
+  autoagent0:
+    enabled: true
+    mode: recovery_loop
+    redesign_candidate_budget: 10
+    max_redesign_attempts: 3
+    fallback_mode: hold
+    uncertainty_enabled: true
+    uncertainty_policy_mode: observe
+    uncertainty_t_intra: 0.2
+    uncertainty_t_cross: 2.4
+    uncertainty_mode_k_max: 3
+    uncertainty_mode_count_high: 3
+    uncertainty_horizon_steps: 0
+    uncertainty_kmeans_backend: auto
+  vlm:
+    enabled: false
+    intervention_enabled: false
+  rule_based_merge:
+    enabled: true
+    repo_root: /bigdata/aidan/HUGSIM/.external/Rule-Planner
+    python_bin: /bigdata/aidan/.home/envs/drivor/bin/python3.8
+    config: /bigdata/aidan/HUGSIM/.external/Rule-Planner/config_example.yaml
+    device: cpu
+    topk: 5
+    include_privileged_info: true
+    source_name: rule_based

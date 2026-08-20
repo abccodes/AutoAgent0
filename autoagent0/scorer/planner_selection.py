@@ -226,6 +226,22 @@ class LearnedPlannerSelector:
 
         return candidate_rows, allow_carry_previous
 
+    def _build_uncertainty_candidate_rows(
+        self,
+        proposals: np.ndarray,
+        scores: np.ndarray,
+    ) -> List[Dict[str, object]]:
+        return [
+            {
+                "source": self.current_source_name,
+                "proposal_index": int(idx),
+                "proposal_score": float(scores[idx]),
+                "local_plan": np.asarray(plan, dtype=np.float32),
+                "execution_plan": np.asarray(plan, dtype=np.float32).copy(),
+            }
+            for idx, plan in enumerate(proposals)
+        ]
+
     def _build_rule_based_candidate_rows(
         self,
         obs,

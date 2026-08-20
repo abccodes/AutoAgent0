@@ -1,0 +1,9 @@
+realcar_path: /bigdata/aidan/HUGSIM-assets/3DRealCar
+model_base: /bigdata/aidan/HUGSIM-assets/scenes/nuscenes
+uniad_path: ""
+vad_path: ""
+ltf_path: ""
+output_dir: /bigdata/aidan/outputs/benchmark/out/local_assets
+HD_map:
+  path: /bigdata/datasets/nuscenes
+  version: nusc_trainval

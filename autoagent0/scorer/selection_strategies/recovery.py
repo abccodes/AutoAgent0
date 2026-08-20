@@ -103,8 +103,9 @@ class RecoveryStrategy(BaseSelectionStrategy):
         default_idx = default_row.get("proposal_index")
         default_score, default_score_raw = self._score_from_row(default_row, sel.score_fallback_key)
 
+        uncertainty_candidate_rows = sel._build_uncertainty_candidate_rows(proposals, scores)
         frame_uncertainty = self._maybe_compute_frame_uncertainty(
-            learned_candidate_rows=learned_candidate_rows,
+            learned_candidate_rows=uncertainty_candidate_rows,
             rule_based_candidate_rows=rule_based_candidate_rows,
             default_row=default_row,
         )

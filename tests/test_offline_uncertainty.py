@@ -19,7 +19,9 @@ from autoagent0.calibration.offline import event_metrics
 from autoagent0.adapters.hugsim.results import attach_execution_outcome
 from autoagent0.config import AutoAgent0Config, build_prefixed_autoagent0_env
 from autoagent0.scorer.agent_schemas import FrameUncertainty
+from autoagent0.scorer.planner_selection import LearnedPlannerSelector
 from autoagent0.scorer.selection_strategies.recovery import RecoveryStrategy
+from autoagent0.scorer.vlm_selector import VLMSelectorConfig
 
 
 class FeatureTest(unittest.TestCase):
@@ -165,6 +167,61 @@ class EventTest(unittest.TestCase):
 
 
 class PassiveRuntimeTest(unittest.TestCase):
+    def test_vlm_disabled_observe_mode_preserves_argmax_and_records_telemetry(self) -> None:
+        selector = LearnedPlannerSelector(
+            vlm_selector=SimpleNamespace(),
+            autoagent0_cfg=AutoAgent0Config(
+                enabled=True,
+                uncertainty_enabled=True,
+                uncertainty_policy_mode="observe",
+            ),
+            vlm_cfg=VLMSelectorConfig(
+                enabled=False,
+                candidate_limit=1,
+                carry_previous_enabled=False,
+                include_default_candidates=False,
+            ),
+            rule_based_merge_cfg=SimpleNamespace(enabled=False, topk=5),
+            current_source_name="drivor_current",
+            plain_source="drivor_argmax",
+        )
+        proposals = np.asarray(
+            [
+                [[0.0, 0.0], [0.0, 1.0]],
+                [[0.0, 0.0], [0.0, 2.0]],
+                [[0.0, 0.0], [1.0, 1.0]],
+            ],
+            dtype=np.float32,
+        )
+        scores = np.asarray([0.2, 0.9, 0.5], dtype=np.float32)
+
+        payload = selector.select(
+            proposals=proposals,
+            scores=scores,
+            obs={},
+            info={
+                "ego_rot": [0.0, 0.0, 0.0],
+                "ego_pos": [0.0, 0.0, 0.0],
+                "timestamp": 0.0,
+            },
+            info_history=[],
+        )
+
+        self.assertEqual(payload["selected_idx"], 1)
+        self.assertEqual(payload["selected_source"], "drivor_argmax")
+        self.assertAlmostEqual(payload["selected_score"], float(scores[1]))
+        np.testing.assert_array_equal(payload["selected_plan"], proposals[1])
+        observation = payload["autoagent0_uncertainty_observation"]
+        self.assertEqual(observation["policy_mode"], "observe")
+        self.assertFalse(observation["affects_candidate_allocation"])
+        self.assertEqual(observation["learned_proposals"], proposals.tolist())
+        self.assertEqual(observation["learned_scores"], scores.tolist())
+        self.assertEqual(observation["baseline_proposal"]["proposal_index"], 1)
+        self.assertEqual(
+            observation["uncertainty"]["metadata"]["intra"]["member_count"], 3
+        )
+        self.assertGreater(observation["uncertainty"]["intra_learned_m"], 0.0)
+
     def test_observe_mode_never_exposes_uncertainty_to_allocator(self) -> None:
         uncertainty = FrameUncertainty(0.1, 0.2, 3, "rule_based_fallback", {})
         observe = RecoveryStrategy(

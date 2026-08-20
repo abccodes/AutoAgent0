@@ -2,8 +2,8 @@
 
 ## Current state
 
-- HUGSIM uncertainty work is published on
-  `aidan/uncertainty-offline-passive` through commit `15768e5`.
+- HUGSIM uncertainty work is maintained on
+  `aidan/uncertainty-offline-passive`.
 - AgenticDriving's earlier core uncertainty work is published on
   `origin/aidan/dev` through commit `93c6adb`.
 - The 94-route historical HUGSIM corpus has been reanalyzed with grouped
@@ -12,11 +12,15 @@
   precision is 0.238 at 7.0% coverage, and its event recall is 16/49.
 - Passive observation mode, raw proposal telemetry, post-step execution
   outcomes, and exact evaluator NC provenance are implemented and tested.
+- The restored-asset passive smoke run completed as Slurm job `33506`. All 73
+  frames recorded 64 raw DrivoR proposals, full-distribution uncertainty,
+  `affects_candidate_allocation: false`, argmax-matching baseline proposals,
+  execution outcomes, and evaluator NC provenance. The route completed with
+  PDMS `1.0000`, RC `0.9971`, and HDScore `0.9971`.
 
 ## Current blockers
 
-Live HUGSIM collection cannot start because the configured shared assets are
-absent on `bolei-gpu02`:
+The originally configured shared HUGSIM assets were absent on `bolei-gpu02`:
 
 - `/bigdata/datasets/HUGSIM/scenes/nuscenes`
 - specifically a processed directory such as `scene-0010` containing
@@ -26,6 +30,26 @@ Slurm job `33038` attempted the one-scene passive smoke run on 2026-08-13 and
 failed before simulator/planner startup with this missing-root error. No partial
 benchmark artifact was produced. The common scene launcher now performs this
 asset check before importing simulator or CUDA dependencies.
+
+For the smoke rerun, the official `XDimLab/HUGSIM` release of
+`scene-0010.zip` was restored under
+`/bigdata/aidan/HUGSIM-assets/scenes/nuscenes/scene-0010` and verified against
+the release LFS SHA-256. The dedicated base config is
+`configs/sim/nuscenes_base_local_aidan_assets.yaml`. This restores only the
+static easy-route dependency; broader scenarios still require their released
+scene archives and any 3DRealCar models referenced by `plan_list`.
+
+The first restored-asset rerun, Slurm job `33502`, passed scene preflight but
+timed out after 900 seconds while preloading the unrelated Qwen3-VL-8B worker
+from shared storage. The telemetry smoke config
+`configs/planners/autoagent0/calibration/drivor_uncertainty_observe_smoke.yaml`
+disables VLM selection/intervention only; the full passive collection config
+remains unchanged.
+
+Slurm job `33504` exposed a second measurement issue: passive telemetry was
+present, but intra-learned uncertainty used the VLM candidate shortlist rather
+than the planner's full proposal distribution. Job `33506` is the corrected
+reference smoke run. Do not use `33504` to calibrate uncertainty thresholds.
 
 The current AgenticDriving CARLA/Fail2Drive checkout also references paths that
 are absent on this machine:
