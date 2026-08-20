@@ -10,7 +10,7 @@
 
 ## Summary
 
-We propose evaluating three traditional closed-loop runtime monitors around a
+Propose evaluating three traditional closed-loop runtime monitors around a
 frozen SparseDriveV2 driving policy:
 
 1. a **score-based uncertainty monitor** with a minimum-risk fallback;
@@ -40,6 +40,29 @@ The proposed comparison is:
 | + RSS monitor | SparseDriveV2 | Bounded braking trajectory |
 | + MPC safety filter | SparseDriveV2 | Closest feasible trajectory or emergency stop |
 | + AutoAgent0 | SparseDriveV2 | Verified agentic recovery |
+
+## Feedback, some questions before implementation
+
+### 1. Active versus passive monitoring
+
+**Question:** Does “closed-loop monitor” in the requested comparison mean active
+intervention? A passive monitor would leave SparseDriveV2 driving behavior
+unchanged.
+
+### 2. Common fallback
+
+**Question:** Should fallback behavior be shared to isolate monitor quality, or
+is method-specific fallback part of the intended comparison?
+
+### 3. Evaluation scope and table format
+
+**Question:** Is the full three-repetition Fail2Drive evaluation required?
+
+### 4. AutoAgent0 comparison row
+
+**Question:** Which AutoAgent0 configuration should appear in the primary table?
+The current C4 ablation configuration uses ground-truth perception and would not
+be a controlled sensor-only comparison without a rerun.
 
 ## Where the monitors fit
 
@@ -73,13 +96,6 @@ select a trajectory that collides, becomes blocked, violates the route intent,
 or repeatedly makes no progress.
 
 ### AutoAgent0 wrapper
-
-The current AutoAgent0 system is more than a single monitor. Its regular loop
-constructs and scores alternative SparseDriveV2 proposals, checks the selected
-proposal with an external verifier, and runs the accepted plan. When the plan is
-rejected or execution becomes unhealthy, its recovery loop can diagnose the
-failure, choose a bounded maneuver, revise the proposal using verifier feedback,
-and use episode history to avoid repeating unsuccessful actions.
 
 ```text
 SparseDriveV2 candidates
@@ -128,9 +144,9 @@ updates, the monitor replaces the native plan with a bounded minimum-risk
 slowdown or stop. A lower release threshold and a short healthy-frame
 requirement prevent rapid switching between driving and braking.
 
-The thresholds should be calibrated on held-out Bench2Drive data, never on
-Fail2Drive. A reasonable calibration objective is to keep the intervention rate
-low on nominal routes while detecting as many impending closed-loop failures as
+The thresholds should be calibrated on held-out Bench2Drive data. A reasonable 
+calibration objective is to keep the intervention rate low on nominal routes
+while detecting as many impending closed-loop failures as
 possible.
 
 ### Interpretation and limitation
@@ -146,11 +162,6 @@ Monte Carlo dropout or an ensemble would more closely measure model uncertainty,
 but would require repeated inference, architectural support, and substantially
 more runtime. That is not recommended for the first baseline unless a more
 faithful uncertainty reproduction is required.
-
-### Initial effort estimate
-
-Approximately **2--4 working days** for integration, logging, fallback behavior,
-and unit/smoke tests, followed by calibration and scenario evaluation.
 
 ### Original literature
 
@@ -183,11 +194,6 @@ assumptions and formal definitions of the complete RSS framework. Detection and
 velocity-estimation errors can cause both missed hazards and unnecessary stops,
 which is why the main comparison should use the same BEVFormer perception source
 as sensor-based AutoAgent0.
-
-### Initial effort estimate
-
-Approximately **3--6 working days**, with the largest uncertainty coming from
-the consistency of BEVFormer actor velocities and coordinate conversion.
 
 ### Original literature
 
@@ -229,12 +235,6 @@ The recommended name is **MPC predictive safety filter**, emphasizing that the
 method supervises a learned policy rather than replacing SparseDriveV2 with a
 complete model-based driving planner. Solver latency, infeasibility, inaccurate
 actor prediction, and overly conservative constraints must all be measured.
-
-### Initial effort estimate
-
-Approximately **5--10 working days**. This is the highest-risk baseline because
-real-time solver behavior and coordinate/dynamics validation can require
-substantial debugging.
 
 ### Original literature
 
@@ -310,99 +310,3 @@ Recommended execution stages after the design is approved:
 3. Run the existing ten-route long-tail stress set.
 4. Run one complete Fail2Drive pass and inspect intervention traces.
 5. Freeze all configurations and run the final three repetitions.
-
-## Feedback requested before implementation
-
-The recommendations below are deliberately explicit so that implementation does
-not begin with different assumptions across team members.
-
-### 1. Active versus passive monitoring
-
-- [ ] **Recommended:** Treat each monitor as an active runtime wrapper that can
-  replace the native SparseDriveV2 plan.
-- [ ] Alternative: Log alarms only and evaluate detection metrics without
-  expecting route-level driving improvement.
-
-**Question:** Does “closed-loop monitor” in the requested comparison mean active
-intervention? A passive monitor would leave SparseDriveV2 driving behavior
-unchanged.
-
-### 2. Baseline families
-
-- [ ] **Recommended:** Approve score-based uncertainty, RSS safety envelope, and
-  MPC predictive safety filtering as the three complementary baselines.
-- [ ] Revise one or more baseline families.
-
-**Question:** Are these the intended three categories, or should a different
-traditional monitor replace one of them?
-
-### 3. MPC fidelity
-
-- [ ] **Recommended:** Build a practical short-horizon predictive safety filter
-  adapted to the existing SparseDriveV2 trajectory interface.
-- [ ] Reproduce a specific fallback-safe MPC paper more faithfully, accepting a
-  larger engineering scope.
-
-**Question:** Is the practical safety-filter adaptation sufficient, or is exact
-reproduction of a particular MPC method expected?
-
-### 4. Perception and oracle use
-
-- [ ] **Recommended:** Use BEVFormer for every reported sensor-based monitor and
-  reserve simulator ground truth for separately labeled diagnostics.
-- [ ] Permit privileged simulator actors in the main traditional-monitor rows.
-
-**Question:** Must all primary comparison rows be sensor-only? This determines
-whether the comparison measures monitor design or an advantage from privileged
-perception.
-
-### 5. Uncertainty definition and calibration
-
-- [ ] **Recommended:** Use SparseDriveV2 candidate-score entropy and margin,
-  calibrated on held-out Bench2Drive routes.
-- [ ] Require Monte Carlo dropout or an ensemble as the uncertainty baseline.
-
-**Question:** Is a lightweight score-based uncertainty proxy acceptable? Should
-the calibration target a specific nominal intervention or false-alarm rate?
-
-### 6. Common fallback
-
-- [ ] **Recommended:** Use one bounded minimum-risk slowdown/stop for uncertainty,
-  RSS, and MPC solver failure.
-- [ ] Allow each monitor to use a separate fallback implementation.
-
-**Question:** Should fallback behavior be shared to isolate monitor quality, or
-is method-specific fallback part of the intended comparison?
-
-### 7. Evaluation scope and table format
-
-- [ ] **Recommended:** Prototype on the ten-route stress set, then report the full
-  200-route Fail2Drive comparison over three repetitions.
-- [ ] Use a smaller Fail2Drive subset for the monitor comparison.
-
-**Question:** Is the full three-repetition Fail2Drive evaluation required? Please
-also provide the referenced Table 7 if its formatting or metrics differ from the
-proposed table above.
-
-### 8. AutoAgent0 comparison row
-
-- [ ] **Recommended:** Rerun the final AutoAgent0 comparison with BEVFormer so all
-  primary rows are sensor-only.
-- [ ] Retain a ground-truth AutoAgent0 row but label it as an oracle diagnostic.
-
-**Question:** Which AutoAgent0 configuration should appear in the primary table?
-The current C4 ablation configuration uses ground-truth perception and would not
-be a controlled sensor-only comparison without a rerun.
-
-## Proposed approval statement
-
-If the recommendations above match the intended study, the working experimental
-specification is:
-
-> We interpret a closed-loop monitor as an active runtime wrapper around a frozen
-> SparseDriveV2 policy. We will compare score-based uncertainty with a
-> minimum-risk fallback, an RSS safety-envelope monitor, and an MPC predictive
-> safety filter. Primary results will use sensor-based perception, no Fail2Drive
-> training or calibration, and shared routes, seeds, controller settings, and
-> fallback behavior. AutoAgent0 will remain a separate system and will not supply
-> components to the traditional baselines.
