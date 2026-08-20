@@ -43,11 +43,16 @@ The proposed comparison is:
 
 ## Feedback, some questions before implementation
 
-### 1. Active versus passive monitoring
+### 1. Monitor intervention semantics
 
-**Question:** Does “closed-loop monitor” in the requested comparison mean active
-intervention? A passive monitor would leave SparseDriveV2 driving behavior
-unchanged.
+**Question:** Should each monitor run after every SparseDriveV2 planning update
+and be allowed to replace the native trajectory before it reaches the controller?
+Under this active interpretation, uncertainty and RSS would switch to a fallback,
+MPC would return a corrected feasible trajectory, and each monitor would return
+control to SparseDriveV2 after its trigger clears. The alternative is an
+alarm-only monitor that logs risk but still executes the native trajectory. We
+recommend active intervention because alarm-only monitoring cannot change DS,
+SR, or collision rate.
 
 ### 2. Common fallback
 
@@ -160,8 +165,8 @@ of epistemic uncertainty.
 
 Monte Carlo dropout or an ensemble would more closely measure model uncertainty,
 but would require repeated inference, architectural support, and substantially
-more runtime. That is not recommended for the first baseline unless a more
-faithful uncertainty reproduction is required.
+more runtime. The proposed baseline therefore uses the score-based proxy and
+does not add repeated model inference.
 
 ### Original literature
 
@@ -224,10 +229,10 @@ minimize    deviation from SparseDriveV2 + control effort + discomfort
 subject to vehicle dynamics, control bounds, and safety constraints.
 ```
 
-A practical first version can use bounded trajectory/control samples followed by
-short-horizon optimization, provided the method and limitations are described
-precisely. This is substantially more feasible than reproducing an entire
-fallback-safe MPC research stack inside the current simulator integration.
+The proposed implementation uses bounded trajectory/control samples followed by
+short-horizon optimization, with its adaptation and limitations described
+precisely. It does not attempt to reproduce an entire fallback-safe MPC research
+stack inside the current simulator integration.
 
 ### Interpretation and limitation
 
@@ -253,10 +258,9 @@ actor prediction, and overly conservative constraints must all be measured.
 - Do not train, fine-tune, or calibrate on Fail2Drive routes.
 - Share routes, seeds, repetition indices, controller settings, and simulator
   settings across all methods.
-- Use BEVFormer rather than simulator ground truth in the reported sensor-only
-  monitor comparison.
-- If useful, report ground-truth perception only as a clearly labeled oracle
-  diagnostic.
+- Use BEVFormer rather than simulator ground truth in every primary monitor row.
+- Restrict ground-truth perception to a separately labeled oracle diagnostic; it
+  must not be mixed into the primary sensor-only comparison.
 - Do not expose AutoAgent0's proposal scoring, verifier, VLM, recovery skills, or
   memory to the three traditional baselines.
 - Use one common, bounded minimum-risk braking implementation wherever a monitor
