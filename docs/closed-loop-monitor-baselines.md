@@ -16,9 +16,8 @@ trajectory-following controller. This keeps the study separate from AutoAgent0
 and lets us ask whether conventional uncertainty-, rule-, or model-based
 monitoring can address the same long-tail failures as the full agentic system.
 
-Our working interpretation of a *closed-loop monitor* is an **active runtime
-wrapper**: it observes the policy and environment repeatedly and may replace an
-unsafe action.
+Each closed-loop monitor runs at every SparseDriveV2 replan and may replace the
+native trajectory before it reaches the controller.
 
 The proposed comparison is:
 
@@ -30,33 +29,26 @@ The proposed comparison is:
 | + MPC safety filter | SparseDriveV2 | Closest feasible trajectory or emergency stop |
 | + AutoAgent0 | SparseDriveV2 | Verified agentic recovery |
 
-## Feedback. Some questions before implementation. See later sections for implementation details, these are questions around main design based on details:
+## Decisions from feedback
 
 ### 1. Monitor intervention semantics
 
-**Question:** Should each monitor run after every SparseDriveV2 planning update
-and be allowed to replace the native trajectory before it reaches the controller?
-Under this active interpretation, uncertainty and RSS would switch to a fallback,
-MPC would return a corrected feasible trajectory, and each monitor would return
-control to SparseDriveV2 after its trigger clears. The alternative is an
-alarm-only monitor that logs risk but still executes the native trajectory. We
-recommend active intervention because alarm-only monitoring cannot change DS,
-SR, or collision rate.
+Run each monitor after every SparseDriveV2 replan. Uncertainty and RSS may switch
+to their fallbacks, MPC may return a corrected feasible trajectory, and the
+monitor returns control after its trigger clears.
 
-### 2. Common fallback
+### 2. Fallback behavior
 
-**Question:** Should fallback behavior be shared to isolate monitor quality, or
-is method-specific fallback part of the intended comparison?
+Use method-specific fallbacks rather than one shared fallback.
 
-### 3. Evaluation scope and table format
+### 3. Evaluation scope
 
-**Question:** Is the full three-repetition Fail2Drive evaluation required?
+Run the full three-repetition Fail2Drive evaluation if time permits.
 
 ### 4. AutoAgent0 comparison row
 
-**Question:** Which AutoAgent0 configuration should appear in the primary table?
-The current C4 ablation configuration uses ground-truth perception and would not
-be a controlled sensor-only comparison without a rerun.
+Use a sensor-only AutoAgent0 configuration in the primary table. The current C4
+ground-truth configuration must therefore be rerun with BEVFormer.
 
 ## Where the monitors fit
 
@@ -178,8 +170,8 @@ against collision, drivable-area, control, and dynamic-feasibility constraints.
 If the nominal plan is feasible, pass it through unchanged. Otherwise, solve for
 a nearby feasible braking or avoidance trajectory that minimizes deviation from
 the SparseDriveV2 reference, control effort, and discomfort. If the optimizer
-cannot produce a valid solution within its runtime budget, execute the common
-minimum-risk stop.
+cannot produce a valid solution within its runtime budget, execute the MPC
+filter's emergency-stop trajectory.
 
 Conceptually, the safety filter solves
 
@@ -211,6 +203,12 @@ actor prediction, and overly conservative constraints must all be measured.
 
 ## Fair comparison and evaluation
 
+Fallback behavior is method-specific: the uncertainty monitor uses a
+minimum-risk slowdown/stop, RSS uses its proper-response braking trajectory, and
+the MPC filter uses a feasible corrective trajectory or its emergency stop. All
+primary comparison rows, including AutoAgent0, use sensor-only perception;
+ground-truth variants may only be reported separately as oracle diagnostics.
+
 ### Proposed paper table
 
 | Method | DS &uarr; | RC &uarr; | SR &uarr; | Collision rate &darr; |
@@ -238,4 +236,6 @@ appears safe only because it frequently stops the vehicle.
 ### Evaluation scale and staging
 
 The full comparison described in the current experiment draft contains five
-methods, 200 paired Fail2Drive routes, and three repetitions.
+methods, 200 paired Fail2Drive routes, and three repetitions. Begin with smoke
+tests and the ten-route stress set, then run the full three-repetition evaluation
+if time permits.
