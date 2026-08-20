@@ -67,6 +67,8 @@ echo "cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
 echo "calibration_horizon_steps=${CALIBRATION_HORIZON_STEPS}"
 echo "vlm_preload_lock_path=${VLM_PRELOAD_LOCK_PATH}"
 echo "plan_response_timeout_sec=${PLAN_RESPONSE_TIMEOUT_SEC}"
+echo "hugsim_benchmark_seed=${HUGSIM_BENCHMARK_SEED:-unset}"
+echo "hugsim_deterministic_algorithms=${HUGSIM_DETERMINISTIC_ALGORITHMS:-0}"
 mkdir -p "$(dirname "${VLM_PRELOAD_LOCK_PATH}")"
 
 run_worker() {

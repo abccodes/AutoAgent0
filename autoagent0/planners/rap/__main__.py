@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from autoagent0.planners.base import run_subprocess
-from autoagent0.planners.rap.planner import RAPPlanner
+from autoagent0.reproducibility import apply_benchmark_seed
 
 
 def main() -> int:
@@ -20,7 +20,11 @@ def main() -> int:
     parser.add_argument("--output", required=True, help="HUGSIM output directory containing FIFO pipes")
     args = parser.parse_args()
 
+    apply_benchmark_seed()
+
     output_dir = Path(args.output).resolve()
+    from autoagent0.planners.rap.planner import RAPPlanner
+
     service = RAPPlanner(output_dir)
     logger = logging.getLogger("rap_planner")
     try:

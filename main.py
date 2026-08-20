@@ -22,6 +22,9 @@ from pathlib import Path
 import numpy as np
 from omegaconf import OmegaConf
 
+if os.environ.get("HUGSIM_BENCHMARK_SEED", "").strip():
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 sys.path.append(os.getcwd())
 sys.path.append(os.path.join(os.getcwd(), "sim"))
 
@@ -52,6 +55,7 @@ from autoagent0.vlm.vlm_env import (
     get_prefixed_env_value,
 )
 from autoagent0.verifiers.semantic import SemanticVerifier
+from autoagent0.reproducibility import apply_benchmark_seed
 
 # Per-planner selection labels (mirror the legacy clients' arguments). All three
 # now share LearnedPlannerSelector.
@@ -278,6 +282,10 @@ if __name__ == "__main__":
     parser.add_argument("--ad_cuda", default="1")
     parser.add_argument("--include_privileged_pipe", default=False)
     args = parser.parse_args()
+
+    benchmark_seed = apply_benchmark_seed()
+    if benchmark_seed is not None:
+        logging.getLogger("pipeline").info("Applied HUGSIM benchmark seed=%d", benchmark_seed)
 
     ad = args.ad
     spec = PLANNER_SPECS[ad]

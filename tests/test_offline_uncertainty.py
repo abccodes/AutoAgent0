@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import os
+import random
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -18,10 +23,13 @@ from autoagent0.calibration.offline import make_group_folds
 from autoagent0.calibration.offline import event_metrics
 from autoagent0.adapters.hugsim.results import attach_execution_outcome
 from autoagent0.config import AutoAgent0Config, build_prefixed_autoagent0_env
+from autoagent0.reproducibility import apply_benchmark_seed
 from autoagent0.scorer.agent_schemas import FrameUncertainty
 from autoagent0.scorer.planner_selection import LearnedPlannerSelector
 from autoagent0.scorer.selection_strategies.recovery import RecoveryStrategy
 from autoagent0.scorer.vlm_selector import VLMSelectorConfig
+from scripts.analyze_uncertainty_repeatability import _log_duration
+from scripts.analyze_uncertainty_repeatability import _trajectory_comparison
 
 
 class FeatureTest(unittest.TestCase):
@@ -40,6 +48,39 @@ class FeatureTest(unittest.TestCase):
         same_world_path = np.asarray([[-1.0, 0.0], [-1.0, 1.0]])
         change, _ = temporal_change(same_world_path, shifted_pose, previous_world)
         self.assertAlmostEqual(change, 0.0)
+
+
+class RepeatabilityAnalyzerTest(unittest.TestCase):
+    def test_benchmark_seed_repeats_python_and_numpy_streams(self) -> None:
+        with patch.dict(os.environ, {"HUGSIM_BENCHMARK_SEED": "17"}, clear=False):
+            self.assertEqual(apply_benchmark_seed(), 17)
+            first = (random.random(), float(np.random.rand()))
+            self.assertEqual(apply_benchmark_seed(), 17)
+            second = (random.random(), float(np.random.rand()))
+        self.assertEqual(first, second)
+
+    def test_log_duration_uses_fifo_loop_not_model_initialization(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "planner.log"
+            path.write_text(
+                "2026-08-19 10:00:00,000 INFO Starting planner\n"
+                "2026-08-19 10:00:10,000 INFO Opened persistent scene FIFOs\n"
+                "2026-08-19 10:00:25,500 INFO Received shutdown signal\n",
+                encoding="utf-8",
+            )
+            self.assertAlmostEqual(_log_duration(path), 15.5)
+
+    def test_trajectory_comparison_reports_first_divergent_frame(self) -> None:
+        def frame(endpoint: float) -> dict:
+            return {"planner_debug": {"local_plan": [[0.0, 0.0], [0.0, endpoint]]}}
+
+        comparison = _trajectory_comparison(
+            [frame(1.0), frame(1.0), frame(2.0)],
+            [frame(1.0), frame(1.5), frame(2.5)],
+            tolerance=1e-6,
+        )
+        self.assertEqual(comparison["first_plan_divergence_frame"], 1)
+        self.assertGreater(comparison["mean_selected_plan_distance_m"], 0.0)
 
 
 class LabelTest(unittest.TestCase):

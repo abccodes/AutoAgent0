@@ -10,12 +10,15 @@ import sys
 from pathlib import Path
 
 from autoagent0.planners.base import run_subprocess
+from autoagent0.reproducibility import apply_benchmark_seed
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Rule-based planner subprocess")
     parser.add_argument("--output", required=True, help="HUGSIM output directory containing FIFO pipes")
     args = parser.parse_args()
+
+    apply_benchmark_seed()
 
     output_dir = Path(args.output).resolve()
     # Import after arg parse so RULE_BASED_REPO_ROOT-dependent imports happen lazily.
