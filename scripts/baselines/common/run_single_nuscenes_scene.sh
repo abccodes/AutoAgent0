@@ -84,6 +84,19 @@ for index, control in enumerate(scenario.get("plan_list", []) or []):
         path = os.path.join(model_dir, filename)
         if not os.path.isfile(path):
             missing.append(f"plan_list[{index}] dynamic model file: {path}")
+    if len(control) >= 8 and str(control[6]) == "UnicyclePlanner":
+        controller_cfg = control[7]
+        uc_id = str(controller_cfg.get("uc_id", "")).strip()
+        uc_filename = f"unicycle_{uc_id}.pth"
+        uc_candidates = (
+            os.path.join(candidates[0], uc_filename),
+            os.path.join(candidates[0], "ckpts", uc_filename),
+        )
+        if not uc_id or not any(os.path.isfile(path) for path in uc_candidates):
+            missing.append(
+                f"plan_list[{index}] unicycle checkpoint: "
+                + " or ".join(uc_candidates)
+            )
 if missing:
     raise SystemExit("missing HUGSIM assets:\n- " + "\n- ".join(missing))
 print(f"scene_model_path={candidates[0]}")

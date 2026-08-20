@@ -95,6 +95,7 @@ run_worker() {
     esac
 
     local worker_log_dir="/bigdata/aidan/outputs/slurm/calibration/${baseline_id}"
+    local worker_status=0
     mkdir -p "${worker_log_dir}"
 
     for idx in "${!SCENES[@]}"; do
@@ -122,28 +123,32 @@ run_worker() {
         local scene_log="${worker_log_dir}/${scene_slug}.worker${worker_id}.log"
 
         echo "[${baseline_id} worker ${worker_id} gpu ${gpu_id}] run ${scene}"
-        CUDA_VISIBLE_DEVICES="${gpu_id}" \
-        REPO_ROOT="${REPO_ROOT}" \
-        BASELINE_ID="${baseline_id}" \
-        BASELINE_SUITE="full" \
-        BASELINE_RUN_TYPE="${BASELINE_RUN_TYPE}" \
-        BASELINE_RUN_VARIANT="${RUN_VARIANT_TAG}" \
-        PLANNER_NAME="${planner_name}" \
-        PLANNER_PATH="${planner_path}" \
-        SCENARIO_PATH="${scene}" \
-        BASE_PATH="${BASE_PATH}" \
-        HUGSIM_PYTHON_BIN="${HUGSIM_PYTHON_BIN}" \
-        SIM_CUDA="inherit" \
-        AD_CUDA="inherit" \
-        SETUP_VLM_ENV=0 \
-        PLANNER_VLM_PRELOAD_LOCK_PATH="${VLM_PRELOAD_LOCK_PATH}" \
-        HUGSIM_PLAN_RESPONSE_TIMEOUT_SEC="${PLAN_RESPONSE_TIMEOUT_SEC}" \
-        DRIVOR_DEVICE_OVERRIDE="cuda:0" \
-        RAP_DEVICE_OVERRIDE="cuda:0" \
-        PLANNER_VLM_DEVICE_OVERRIDE="cuda:0" \
-        bash scripts/baselines/common/run_single_nuscenes_scene.sh "${planner_name}" "${scene}" inherit inherit \
-            > "${scene_log}" 2>&1
+        if ! CUDA_VISIBLE_DEVICES="${gpu_id}" \
+            REPO_ROOT="${REPO_ROOT}" \
+            BASELINE_ID="${baseline_id}" \
+            BASELINE_SUITE="full" \
+            BASELINE_RUN_TYPE="${BASELINE_RUN_TYPE}" \
+            BASELINE_RUN_VARIANT="${RUN_VARIANT_TAG}" \
+            PLANNER_NAME="${planner_name}" \
+            PLANNER_PATH="${planner_path}" \
+            SCENARIO_PATH="${scene}" \
+            BASE_PATH="${BASE_PATH}" \
+            HUGSIM_PYTHON_BIN="${HUGSIM_PYTHON_BIN}" \
+            SIM_CUDA="inherit" \
+            AD_CUDA="inherit" \
+            SETUP_VLM_ENV=0 \
+            PLANNER_VLM_PRELOAD_LOCK_PATH="${VLM_PRELOAD_LOCK_PATH}" \
+            HUGSIM_PLAN_RESPONSE_TIMEOUT_SEC="${PLAN_RESPONSE_TIMEOUT_SEC}" \
+            DRIVOR_DEVICE_OVERRIDE="cuda:0" \
+            RAP_DEVICE_OVERRIDE="cuda:0" \
+            PLANNER_VLM_DEVICE_OVERRIDE="cuda:0" \
+            bash scripts/baselines/common/run_single_nuscenes_scene.sh "${planner_name}" "${scene}" inherit inherit \
+                > "${scene_log}" 2>&1; then
+            echo "[${baseline_id} worker ${worker_id}] failed ${scene}; see ${scene_log}" >&2
+            worker_status=1
+        fi
     done
+    return "${worker_status}"
 }
 
 phase_a_status=0
