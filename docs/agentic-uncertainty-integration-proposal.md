@@ -7,71 +7,12 @@ HUGSIM AutoAgent0 stack should be used in the current AgenticDriving system. It
 is intended for technical review before implementation on AgenticDriving
 `main`.
 
-The central recommendation is:
-
-> Treat uncertainty as a passive, anticipatory event signal that advises the
-> orchestrator when to spend additional reasoning and verification effort. Do
-> not make it a replacement verifier, a direct trajectory selector, or an
-> independent source of execution authority.
+The current idea is to treat uncertainty as a passive, anticipatory event signal that
+advises the orchestrator when to spend additional reasoning and verification effort.
 
 The completed HUGSIM work validates the signal computation, telemetry contract,
 and offline risk enrichment. It does not yet validate HUGSIM thresholds in
 CARLA/Fail2Drive or justify direct uncertainty-triggered vehicle intervention.
-
-## Decision requested from the team
-
-Before implementing the active path, align on four questions:
-
-1. Is the intended uncertainty target future geometric plan risk, semantic
-   route failure, closed-loop route failure, or a combination of these?
-2. Should a confirmed uncertainty event initially trigger only additional
-   evaluation, or may it enter recovery when the normal verifier still passes?
-3. Which planner and perception stack is canonical for calibration: DrivoR,
-   SparseDriveV2, or separate calibrations for each?
-4. What false-alert, event-recall, and warning-lead requirements must be met
-   before active use?
-
-The recommended initial answers are: retain separate outcome labels, trigger
-additional evaluation only, calibrate each planner separately, and agree on an
-activation gate before viewing active results.
-
-## Executive assessment
-
-### What is working
-
-- The monitor can compute uncertainty from a planner's complete proposal
-  distribution without changing the planner's selected trajectory.
-- Passive mode was exercised for 1,911 HUGSIM frames across 38 routes and 19
-  independent NuScenes scenes.
-- Every collected frame used the full 64-proposal DrivoR distribution, retained
-  the original DrivoR argmax, recorded the uncertainty decomposition, and
-  recorded a post-step execution outcome.
-- Grouped cross-validation found a predictive signal: the strongest simple
-  operating rule produced 4.34x enrichment over the future-risk base rate at
-  11.0% coverage.
-
-### What is not yet working well enough
-
-- The strongest grouped policy detected 17 of 25 future-risk events, but
-  produced 2.64 false alert episodes per minute.
-- Episode precision was 0.447 and median first-warning lead was only two
-  planning frames.
-- HUGSIM remains nondeterministic after Python, NumPy, Torch, CUDA, cuDNN, and
-  cuBLAS controls are seeded; repeated routes diverged at the second planning
-  frame.
-- Current HUGSIM thresholds do not transfer to AgenticDriving. Proposal
-  distributions, alternative branches, perception, controller dynamics, and
-  failure labels all change in CARLA.
-- In the reviewed AgenticDriving implementation, uncertainty is computed inside
-  the recovery selector. That is after the normal verifier has already rejected
-  the selected plan, which is too late for an anticipatory event signal.
-
-### Current conclusion
-
-The mechanism is good enough to port as an `observe`-mode AgenticDriving event
-source. It is not yet good enough to authorize recovery or actuation. The next
-scientific milestone is passive CARLA/Fail2Drive validation, not another HUGSIM
-threshold adjustment.
 
 ## Relationship to the traditional monitor baseline
 
@@ -79,9 +20,7 @@ The separate [closed-loop monitor baseline proposal](closed-loop-monitor-baselin
 places a conventional score-based monitor directly around a frozen
 SparseDriveV2 policy and gives it a minimum-risk fallback. That experiment asks
 whether a simple runtime monitor can improve the base policy without the
-agentic harness.
-
-This proposal asks a different question: how can the same family of proposal
+agentic harness. This proposal asks how can the same family of proposal
 signals improve the full AgenticDriving orchestrator?
 
 | Property | Traditional uncertainty baseline | This proposal |
@@ -112,9 +51,6 @@ Recommended terms are:
   cross-branch disagreement;
 - `policy_mode`: `off`, `observe`, or `active`;
 - `execution_authority`: retained exclusively by the final verifier.
-
-The paper may continue using "uncertainty mechanism" as the broad method name,
-but should describe each proxy and its empirical interpretation precisely.
 
 ## Detailed signal mechanism
 
@@ -147,7 +83,7 @@ U_intra(t) = mean_h rms_h
 ```
 
 This measures how concentrated the scored proposal distribution is in
-trajectory space. It is not sufficient by itself: high spread can represent
+trajectory space. It is not sufficient by itself bc high spread can represent
 healthy multimodality, while low spread can represent either an easy scene or
 confident failure.
 
@@ -238,17 +174,6 @@ In the reviewed implementation, the regular loop selects and verifies a plan.
 Only after verifier rejection does the orchestrator generate recovery
 proposals and dispatch the recovery selector. The uncertainty calculation lives
 inside that recovery selector.
-
-Consequences include:
-
-- it cannot warn before the verifier rejects;
-- it may operate on regenerated recovery proposals instead of the original
-  learned distribution;
-- it duplicates information after the main recovery event already exists;
-- it cannot efficiently trigger sparse semantic supervision in an otherwise
-  healthy loop;
-- uncertainty-specific candidate allocation is difficult to interpret because
-  the proposal-family contract has changed.
 
 ### Proposed placement
 
@@ -717,20 +642,3 @@ Avoid claiming that the current proxy is calibrated epistemic uncertainty or
 that HUGSIM prediction results demonstrate AgenticDriving route improvement.
 Those claims require planner-specific CARLA calibration and held-out active
 experiments.
-
-## Recommended immediate action
-
-Approve or revise the decision questions at the top of this document. If the
-team agrees with the proposed role, the next implementation should be a
-top-level `observe`-only AgenticDriving port with CARLA telemetry. Do not spend
-the next iteration tuning HUGSIM thresholds or enabling direct uncertainty
-fallbacks.
-
-The first review artifact after that port should contain:
-
-1. an architecture diff showing the exact Loop-1 integration point;
-2. an invariance test proving observation does not alter selection;
-3. a schema sample from each supported planner;
-4. latency at the real replan frequency;
-5. a small Fail2Drive passive smoke report;
-6. a proposed locked corpus and evaluation manifest.
