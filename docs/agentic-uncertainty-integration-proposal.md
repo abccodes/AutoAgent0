@@ -26,11 +26,6 @@ and tested in CARLA/Fail2Drive.
 | Pre-selection CARLA monitor | Implemented locally in commit `24f8c68`; not merged | Runs before candidate scoring with `off`, `observe`, and `active` modes; active mode expands PDMS candidate coverage | Five focused unit tests pass; no CARLA routes or calibrated artifact yet |
 | HUGSIM passive monitor | Completed in the HUGSIM/DrivoR stack | Records proposal-distribution signals without changing the selected trajectory | 1,911 frames across 38 routes; grouped offline analysis completed |
 
-The pre-selection code is based on AgenticDriving commit `504d123`. Current
-AgenticDriving `main` is `613120c`, eight commits ahead. The code is not
-discarded, but it must be ported onto current `main` and smoke-tested before
-CARLA data collection.
-
 ## Where it fits
 
 A verifier evaluates the exact trajectory selected for execution. The
