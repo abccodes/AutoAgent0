@@ -1,13 +1,5 @@
 # Closed-Loop Monitor Baselines for SparseDriveV2
 
-> **Status:** Draft for feedback; no implementation or experiments have started.
->
-> **Scope note:** This document concerns the current SparseDriveV2/Fail2Drive
-> system in `jiagengliu02/AgenticDriving`. It is stored in the AutoAgent0
-> repository as a discussion document, but the proposed monitors are separate
-> comparison systems rather than additions to the older HUGSIM implementation
-> in this repository.
-
 ## Summary
 
 Propose evaluating three traditional closed-loop runtime monitors around a
@@ -26,10 +18,7 @@ monitoring can address the same long-tail failures as the full agentic system.
 
 Our working interpretation of a *closed-loop monitor* is an **active runtime
 wrapper**: it observes the policy and environment repeatedly and may replace an
-unsafe action. A passive alarm-only monitor would be useful diagnostically, but
-it would execute the same actions as unmodified SparseDriveV2 and therefore
-should not change route-level driving score, success rate, or collision rate.
-This interpretation needs confirmation before implementation.
+unsafe action.
 
 The proposed comparison is:
 
@@ -41,7 +30,7 @@ The proposed comparison is:
 | + MPC safety filter | SparseDriveV2 | Closest feasible trajectory or emergency stop |
 | + AutoAgent0 | SparseDriveV2 | Verified agentic recovery |
 
-## Feedback, some questions before implementation
+## Feedback. Some questions before implementation. See later sections for implementation details, these are questions around main design based on details:
 
 ### 1. Monitor intervention semantics
 
@@ -71,35 +60,6 @@ be a controlled sensor-only comparison without a rerun.
 
 ## Where the monitors fit
 
-### SparseDriveV2 base policy
-
-At each planning update, SparseDriveV2 consumes the camera observations, ego
-state, and route/navigation input. It produces a ranked collection of future ego
-trajectories. The native policy selects its highest-scoring trajectory, and the
-existing trajectory controller converts that plan into steering, throttle, and
-brake commands.
-
-```text
-CARLA sensors + ego state + route command
-                    |
-                    v
-              SparseDriveV2
-                    |
-                    v
-       native selected future trajectory
-                    |
-                    v
-             PID/controller
-                    |
-                    v
-              vehicle control
-```
-
-SparseDriveV2 is a strong nominal driver, but its learned score is not itself a
-safety guarantee. On out-of-distribution or long-tail scenes it can confidently
-select a trajectory that collides, becomes blocked, violates the route intent,
-or repeatedly makes no progress.
-
 ### AutoAgent0 wrapper
 
 ```text
@@ -119,7 +79,7 @@ final verifier ---------------------- rejected/stuck/semantic trigger
         +--------------------------> executed trajectory or maneuver
 ```
 
-The conventional baselines should **not** reuse AutoAgent0's VLM, PDMS
+The conventional baselines would **not** reuse AutoAgent0's VLM, PDMS
 arbitration, recovery library, self-refinement, or memory. Each monitor should
 receive the native SparseDriveV2 plan directly and independently decide whether
 to pass it through or apply its own limited intervention:
@@ -164,8 +124,7 @@ probabilities, however. The paper should therefore call the signal a
 of epistemic uncertainty.
 
 Monte Carlo dropout or an ensemble would more closely measure model uncertainty,
-but would require repeated inference, architectural support, and substantially
-more runtime. The proposed baseline therefore uses the score-based proxy and
+but would require more compute. The proposed baseline therefore uses the score-based proxy and
 does not add repeated model inference.
 
 ### Original literature
@@ -252,23 +211,6 @@ actor prediction, and overly conservative constraints must all be measured.
 
 ## Fair comparison and evaluation
 
-### Recommended experimental contract
-
-- Freeze the same SparseDriveV2 checkpoint for every row.
-- Do not train, fine-tune, or calibrate on Fail2Drive routes.
-- Share routes, seeds, repetition indices, controller settings, and simulator
-  settings across all methods.
-- Use BEVFormer rather than simulator ground truth in every primary monitor row.
-- Restrict ground-truth perception to a separately labeled oracle diagnostic; it
-  must not be mixed into the primary sensor-only comparison.
-- Do not expose AutoAgent0's proposal scoring, verifier, VLM, recovery skills, or
-  memory to the three traditional baselines.
-- Use one common, bounded minimum-risk braking implementation wherever a monitor
-  requires an emergency fallback. The MPC filter may additionally generate a
-  feasible corrective trajectory.
-- Establish analytical RSS parameters and calibrate learned thresholds/MPC
-  weights on held-out Bench2Drive routes before freezing the configurations.
-
 ### Proposed paper table
 
 | Method | DS &uarr; | RC &uarr; | SR &uarr; | Collision rate &darr; |
@@ -296,21 +238,4 @@ appears safe only because it frequently stops the vehicle.
 ### Evaluation scale and staging
 
 The full comparison described in the current experiment draft contains five
-methods, 200 paired Fail2Drive routes, and three repetitions:
-
-```text
-5 methods x 200 routes x 3 repetitions = 3,000 route episodes
-```
-
-At an average of 5--10 minutes per episode, this is approximately **250--500
-simulator-hours** before parallelization, retries, initialization failures, and
-result validation. This is an order-of-magnitude planning estimate, not a
-schedule commitment.
-
-Recommended execution stages after the design is approved:
-
-1. Unit-test monitor calculations and coordinate transformations.
-2. Validate each intervention in small, controlled CARLA scenarios.
-3. Run the existing ten-route long-tail stress set.
-4. Run one complete Fail2Drive pass and inspect intervention traces.
-5. Freeze all configurations and run the final three repetitions.
+methods, 200 paired Fail2Drive routes, and three repetitions.
