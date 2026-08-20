@@ -3,9 +3,7 @@
 ## Purpose
 
 This document summarizes how the uncertainty work fits into AgenticDriving,
-what is already implemented, what has been validated, and what remains. The
-detailed engineering and benchmark checklist is in the
-[technical plan](agentic-uncertainty-technical-plan.md).
+what is already implemented, what has been validated, and what remains.
 
 ## Recommendation
 
