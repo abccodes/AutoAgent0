@@ -1,14 +1,10 @@
-# Proposal: Uncertainty-Guided Agentic Driving
+# Uncertainty
 
 ## Purpose
 
-This document proposes how our uncertainty work can contribute to the current
-AgenticDriving system. It is intended to confirm that the role and research
-direction make sense before we complete the AgenticDriving integration.
-
-The detailed implementation, calibration, ablation, and benchmark procedure is
-maintained separately in the
-[technical plan](agentic-uncertainty-technical-plan.md).
+How the uncertainty work can contribute to the current AgenticDriving system.
+It is intended to confirm that the role and research direction make sense
+before we complete the AgenticDriving integration.
 
 ## Recommendation
 
@@ -20,10 +16,10 @@ trajectory verifier or directly authorize vehicle control.
 The HUGSIM work shows that we can compute this signal passively, preserve the
 planner's original decision, and enrich for future plan risk. It does not yet
 show that the signal improves closed-loop driving or that its thresholds
-transfer to CARLA/Fail2Drive. We therefore propose an observe-only
-AgenticDriving integration before any active intervention.
+transfer to CARLA/Fail2Drive. I propose an observe-only AgenticDriving
+integration before any active intervention.
 
-## Why it fits the agentic system
+## Where it fits in agentic system
 
 A trajectory verifier evaluates one selected trajectory. The uncertainty
 mechanism instead evaluates the planner's full proposal distribution and its
@@ -53,10 +49,6 @@ Planner proposals and scores
                   v
        exact final trajectory verifier
 ```
-
-This preserves the central AgenticDriving safety boundary: learned modules and
-the uncertainty monitor may influence what the system evaluates, but only the
-final verifier admits an action for execution.
 
 ## Method
 
@@ -217,7 +209,7 @@ rate, and warning lead are not sufficient for direct intervention. These
 results support passive integration and further calibration, not an active
 route-performance claim.
 
-## Proposed path
+## Next steps
 
 The first AgenticDriving version should compute uncertainty in the normal
 planning loop and run in observe-only mode. It should log the original proposal
@@ -235,10 +227,3 @@ The benchmark should compare the current system, passive observation,
 uncertainty-gated evaluation, and a later bounded recovery canary. Route
 utility, PDMS, completion, collisions, departures, deadlock, false alerts,
 warning lead, tool calls, and latency should be reported over repeated runs.
-
-## Feedback requested
-
-The main question is whether uncertainty should play this advisory role in
-AgenticDriving. If so, the team should confirm the target failure labels, the
-planner families to calibrate, and the evidence required before enabling an
-active response.
