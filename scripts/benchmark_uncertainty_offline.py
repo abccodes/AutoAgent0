@@ -59,6 +59,12 @@ def _serializable(result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _format_optional(value: Any, format_spec: str, suffix: str = "") -> str:
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return "n/a"
+    return f"{value:{format_spec}}{suffix}"
+
+
 def _analyzer_provenance() -> Dict[str, Any]:
     source_paths = [
         "autoagent0/calibration/features.py",
@@ -111,7 +117,7 @@ def render_report(
         f"- Routes: **{df['run_id'].nunique()}**",
         f"- Scene groups: **{df['scene_group'].nunique()}** (all variants kept in one fold)",
         f"- Label horizon: **{args.horizon_steps} frames**",
-        "- Primary historical target: future evaluator plan-risk (NC/DAC), not observed physical contact",
+        "- Primary target: future evaluator plan-risk (NC/DAC), not observed physical contact",
         "- Alert rates use recorded simulator timestamps (CLI frame duration is only a fallback)",
         f"- CV: **{args.folds} folds**, seed **{args.seed}**",
         f"- Operating coverage selected on training folds: **{args.min_coverage:.0%}-{args.max_coverage:.0%}**",
@@ -135,7 +141,7 @@ def render_report(
         "",
         "## NC provenance",
         "",
-        f"The legacy corpus has **{len(historical_nc)} NC-failing frames** without exact failure-type metadata. "
+        f"The corpus has **{len(historical_nc)} NC-failing frames** without exact failure-type metadata. "
         f"Object-box replay finds overlap evidence in **{object_overlap}**; the other **{background_only}** "
         "have no object overlap and therefore imply a static-background NC failure. An overlap is evidence, "
         "not an exact cause, because static geometry may fail earlier in the same plan.",
@@ -147,7 +153,7 @@ def render_report(
     lines.extend([
         "",
         "Post-selection trajectory features are diagnostic only and are excluded from predictive models. "
-        "Historical accepted frames usually retained one selected trajectory rather than the raw proposal set.",
+        "Raw-proposal models are evaluated only when the proposal telemetry is available.",
         "",
         "## Fixed legacy policies",
         "",
@@ -234,29 +240,44 @@ def render_report(
         "",
         "## Findings",
         "",
-        f"- The fixed low-intra/low-cross quadrant gives **{quadrant_fixed['lift']:.2f}x lift** "
-        f"at **{quadrant_fixed['coverage']:.1%} coverage**, with median lead **{quadrant_fixed['median_lead_steps']:.1f} frames**.",
+        f"- The fixed low-intra/low-cross quadrant gives **{_format_optional(quadrant_fixed['lift'], '.2f', 'x')} lift** "
+        f"at **{_format_optional(quadrant_fixed['coverage'], '.1%')} coverage**, with median lead "
+        f"**{_format_optional(quadrant_fixed['median_lead_steps'], '.1f')} frames**.",
         f"- Adding the mode-count fallback lowers predictive precision from **{quadrant_fixed['precision']:.3f}** "
         f"to **{fallback_fixed['precision']:.3f}**.",
-        f"- The recoverable feature model has AUROC **{recoverable_model['auroc']:.3f}** versus "
-        f"**{legacy_model['auroc']:.3f}** for legacy features; saved score and temporal features do not improve this corpus.",
-        f"- Recoverable-model fold AUROC is **{recoverable_model['fold_auroc_mean']:.3f}+/-"
-        f"{recoverable_model['fold_auroc_std']:.3f}**, indicating substantial scene-family variation.",
+        f"- The recoverable feature model has AUROC **{_format_optional(recoverable_model['auroc'], '.3f')}** versus "
+        f"**{_format_optional(legacy_model['auroc'], '.3f')}** for legacy features; saved score and temporal features do not improve this corpus.",
+        f"- Recoverable-model fold AUROC is **{_format_optional(recoverable_model['fold_auroc_mean'], '.3f')}+/-"
+        f"{_format_optional(recoverable_model['fold_auroc_std'], '.3f')}**, indicating substantial scene-family variation.",
         f"- The three most responsive scene families account for **{top_three_detected}/{all_detected}** "
         "fixed-quadrant event detections, so the signal is concentrated rather than broadly generalizing.",
     ])
-    lines.extend([
+    interpretation_limits = [
         "",
         "## Interpretation limits",
         "",
-        "- This corpus was collected under the legacy active uncertainty policy, not passive observation.",
         "- Historical `nc` is a counterfactual collision check over the saved multi-step plan; it is not physical contact at that frame.",
-        "- Historical frames were saved before `env.step`, so terminal collisions and route departures were not retained. New runs record `execution_outcome`.",
         "- Static evaluator NC uses `scene.ply`, whose export is broader than the opacity-filtered point set used for physical simulator collision. Background-only NC may therefore be conservative evaluator risk rather than contact risk.",
         "- The target is future evaluator plan-risk, not the current AgenticDriving `coverage_rescue` target.",
-        "- Saved trajectory pools are post-selection and cannot reproduce the current proposal geometry exactly.",
         "- Results support feature screening and experiment design; they do not replace a held-out live A/B run.",
-    ])
+    ]
+    if df["execution_outcome_available"].mean() >= 0.95:
+        interpretation_limits.append(
+            "- This corpus uses the current post-step execution-outcome contract, including terminal collision and route-departure state."
+        )
+    else:
+        interpretation_limits.append(
+            "- Most frames predate post-step outcome capture, so terminal collisions and route departures may be absent."
+        )
+    if df["raw_candidate_count"].notna().mean() >= 0.95:
+        interpretation_limits.append(
+            "- Full raw proposal telemetry is available, so raw-proposal models use the planner distribution rather than a post-selection pool."
+        )
+    else:
+        interpretation_limits.append(
+            "- Saved trajectory pools are post-selection and cannot reproduce the current proposal geometry exactly."
+        )
+    lines.extend(interpretation_limits)
     return "\n".join(lines) + "\n"
 
 

@@ -70,6 +70,22 @@ if len(candidates) != 1:
     raise SystemExit(
         f"processed scene {scene_name!r} {detail} under model_base={model_base!r}"
     )
+
+for index, control in enumerate(scenario.get("plan_list", []) or []):
+    if len(control) < 6:
+        missing.append(f"plan_list[{index}] has no dynamic model path")
+        continue
+    model_ref = os.path.expanduser(str(control[5]))
+    model_dir = model_ref if os.path.isabs(model_ref) else os.path.join(realcar_path, model_ref)
+    if not os.path.isdir(model_dir):
+        missing.append(f"plan_list[{index}] dynamic model directory: {model_dir}")
+        continue
+    for filename in ("gs.pth", "wlh.json"):
+        path = os.path.join(model_dir, filename)
+        if not os.path.isfile(path):
+            missing.append(f"plan_list[{index}] dynamic model file: {path}")
+if missing:
+    raise SystemExit("missing HUGSIM assets:\n- " + "\n- ".join(missing))
 print(f"scene_model_path={candidates[0]}")
 PY
 }
